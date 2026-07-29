@@ -1,0 +1,96 @@
+# Stage 1: gpustack-builder
+# WICHTIGSTE ÄNDERUNG: Wir verwenden rocm/rocm-terminal:6.4 als Basis,
+# um die Python-Version (3.10) an die finale Stufe anzugleichen.
+FROM rocm/rocm-terminal:6.4 AS gpustack-builder
+
+# Wechsle zu root, um Build-Tools zu installieren.
+USER root
+
+# Installieren der notwendigen Build-Tools für gpustack.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    git \
+    curl \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /
+RUN git clone https://github.com/gpustack/gpustack.git
+WORKDIR /gpustack
+
+# Führe den Build mit den Python-Tools des Systems aus.
+RUN make build
+
+# -----------------------------------------------------------------------------
+
+# Stage 2: Final Production Image
+# Diese Stufe bleibt dieselbe, aber die Python-Versionen passen jetzt zusammen.
+FROM rocm/rocm-terminal:6.4
+
+USER root
+
+# Installieren der notwendigen Laufzeitabhängigkeiten.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    tini \
+    iproute2 \
+    libvulkan1 \
+    vulkan-tools \
+    e2fsprogs \
+    unzip \
+    curl \
+    libpcre3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# WICHTIGSTE ÄNDERUNG: Pip selbst aktualisieren, um den Resolver-Bug zu beheben.
+RUN pip3 install --upgrade pip
+
+# Kopiere die von dir erstellten Mock-Dateien in den Container.
+COPY mock_rocminfo.txt /mock_rocminfo.txt
+COPY mock_rocm_smi.json /mock_rocm_smi.json
+
+# Überschreibe die fehlerhaften ROCm-Befehle mit unseren Mock-Skripten.
+RUN echo '#!/bin/sh' > /usr/local/bin/rocminfo && \
+    echo 'cat /mock_rocminfo.txt' >> /usr/local/bin/rocminfo && \
+    chmod +x /usr/local/bin/rocminfo
+
+# Stelle sicher, dass AUCH rocm-smi gemockt wird.
+RUN echo '#!/bin/sh' > /usr/local/bin/rocm-smi && \
+    echo 'cat /mock_rocm_smi.json' >> /usr/local/bin/rocm-smi && \
+    chmod +x /usr/local/bin/rocm-smi
+
+# Kopiere das gpustack-Wheel (jetzt für Python 3.10 gebaut).
+COPY --from=gpustack-builder /gpustack/dist/*.whl /tmp/
+
+# Installiere das Wheel (jetzt kompatibel).
+RUN for f in /tmp/*.whl; do pip3 install --no-cache-dir "$f"; done && rm /tmp/*.whl
+
+# Führe den Tool-Download aus, um die Verzeichnisstruktur zu erstellen.
+RUN gpustack download-tools
+
+# Lade die offizielle Vulkan-Version von llama-box herunter.
+RUN curl -Lo /tmp/llama-box-vulkan.zip https://github.com/gpustack/llama-box/releases/download/v0.0.169/dl-llama-box-linux-amd64-vulkan-1.4.zip && \
+    mkdir -p /tmp/vulkan_release && \
+    unzip /tmp/llama-box-vulkan.zip -d /tmp/vulkan_release/ && \
+    rm /tmp/llama-box-vulkan.zip
+
+# Erstelle das Entrypoint-Skript, das die Vulkan-Binärdateien injiziert.
+RUN echo '#!/bin/sh' > /entrypoint.sh && \
+    echo 'set -e' >> /entrypoint.sh && \
+    echo 'LLAMA_BOX_PATH_DIR="/usr/local/lib/python3.10/dist-packages/gpustack/third_party/bin/llama-box/llama-box-default"' >> /entrypoint.sh && \
+    echo 'echo "Ensuring custom llama-box is in place..."' >> /entrypoint.sh && \
+    echo 'chattr -i "$LLAMA_BOX_PATH_DIR/llama-box" || true' >> /entrypoint.sh && \
+    echo 'echo "Replacing default backend with custom Vulkan build..."' >> /entrypoint.sh && \
+    echo 'cp -a /tmp/vulkan_release/. "$LLAMA_BOX_PATH_DIR/"' >> /entrypoint.sh && \
+    echo 'echo "Setting immutable flag to prevent overwrite..."' >> /entrypoint.sh && \
+    echo 'chattr +i "$LLAMA_BOX_PATH_DIR/llama-box"' >> /entrypoint.sh && \
+    echo 'echo "Starting gpustack..."' >> /entrypoint.sh && \
+    echo 'exec tini -- gpustack start "$@"' >> /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+# Setze den neuen Entrypoint.
+ENTRYPOINT ["/entrypoint.sh"]

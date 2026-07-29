@@ -1,0 +1,31 @@
+# ==============================================================================
+# DOCUMENT ANALYSIS MODULE (Apache Tika)
+# ==============================================================================
+# Profile: tika
+# REST API for text and metadata extraction from 1000+ file formats.
+# Internal-only — no Caddy, no Authentik. Access via Docker DNS: tika:9998
+# ==============================================================================
+services:
+  tika:
+    image: apache/tika:3.3.1.0-full
+    profiles: ["tika"]
+    container_name: tika
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${TIKA_PORT:-9998}:9998"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9998/tika"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge

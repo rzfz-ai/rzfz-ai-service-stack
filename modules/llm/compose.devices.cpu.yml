@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# Hardware overlay: CPU-only inference.
+# Used by the `llm` profile when HARDWARE=cpu in .env. Activated via
+# COMPOSE_FILE=docker-compose.yml:llm/compose.devices.cpu.yml.
+#
+# CPU inference uses a llama.cpp CPU runner image (default
+# ghcr.io/ggml-org/llama.cpp:server) registered as the custom backend
+# `llama-cpp-cpu-custom` by llm/gpustack/init-backends.py.
+#
+# rc6.5 (M023-S05.3 fleet test): gpustack v2.1.x ships a SINGLE unified image
+# on Docker Hub — `gpustack/gpustack:v2.1.<patch>` — with no per-hardware
+# tag variants (no `-cpu`, no `-rocm`, no `-cuda`). The v0.7.1 era's
+# `-cpu` slim variant was discontinued upstream when v2.x consolidated the
+# image. So this overlay does NOT override the image tag; it inherits the
+# unified `${GPUSTACK_VERSION:-v2.1.2}` from llm/compose.yml.
+#
+# F-RC5-6 (open): the unified image carries CUDA/ROCm wheels even on a CPU
+# host, which keeps the Trivy CVE Critical count higher than ideal for a
+# CPU-only deployment. Pre-rc6.5 this overlay attempted a slim variant via
+# `image: gpustack/gpustack:${GPUSTACK_VERSION:-v2.1.2}-cpu`, but that tag
+# does not exist on Docker Hub — `docker compose pull` returned `manifest
+# unknown` and the upgrade aborted. Tracked as carry-over CVE-debt; mitigation
+# requires a separate slim image (custom build, multi-stage) which is out of
+# scope for the 2026.05-ga release. AMD / NVIDIA overlays inherit the same
+# unified image (they need the GPU bundles anyway).
+
+services:
+  gpustack:
+    labels:
+      razzfazz.hardware: "cpu"

@@ -1,0 +1,30 @@
+{# M026 S09 #2: razzfazz-help now extends the shared razz_base.html shell
+   from razzfazz_common (resolved via the ChoiceLoader installed by
+   create_base_app). Per-page chrome (header + nav) and the help-specific
+   CSS overrides are the only things this template still owns.
+
+   Child templates (index.html, admin.html, viewer.html) continue to
+   override `{% block content %}` and `{% block extra_head %}` directly —
+   those names are inherited straight from razz_base.html through this
+   intermediate template, so no child rename was needed.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai Help Center{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='help-overrides.css') }}">
+{% endblock %}
+
+{% block header %}
+    <div class="header">
+        <img src="{{ url_for('static', filename='media/razzfazz-ai_help_icon.png') }}" alt="Help Icon">
+        <h1>rzfz.ai Help Center</h1>
+        <div class="header-nav">
+            <a href="{{ url_for('index') }}" class="{% if request.path == '/' %}active{% endif %}">📚 Documentation</a>
+            {% if is_admin %}
+            <a href="{{ url_for('admin_cache') }}" class="{% if '/admin' in request.path %}active{% endif %}">⚙️ Cache Admin</a>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

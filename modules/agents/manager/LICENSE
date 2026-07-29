@@ -1,0 +1,32 @@
+razzfazz.ai Service Stack — Subscription-licensed component (rzfz.ai Stack, BSL 1.1)
+SPDX-License-Identifier: BUSL-1.1
+
+Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+Licensed Work: razzfazz-agent-manager, Version 2026.07-ga.
+
+This component is a subscription-licensed part of the razzfazz.ai Service Stack (rzfz.ai Stack, BSL 1.1) and is
+licensed under the Business Source License 1.1 — SOURCE-AVAILABLE, not an
+OSI-approved open source licence. You may copy, modify and make non-production
+use of it freely. This version (2026.07-ga) converts to the Apache License 2.0
+on the Change Date 2029-07-08.
+
+Additional Use Grant:
+  You may make commercial production use of the Licensed Work provided you
+  hold a valid rzfz.ai Subscription. A subscription that was valid at
+  the time a given version of the Licensed Work was released permanently
+  authorizes commercial production use of that version; expiry or non-renewal
+  does not revoke that right for versions covered during your subscription
+  term. Renewal provides newer licensed versions and security releases.
+  Private, personal, and non-production use (evaluation, development, testing,
+  and internal non-production purposes) is permitted at no charge and without
+  any subscription or registration.
+  No license key is required to run the Licensed Work; this grant governs
+  permitted use, not technical function. The subscription is a license, not a
+  service; installation, updates, and support are separate offerings.
+  [Content approved by rzfz.ai; exact wording pending final legal review.]
+
+Full licence text, the filled BSL parameters, and the rolling Change-Date
+schedule:
+  - repository root: LICENSE-BSL
+  - config/manifests/license-dates.json
+Licensing contact: licensing@razzfazz.ai

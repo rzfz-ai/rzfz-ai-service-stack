@@ -1,0 +1,194 @@
+/* Personal MCP Manager — razzfazz.ai branded styles.
+ *
+ * #36/#61 — deliberately mirrors the Agent Manager's design tokens
+ * (modules/agents/manager/app/static/styles.css) so the combined
+ * "MCP & Agent Manager" experience is visually seamless between the
+ * agents dashboard (agents.<domain>) and this MCP UI (mcp.<domain>):
+ * same razzfazz red accent, light glass-card theme, header/nav, buttons,
+ * badges and spacing. Keep these :root tokens in sync with the Agent
+ * Manager. */
+:root {
+    --bg-image: url('/branding/razzfazz.png');
+    --accent: #CD1719;
+    --accent-hover: #a31214;
+    --text: #1a1a1a;
+    --text-dim: #555;
+    --card-bg: rgba(255, 255, 255, 0.92);
+    --card-border: rgba(0, 0, 0, 0.08);
+    --header-bg: rgba(255, 255, 255, 0.90);
+    --green: #22c55e;
+    --yellow: #d97706;
+    --red: #dc2626;
+    --blue: #2563eb;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg-image) no-repeat center center fixed;
+    background-size: cover;
+    background-color: #f0f0f0;
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* Header — matches Agent Manager (logo + title left, user right). */
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    background: var(--header-bg);
+    backdrop-filter: blur(8px);
+    border-radius: 12px;
+    padding: 12px 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.logo { height: 32px; }
+header h1 { font-size: 1.4rem; font-weight: 600; color: var(--text); }
+.user-info { display: flex; gap: 12px; align-items: center; color: var(--text-dim); }
+.user-info a { color: var(--accent); text-decoration: none; font-weight: 500; }
+.user-info a:hover { text-decoration: underline; }
+
+.intro { color: var(--text-dim); max-width: 70ch; margin-bottom: 24px; }
+
+/* Cards grid */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.card {
+    background: var(--card-bg);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--card-border);
+    border-left: 4px solid var(--accent);
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+.card h2 { font-size: 1.1rem; color: var(--text); }
+.card .desc { color: var(--text-dim); font-size: 0.9rem; }
+.card .model, .card .status { font-size: 0.85rem; color: var(--text-dim); }
+
+/* Credential / proxy status badges (readable, CI-consistent — never bare colors). */
+.badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+}
+.badge.ok { background: rgba(34,197,94,0.12); color: var(--green); }
+.badge.none { background: rgba(0,0,0,0.06); color: var(--text-dim); }
+.badge.state-running { background: rgba(34,197,94,0.12); color: var(--green); }
+.badge.state-provisioning { background: rgba(37,99,235,0.12); color: var(--blue); }
+.badge.state-stopped { background: rgba(217,119,6,0.12); color: var(--yellow); }
+.badge.state-error { background: rgba(220,38,38,0.12); color: var(--red); }
+
+/* Credential form */
+.cred-form { display: flex; flex-direction: column; gap: 8px; }
+.cred-form label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    font-weight: 500;
+}
+.cred-form input {
+    width: 100%;
+    margin-top: 4px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    background: white;
+    color: var(--text);
+    font-size: 0.9rem;
+}
+.cred-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(205,23,25,0.12);
+}
+
+/* Buttons — mirror Agent Manager .btn family. */
+.btn {
+    padding: 6px 16px;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    background: white;
+    color: var(--text);
+    text-decoration: none;
+    font-weight: 500;
+    transition: all 0.15s;
+    display: inline-block;
+}
+.btn:hover { border-color: var(--text-dim); background: #f5f5f5; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-secondary { background: #f0f0f0; border-color: #ddd; }
+.btn-secondary:hover { background: #e8e8e8; }
+.btn-danger { background: transparent; border-color: var(--red); color: var(--red); }
+.btn-danger:hover { background: rgba(220,38,38,0.06); }
+.btn-warn { background: transparent; border-color: var(--yellow); color: var(--yellow); }
+.btn-warn:hover { background: rgba(217,119,6,0.06); }
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+.card-divider { border: 0; border-top: 1px solid var(--card-border); margin: 4px 0; }
+
+/* Inline status toast (#61 fix — replaces window.alert() + the old empty
+ * orange bar). Hidden by default; JS fills .status-toast with readable text
+ * and adds an .ok / .err modifier before revealing it. It NEVER shows without
+ * text, so a blank colored bar can no longer render. */
+.status-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%) translateY(12px);
+    max-width: 90vw;
+    padding: 10px 20px;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 1000;
+}
+.status-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.status-toast.ok { background: #16a34a; color: #fff; }
+.status-toast.err { background: var(--accent); color: #fff; }
+
+/* Footer */
+footer {
+    margin-top: 32px;
+    padding-top: 16px;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+/* Error page */
+.error-card {
+    background: var(--card-bg);
+    border: 1px solid var(--red);
+    border-left: 4px solid var(--red);
+    border-radius: 12px;
+    padding: 20px;
+    color: var(--red);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+@media (max-width: 768px) {
+    .cards { grid-template-columns: 1fr; }
+    header { flex-direction: column; gap: 12px; align-items: flex-start; }
+}

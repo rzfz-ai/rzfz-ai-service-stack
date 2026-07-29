@@ -1,0 +1,102 @@
+# ==============================================================================
+# OpenTelemetry Collector — BASE config (razzfazz observability profile)
+# ==============================================================================
+# Runs in the `otel-collector` container (otel/opentelemetry-collector-contrib).
+# This is the piece #193 found MISSING: the openlit all-in-one image ships NO
+# OTLP receiver, so spans emitted by modules/chat/pipelines/openlit_filter.py to
+# :4318 had nothing to land in. This collector IS that receiver, and it writes
+# the otel_traces / otel_logs / otel_metrics tables into ClickHouse
+# (`create_schema: true`) — the schema OpenLIT's UI reads. Fixes #193.
+#
+# LOG EXPORT (#197) is NOT here — it lives in a SEPARATE overlay config
+# (otel-collector-logs-export.yaml) that is merged on top of this file ONLY when
+# OTEL_LOG_EXPORT_ENABLED=true. When disabled, the disabled overlay is merged
+# instead (a no-op), so an unset external endpoint can NEVER break collector
+# startup on an air-gapped box. Two-file merge = the opt-in switch.
+#
+# Env substitution: the collector supports ${env:VAR:-default}. All env comes
+# from ../../.env via the container's env_file (see observability/compose.yml).
+# ==============================================================================
+
+receivers:
+  # OTLP in from openlit_filter.py (gRPC 4317) and any SDK auto-instrumentation
+  # (HTTP 4318). Container-network only — never host-published (loopback rule).
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Hard memory ceiling so a trace burst can't OOM the 512m container. Absolute
+  # MiB (not %) so it's deterministic regardless of host RAM.
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 400
+    spike_limit_mib: 100
+  # Batch before the ClickHouse write to keep part-count down — the module's
+  # clickhouse-config.xml tightened parts_to_throw_insert to 300 after the
+  # 2026-05-17 prod merge-storm, so batched inserts matter.
+  batch:
+    timeout: 5s
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+
+exporters:
+  # Trace/metric/log store OpenLIT reads. Native protocol (9000), db `openlit`,
+  # tables otel_traces/otel_logs/otel_metrics. create_schema builds them on
+  # first write (fixes #193 point 2 — "never creates the trace schema").
+  # TTL is intentionally left to the ClickHouse init script
+  # (configs/clickhouse-init.sh applies `MODIFY TTL ... INTERVAL <days> DAY`)
+  # so retention stays expressed in DAYS (OBSERVABILITY_RETENTION_DAYS) and the
+  # existing acceptance test keeps matching toIntervalDay(N).
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
+    database: openlit
+    username: ${env:CLICKHOUSE_USER:-default}
+    password: ${env:CLICKHOUSE_PASSWORD:-}
+    create_schema: true
+    logs_table_name: otel_logs
+    traces_table_name: otel_traces
+    metrics_table_name: otel_metrics
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+extensions:
+  # Liveness endpoint (container-network only). No host-publish.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+      # Never emit the collector's own OTLP self-telemetry to the external
+      # target — keep internal noise out of the customer's SIEM.
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    # OpenLIT SDK logs (if any) → ClickHouse. This is the INTERNAL log path.
+    # The #197 EXTERNAL container-log path is a distinct `logs/external`
+    # pipeline added only by the export overlay.
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]

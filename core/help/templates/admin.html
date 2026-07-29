@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{# M026 S07 #2: per-page styles moved to static/help-overrides.css. #}
+
+{% block extra_head %}
+<script>
+function refreshApp(appId, btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Refreshing...';
+    btn.classList.add('refreshing');
+
+    fetch('/api/refresh/' + appId, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                btn.textContent = '⏳ In progress...';
+                // Poll for completion
+                pollStatus(appId, btn);
+            } else {
+                alert('Error: ' + data.message);
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh';
+                btn.classList.remove('refreshing');
+            }
+        })
+        .catch(err => {
+            alert('Network error: ' + err);
+            btn.disabled = false;
+            btn.textContent = '🔄 Refresh';
+            btn.classList.remove('refreshing');
+        });
+}
+
+function refreshAll(btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Refreshing all...';
+
+    fetch('/api/refresh-all', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                // Disable all individual refresh buttons
+                document.querySelectorAll('.refresh-btn').forEach(b => {
+                    b.disabled = true;
+                    b.classList.add('refreshing');
+                });
+                // Start polling
+                pollAllStatus(btn);
+            } else {
+                alert('Error: ' + data.message);
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh All';
+            }
+        });
+}
+
+function pollStatus(appId, btn) {
+    setTimeout(() => {
+        fetch('/api/cache-status')
+            .then(r => r.json())
+            .then(data => {
+                const jobs = data.active_jobs || {};
+                if (appId in jobs) {
+                    pollStatus(appId, btn); // still running
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = '🔄 Refresh';
+                    btn.classList.remove('refreshing');
+                    location.reload();
+                }
+            });
+    }, 3000);
+}
+
+function pollAllStatus(btn) {
+    setTimeout(() => {
+        fetch('/api/cache-status')
+            .then(r => r.json())
+            .then(data => {
+                const jobs = data.active_jobs || {};
+                if (Object.keys(jobs).length > 0) {
+                    pollAllStatus(btn);
+                } else {
+                    location.reload();
+                }
+            });
+    }, 5000);
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="panel">
+    <h2>⚙️ Documentation Cache Management</h2>
+
+    <div class="toolbar">
+        <div class="connection-status">
+            <span class="status-indicator {% if online %}status-online{% else %}status-offline{% endif %}"></span>
+            {% if online %}
+                Internet: Connected
+            {% else %}
+                Internet: Offline — cache refresh unavailable
+            {% endif %}
+        </div>
+        <button class="button {% if not online %}button-secondary{% endif %}" 
+                onclick="refreshAll(this)"
+                {% if not online %}disabled title="No internet connection"{% endif %}>
+            🔄 Refresh All
+        </button>
+    </div>
+
+    <table class="cache-table">
+        <thead>
+            <tr>
+                <th>Application</th>
+                <th>License</th>
+                <th>Status</th>
+                <th>Last Updated</th>
+                <th>Size</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for app in apps %}
+            <tr>
+                <td>
+                    <div class="app-name">
+                        {% if app.get('icon') %}
+                        <img src="{{ app.icon }}" alt="">
+                        {% endif %}
+                        {{ app.name }}
+                    </div>
+                </td>
+                <td><span class="badge badge-info">{{ app.license }}</span></td>
+                <td>
+                    {% if app.get('refreshing') %}
+                        <span class="badge badge-warning">⏳ Refreshing...</span>
+                    {% elif app.get('local_doc') %}
+                        <span class="badge badge-info">📄 Local page</span>
+                    {% elif app.get('cached') %}
+                        <span class="badge badge-success">✓ Cached</span>
+                    {% elif app.get('error') %}
+                        <span class="badge" style="background:#f8d7da;color:#721c24;">✗ Error</span>
+                    {% else %}
+                        <span class="badge badge-warning">⚠ Not cached</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if app.get('last_updated') %}
+                        {{ app.last_updated[:16].replace('T', ' ') }} UTC
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if app.get('size_mb', 0) > 0 %}
+                        {{ app.size_mb }} MB
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if app.get('local_doc') %}
+                    <span style="color:#666;font-size:12px;">Ships with the box</span>
+                    {% else %}
+                    <button class="refresh-btn"
+                            onclick="refreshApp('{{ app.id }}', this)"
+                            {% if not online or app.get('refreshing') %}disabled{% endif %}>
+                        {% if app.get('refreshing') %}
+                            ⏳ In progress...
+                        {% else %}
+                            🔄 Refresh
+                        {% endif %}
+                    </button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if app.get('error') %}
+            <tr>
+                <td colspan="6" style="color:#721c24;font-size:13px;padding-left:40px;">
+                    Error: {{ app.error }}
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <p class="auto-refresh-note">
+        💡 Documentation is cached locally for offline access. Use "Refresh" to download the latest version.
+    </p>
+</div>
+{% endblock %}

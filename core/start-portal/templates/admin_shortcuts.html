@@ -1,0 +1,158 @@
+{# razzfazz-shortcuts admin CRUD (#185, 2026.08 P1). Super-Admin only — gated
+   server-side in app.py (admin_shortcuts route) AND behind the #68 source-IP
+   anchor. Redirect kinds only in P1 (owui_persona / dify_chat / cloud_link);
+   the in-portal kinds land in P2/P3. All writes carry the per-endpoint CSRF
+   token (the portal's global CSRF is deliberately off). #}
+{% extends "razz_base.html" %}
+
+{% block title %}Manage Shortcuts - rzfz.ai{% endblock %}
+
+{% block favicon %}/static/favicon.png{% endblock %}
+
+{% block extra_head %}
+{# The JS reads the CSRF token from here and sends it as X-CSRF-Token. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/start-portal-overrides.css">
+<style>
+  .sc-wrap { max-width: 1100px; margin: 0 auto; padding: 24px; display: grid;
+             grid-template-columns: 1fr 1fr; gap: 28px; }
+  .sc-wrap h2 { color: var(--accent, #CD1719); margin: 0 0 12px; }
+  .sc-col { min-width: 0; }
+  .sc-list { list-style: none; margin: 0; padding: 0; }
+  .sc-list li { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+                border: 1px solid rgba(128,128,128,.25); border-radius: 8px; margin-bottom: 8px; }
+  .sc-list .sc-emoji { font-size: 22px; }
+  .sc-list .sc-meta { flex: 1; min-width: 0; }
+  .sc-list .sc-meta small { opacity: .7; display: block; }
+  .sc-list button { margin-left: 4px; }
+  .sc-off { opacity: .5; }
+  .sc-form label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  .sc-form input[type=text], .sc-form input[type=number],
+  .sc-form textarea, .sc-form select {
+      width: 100%; box-sizing: border-box; padding: 8px 10px;
+      border: 1px solid rgba(128,128,128,.4); border-radius: 6px; font: inherit; }
+  .sc-form textarea { min-height: 70px; resize: vertical; }
+  .sc-form .sc-inline { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .sc-form .sc-inline input[type=checkbox] { width: auto; }
+  .sc-groups { max-height: 150px; overflow-y: auto; border: 1px solid rgba(128,128,128,.4);
+               border-radius: 6px; padding: 8px; }
+  .sc-groups label { font-weight: 400; margin: 2px 0; display: flex; gap: 6px; align-items: center; }
+  .sc-actions { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .sc-actions button { padding: 9px 16px; border-radius: 6px; border: 0; cursor: pointer;
+                       font: inherit; font-weight: 600; }
+  .sc-btn-primary { background: var(--accent, #CD1719); color: #fff; }
+  .sc-btn-ghost { background: transparent; border: 1px solid rgba(128,128,128,.5) !important; }
+  .sc-members, .sc-test { margin-top: 14px; padding: 10px 12px; border-radius: 8px;
+                          background: rgba(128,128,128,.1); font-size: 14px; word-break: break-word; }
+  .sc-members ul { margin: 6px 0 0; padding-left: 18px; }
+  .sc-hint { font-size: 13px; opacity: .7; margin-top: 4px; }
+  @media (max-width: 820px) { .sc-wrap { grid-template-columns: 1fr; } }
+</style>
+{% endblock %}
+
+{% block layout %}
+<div class="portal-bg">
+  <div class="portal-shell">
+    <header class="portal-header">
+      <div class="portal-header-left">
+        <img class="portal-logo" src="/static/razzfazz-ai-logo.png" alt="razzfazz.ai">
+        <h1 class="portal-title">Manage Shortcuts</h1>
+      </div>
+      <div class="portal-header-right">
+        <a class="portal-change-pw" href="/">&larr; Back to portal</a>
+      </div>
+    </header>
+
+    <div class="sc-wrap">
+      {# ── Existing shortcuts ─────────────────────────────────────────── #}
+      <section class="sc-col">
+        <h2>Shortcuts</h2>
+        <p class="sc-hint">Admins define these; users in the allowed groups see a tile
+          and simply run it. P1 supports redirect shortcuts.</p>
+        <ul id="sc-list" class="sc-list"><li>Loading…</li></ul>
+        <div class="sc-actions">
+          <button type="button" id="sc-new" class="sc-btn-primary">+ New shortcut</button>
+        </div>
+      </section>
+
+      {# ── Editor ─────────────────────────────────────────────────────── #}
+      <section class="sc-col">
+        <h2 id="sc-form-title">New shortcut</h2>
+        <form id="sc-form" class="sc-form" autocomplete="off">
+          <input type="hidden" id="sc-id" value="">
+
+          <label for="sc-title">Title</label>
+          <input type="text" id="sc-title" required maxlength="120">
+
+          <label for="sc-description">Description</label>
+          <input type="text" id="sc-description" maxlength="240">
+
+          <label for="sc-icon">Icon (emoji)</label>
+          <input type="text" id="sc-icon" value="✨" maxlength="8">
+
+          <label for="sc-category">Category</label>
+          <input type="text" id="sc-category" value="Shortcuts" maxlength="60">
+
+          <label for="sc-sort">Sort order</label>
+          <input type="number" id="sc-sort" value="100" min="0" max="9999">
+
+          <label for="sc-kind">Type</label>
+          <select id="sc-kind">
+            <option value="owui_persona">Open WebUI persona (redirect)</option>
+            <option value="dify_chat">Dify workflow chat (redirect)</option>
+            <option value="cloud_link">Cloud AI deep-link (redirect)</option>
+          </select>
+
+          {# kind-specific fields — JS shows exactly one group #}
+          <div class="sc-kind-fields" data-kind="owui_persona">
+            <label for="sc-model-id">Model / pipe id</label>
+            <input type="text" id="sc-model-id" placeholder="qwen3.6">
+          </div>
+          <div class="sc-kind-fields" data-kind="dify_chat" hidden>
+            <label for="sc-app-path">Dify app path</label>
+            <input type="text" id="sc-app-path" placeholder="chat/AbC123">
+          </div>
+          <div class="sc-kind-fields" data-kind="cloud_link" hidden>
+            <label for="sc-provider">Provider</label>
+            <select id="sc-provider">
+              <option value="claude">Claude</option>
+              <option value="chatgpt">ChatGPT</option>
+              <option value="gemini">Gemini</option>
+            </select>
+            <label for="sc-prompt-tmpl">Prompt template</label>
+            <textarea id="sc-prompt-tmpl" placeholder="Summarise this for {{ '{{user.name}}' }}: "></textarea>
+            <p class="sc-hint">Whitelisted variables: {{ '{{user.name}}' }}, {{ '{{user.email}}' }},
+              {{ '{{user.username}}' }}, {{ '{{user.groups}}' }}, {{ '{{date}}' }},
+              {{ '{{domain}}' }}, {{ '{{input}}' }}.</p>
+          </div>
+
+          <label>Access — allowed groups</label>
+          <div id="sc-groups" class="sc-groups"><em>Loading groups…</em></div>
+          <p class="sc-hint">Tick <strong>any</strong> to allow every signed-in user.</p>
+
+          <div class="sc-inline">
+            <input type="checkbox" id="sc-enabled" checked>
+            <label for="sc-enabled" style="margin:0;font-weight:400;">Enabled</label>
+          </div>
+
+          <div class="sc-actions">
+            <button type="submit" class="sc-btn-primary">Save</button>
+            <button type="button" id="sc-test" class="sc-btn-ghost">Test as me</button>
+            <button type="button" id="sc-cancel" class="sc-btn-ghost">Cancel</button>
+          </div>
+        </form>
+
+        <div id="sc-members" class="sc-members" hidden></div>
+        <div id="sc-test-result" class="sc-test" hidden></div>
+      </section>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="/static/admin-shortcuts.js"></script>
+{% endblock %}

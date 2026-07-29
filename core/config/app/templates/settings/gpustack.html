@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block page_title %}GPUStack{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>GPUStack</h1>
+    <p class="page-subtitle">Configure LLM inference server mode and API access</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{# rc6.9: cross-link the LLM Runtime toggle. The Settings → GPUStack
+   page configures the server-side bits (mode, API key, master URL).
+   Switching between v0.7.1 and v2.1.x is a different axis (compose
+   profiles + image), so we point operators to the dedicated panel. #}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    <strong>LLM Runtime:</strong>
+    Switch between stable GPUStack v0.7.1 and experimental v2.1.x.
+    <a href="{{ url_for('modules.llm_runtime') }}" class="btn btn-sm btn-secondary" style="margin-left:0.5rem">
+        Manage LLM runtime &rarr;
+    </a>
+</div>
+<form method="POST" class="settings-form">
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">GPUStack Mode</div>
+        <div class="form-group">
+            <label><input type="radio" name="mode" value="standalone" {% if config.mode == 'standalone' %}checked{% endif %} onchange="toggleWorker()"> Standalone (local only, binds to 127.0.0.1)</label>
+        </div>
+        <div class="form-group">
+            <label><input type="radio" name="mode" value="master" {% if config.mode == 'master' %}checked{% endif %} onchange="toggleWorker()"> Master (accepts external worker nodes)</label>
+        </div>
+        <div class="form-group">
+            <label><input type="radio" name="mode" value="worker" {% if config.mode == 'worker' %}checked{% endif %} onchange="toggleWorker()"> Worker (connects to remote master)</label>
+        </div>
+    </div>
+
+    <!-- Worker fields -->
+    <div id="worker-section" class="detail-section" style="margin-bottom:1rem;{% if config.mode != 'worker' %}display:none{% endif %}">
+        <div class="detail-section-title">Worker Configuration</div>
+        <div class="form-group">
+            <label class="form-label">Master server URL</label>
+            <input type="text" name="master_url" value="{{ config.master_url }}" class="apply-input" placeholder="http://master-ip:9090">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Master auth token</label>
+            <input type="password" name="master_token" class="apply-input" placeholder="Enter master token">
+        </div>
+    </div>
+
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">API Key</div>
+        <p style="font-size:0.8125rem;color:var(--color-text-secondary);margin-bottom:0.5rem">
+            Status:
+            {% if config.api_key_set %}
+                <span class="badge badge-production">Configured</span>
+                <span style="font-family:monospace">{{ config.api_key_masked }}</span>
+                {# rc6.7 #11: clipboard copy of the full key. Page is Authentik-gated
+                   to admins; the on-screen value stays masked. #}
+                <button type="button"
+                        class="btn-icon"
+                        title="Copy full API key to clipboard"
+                        style="background:none;border:none;cursor:pointer;padding:0 0.25rem;font-size:1rem;vertical-align:middle"
+                        data-api-key="{{ config.api_key_full }}"
+                        onclick="copyApiKeyToClipboard(this)">📋</button>
+                <span id="api-key-copy-status" style="font-size:0.75rem;color:var(--color-text-muted);margin-left:0.25rem"></span>
+            {% else %}
+                <span class="badge badge-experimental">Not set</span>
+            {% endif %}
+        </p>
+        <div class="form-group">
+            <label class="form-label">API Key (leave empty to keep current)</label>
+            <input type="text" name="api_key" class="apply-input" placeholder="gpustack_xxxxxxxx...">
+        </div>
+    </div>
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn btn-primary">Save & Apply</button>
+    </div>
+</form>
+<script>
+function toggleWorker() {
+    document.getElementById('worker-section').style.display =
+        document.querySelector('input[name="mode"]:checked').value === 'worker' ? '' : 'none';
+}
+
+// rc6.7 #11: clipboard copy for the GPUStack API key.
+// Async clipboard API requires a secure context (HTTPS or localhost). Falls
+// back to the legacy execCommand approach for older browsers / mixed-context.
+function copyApiKeyToClipboard(btn) {
+    const key = btn.dataset.apiKey || '';
+    const status = document.getElementById('api-key-copy-status');
+    if (!key) {
+        if (status) { status.textContent = 'no key set'; setTimeout(() => status.textContent = '', 2000); }
+        return;
+    }
+    const showCopied = () => {
+        if (status) { status.textContent = '✓ copied'; setTimeout(() => status.textContent = '', 2000); }
+    };
+    const showFailed = (msg) => {
+        if (status) { status.textContent = '⚠ ' + (msg || 'copy failed'); setTimeout(() => status.textContent = '', 4000); }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(key).then(showCopied).catch(e => showFailed(e.message));
+        return;
+    }
+    // Fallback: legacy execCommand via a hidden textarea.
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = key;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        ok ? showCopied() : showFailed('execCommand returned false');
+    } catch (e) {
+        showFailed(e.message);
+    }
+}
+</script>
+{% endblock %}

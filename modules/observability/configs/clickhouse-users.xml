@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse USERS overrides for the razzfazz observability profile.
+  Mounted as /etc/clickhouse-server/users.d/zz-razzfazz-network.xml at boot.
+  Named `zz-...` so it sorts LAST in users.d and wins the merge over the
+  image-generated default-user.xml.
+
+  Why this file exists (#193, point 3):
+  The `otel-collector` container connects to ClickHouse over the native
+  protocol (clickhouse:9000) as the `default` user to create the otel_*
+  schema and write spans. #193 found the `default` user effectively locked
+  to localhost, so a SEPARATE container got 401/refused over the docker
+  network and OpenLIT's dashboard stayed empty. This override explicitly
+  allows the default user to authenticate from the docker bridge network.
+
+  Security posture: ClickHouse's 8123/9000 are expose-only (compose), never
+  host-published, so they are reachable ONLY from other containers on the
+  internal docker network, exactly like postgres/valkey. So `::/0` here means
+  "any container on the internal network", not "the internet". A password
+  (CLICKHOUSE_PASSWORD, minted by razzfazz-init.sh) is still required.
+-->
+<clickhouse>
+    <users>
+        <default>
+            <!-- Allow auth from the docker bridge network (container to
+                 container), not just localhost. Mirrors the upstream default
+                 users.xml networks stanza; re-asserted here so an
+                 image-generated default-user.xml cannot narrow it to
+                 localhost and lock out the collector. -->
+            <networks replace="replace">
+                <ip>::/0</ip>
+            </networks>
+        </default>
+    </users>
+    <profiles>
+        <default>
+            <!-- Per-query cap (belongs in users.d per the note in
+                 clickhouse-config.xml): stop one runaway query OOM-killing
+                 the 6g container. 2 GiB leaves headroom for merges + OS cache. -->
+            <max_memory_usage>2000000000</max_memory_usage>
+        </default>
+    </profiles>
+</clickhouse>

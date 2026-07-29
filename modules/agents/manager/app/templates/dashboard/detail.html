@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ instance.type_display_name }} - Settings</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+</head>
+<body>
+<div class="container">
+    <header>
+        <div class="header-left">
+            <img src="/branding/razzfazz-ai-logo.png" alt="razzfazz.ai" class="logo">
+            <a href="{{ url_for('dashboard.index') }}" style="color: var(--text-dim); text-decoration: none;">&larr; Agents</a>
+            <h1>{{ instance.type_display_name }}</h1>
+            <span class="badge {{ instance.state }}">{{ instance.state }}</span>
+        </div>
+    </header>
+
+    <section class="detail-panel">
+        <h2>Status</h2>
+        <table class="detail-table">
+            <tr><td>Instance ID</td><td><code style="font-size:11px">{{ instance.id }}</code></td></tr>
+            <tr><td>Container</td><td><code style="font-size:11px">{{ instance.container_name }}</code></td></tr>
+            <tr><td>State</td><td>{{ instance.state }}</td></tr>
+            <tr><td>Image Version</td><td><code>{{ instance.image_version or '(unknown — pre-M030 launch)' }}</code></td></tr>
+            <tr><td>Created</td><td>{{ instance.created_at }}</td></tr>
+            {% if instance.last_upgraded_at %}
+            <tr><td>Last Upgraded</td><td>{{ instance.last_upgraded_at }}</td></tr>
+            {% endif %}
+            {% if instance.started_at %}
+            <tr><td>Started</td><td>{{ instance.started_at }}</td></tr>
+            {% endif %}
+            {% if instance.stopped_at %}
+            <tr><td>Stopped</td><td>{{ instance.stopped_at }}</td></tr>
+            {% endif %}
+            <tr><td>Last Accessed</td><td>{{ instance.last_accessed }}</td></tr>
+            {% if stats %}
+            <tr><td>Memory</td><td>{{ stats.mem_usage_mb }} / {{ stats.mem_limit_mb }} MB ({{ stats.mem_percent }}%)</td></tr>
+            {% endif %}
+            {% if instance.error_message %}
+            <tr><td>Error</td><td class="error">{{ instance.error_message }}</td></tr>
+            {% endif %}
+        </table>
+    </section>
+
+    {% if instance.state == 'running' %}
+    <section class="detail-panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h2 style="margin-bottom: 0;">Terminal</h2>
+            <button class="btn btn-secondary" id="btn-term" onclick="toggleTerminal()">Open Terminal</button>
+        </div>
+        <div id="terminal-container" style="display: none; border-radius: 8px; overflow: hidden;"></div>
+    </section>
+    {% endif %}
+
+    {% if logs %}
+    <section class="detail-panel">
+        <h2>Logs (last 200 lines)</h2>
+        <pre class="logs">{{ logs }}</pre>
+    </section>
+    {% endif %}
+
+    {# M030-S2: Lifecycle (non-destructive, reversible) — separated from
+       Danger Zone so Start/Stop don't sit next to Delete Instance. #}
+    <section class="detail-panel">
+        <h2>Lifecycle</h2>
+        <div style="display: flex; gap: 8px;">
+            {% if instance.state == 'running' %}
+            <button class="btn btn-secondary" onclick="agentAction('stop', '{{ instance.id }}')">Stop Instance</button>
+            {# ga.2 (#219): in-place restart — bounces a wedged agent without losing data. #}
+            <button class="btn btn-secondary" onclick="if(confirm('Restart this agent?\n\nThe process is bounced (a few seconds of downtime); your chats, skills, files, and config are preserved. Any in-progress task is interrupted.\n\nContinue?')) agentAction('restart', '{{ instance.id }}')">Restart Instance</button>
+            {% elif instance.state == 'stopped' %}
+            <button class="btn btn-primary" onclick="agentAction('start', '{{ instance.id }}')">Start Instance</button>
+            {% endif %}
+        </div>
+    </section>
+
+    {# ga.2 (#219): Update / Reinstall — the non-destructive image refresh.
+       The dashboard card shows an "Update" button only when a newer catalog
+       version is detected; this Settings-page control is ALSO available when
+       already current so a user can reinstall/refresh onto the current image
+       (picks up a rebuilt `:latest` tag — coding-tools/paperclip — and re-
+       injects freshly-resolved env). Backed by /api/upgrade, which preserves
+       all named volumes (chats/skills/files/config). Hidden while an instance
+       is provisioning/error — those states have no stable container to
+       recreate cleanly from here. #}
+    {% if instance.state in ('running', 'stopped') %}
+    <section class="detail-panel">
+        <h2>Update</h2>
+        {% if update_available %}
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            A newer version is available:
+            <code>{{ instance.image_version }}</code> &rarr; <code>{{ update_target_version }}</code>.
+            Updating preserves your chats, skills, files and config; the agent is briefly stopped (~30s downtime).
+        </p>
+        <button class="btn btn-primary"
+                onclick="if(confirm('Update this agent to {{ update_target_version }}?\n\nYour chats, skills, files, and config are preserved. The agent will be briefly stopped (~30s downtime).\n\nContinue?')) agentAction('upgrade', '{{ instance.id }}')">Update to {{ update_target_version }}</button>
+        {% else %}
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            This agent is on <code>{{ instance.image_version or catalog_version or 'the current version' }}</code> (the latest available).
+            You can reinstall/refresh it onto the current image — this picks up a rebuilt image and re-applies configuration
+            without losing your chats, skills, files or config (~30s downtime).
+        </p>
+        <button class="btn btn-secondary"
+                onclick="if(confirm('Reinstall / refresh this agent onto the current image?\n\nYour chats, skills, files, and config are preserved. The agent will be briefly stopped (~30s downtime).\n\nContinue?')) agentAction('upgrade', '{{ instance.id }}')">Reinstall / Refresh</button>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {# #36 / PR #84 — per-instance Memory control. Tier-gated: only power/admin
+       see the editable picker (the SERVER enforces the same gate in
+       provisioner.update_memory, and refuses a change that would exceed the
+       global budget / per-user cap). Applied live via `docker update` on a
+       running container; persisted so it survives a recreate. #}
+    {% if can_set_memory %}
+    <section class="detail-panel">
+        <h2>Memory</h2>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Current limit: <code>{{ current_mem or '—' }}</code>.
+            {% if instance.state == 'running' %}Changes apply live where possible;{% else %}Changes take effect on next start;{% endif %}
+            a raise that would exceed the shared budget or your personal cap is refused.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <select id="mem-gb-select" style="padding:8px;border-radius:6px;border:1px solid #d1d5db;">
+                {% for gb in mem_presets %}
+                <option value="{{ gb }}" {% if current_mem == (gb ~ 'g') %}selected{% endif %}>{{ gb }} GB</option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-primary" onclick="updateMemory('{{ instance.id }}')">Apply</button>
+            <span id="mem-result" style="font-size:0.85rem;color:var(--text-dim);"></span>
+        </div>
+    </section>
+    {% elif current_mem %}
+    <section class="detail-panel">
+        <h2>Memory</h2>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Memory limit: <code>{{ current_mem }}</code>. Ask an admin to change it.
+        </p>
+    </section>
+    {% endif %}
+
+    {# M030-S2: Danger Zone — Delete moved here (was on the agents
+       overview cards before, where one click would wipe weeks of
+       chats/skills/files). Now requires the user to type the case-
+       sensitive word "Delete" + see a per-agent state-loss list before
+       the confirm button enables. Server-side ?confirm=Delete gate
+       backstops the JS gate (api.py /api/delete/<id>). #}
+    <section class="detail-panel danger-zone" style="border-color:#dc2626;background:#fff1f2;padding:16px;border-radius:8px;border-width:1px;border-style:solid;margin-top:16px;">
+        <h2 style="color:#dc2626;margin-top:0;">⚠ Danger Zone</h2>
+
+        <h3 style="margin-bottom:4px;">Delete Instance</h3>
+        <p style="margin-top:0;color:#374151;">Permanently delete this {{ type_info.display_name if type_info else instance.agent_type }} instance and ALL its personal data:</p>
+
+        <ul style="color:#374151;margin:8px 0 12px 18px;">
+            {# Per-agent state-loss items. Displayed verbatim so the user
+               sees what they're about to lose for THEIR specific agent
+               type. Add bullets per agent as new types ship. #}
+            {% if instance.agent_type == 'moltis' %}
+                <li>All your chats and conversation history</li>
+                <li>Trained skills, agent memory, and code-index</li>
+                <li>Per-user moltis config (TOML overrides, provider keys)</li>
+                <li>API keys you created in moltis (incl. the one OWUI uses)</li>
+                <li>All sandbox files and any generated artifacts</li>
+            {% elif instance.agent_type == 'hermes' %}
+                <li>All your chats with the Hermes agent</li>
+                <li>Workspace files (skills, training notes, projects)</li>
+                <li>Agent memory and personality state (SOUL.md, etc.)</li>
+            {% elif instance.agent_type == 'coding-tools' %}
+                <li>All your code in /workspace</li>
+                <li>opencode session history and chat threads</li>
+                <li>gsd state, task lists, and personal opencode/gsd config</li>
+                <li>Cached models</li>
+            {% elif instance.agent_type == 'openhands' %}
+                <li>All OpenHands conversations and session state</li>
+                <li>Project workspace files</li>
+                <li>OAuth tokens and connected-account credentials</li>
+            {% elif instance.agent_type == 'paperclip' %}
+                <li>All paperclip companies, agents, and their state</li>
+                <li>Generated artifacts and conversation history</li>
+                <li>Per-instance Postgres DB (will be dropped)</li>
+            {% else %}
+                <li>All chats, files, and config for this agent</li>
+                <li>Local databases and runtime state</li>
+            {% endif %}
+        </ul>
+
+        <p style="color:#dc2626;font-weight:600;">This action CANNOT be undone — there is no automatic backup.</p>
+        <p style="color:#374151;font-size:13px;margin-bottom:16px;">If you want a backup first, ask an admin to snapshot this agent's volumes before you continue.</p>
+
+        <p style="color:#374151;margin-bottom:6px;">To confirm, type the word <strong style="font-family:'JetBrains Mono', monospace;">Delete</strong> below (case-sensitive):</p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <input type="text"
+                   id="delete-confirm-input"
+                   placeholder="type Delete"
+                   autocomplete="off"
+                   spellcheck="false"
+                   oninput="onDeleteConfirmInput()"
+                   style="flex:1;padding:8px 12px;border:1px solid #d1d5db;border-radius:4px;font-family:'JetBrains Mono', monospace;max-width:240px;">
+            <button id="delete-confirm-btn"
+                    class="btn btn-danger"
+                    disabled
+                    onclick="confirmAndDeleteInstance('{{ instance.id }}')"
+                    style="opacity:0.4;cursor:not-allowed;">Delete Instance</button>
+        </div>
+        <div id="delete-result" style="margin-top:12px;color:#dc2626;"></div>
+    </section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+function agentAction(action, instanceId) {
+    // M030-S2: Delete must NOT go through this generic helper —
+    // confirmAndDeleteInstance() is the only way (type-to-confirm gate
+    // + ?confirm=Delete query param).
+    if (action === 'delete') {
+        alert('Use the "Delete Instance" button in the Danger Zone — it has the type-to-confirm gate.');
+        return;
+    }
+    fetch('/api/' + action + '/' + instanceId, { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                const msg = data.message || data.error || ('HTTP ' + status);
+                alert(action + ' failed: ' + msg);
+            } else {
+                location.href = '{{ url_for("dashboard.index") }}';
+            }
+        })
+        .catch(err => alert(action + ' failed: ' + err));
+}
+
+// #36 / PR #84 — apply a memory change (server-side tier-gated + budget-checked).
+function updateMemory(instanceId) {
+    const sel = document.getElementById('mem-gb-select');
+    const result = document.getElementById('mem-result');
+    const memGb = parseInt(sel.value, 10);
+    result.textContent = 'Applying…';
+    fetch('/api/memory/' + instanceId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mem_gb: memGb }),
+    })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                result.style.color = '#dc2626';
+                result.textContent = data.message || data.error || ('HTTP ' + status);
+            } else {
+                result.style.color = '';
+                result.textContent = data.message || 'Updated.';
+                setTimeout(() => location.reload(), 1200);
+            }
+        })
+        .catch(err => { result.style.color = '#dc2626'; result.textContent = 'Failed: ' + err; });
+}
+
+// M030-S2: type-to-confirm Delete flow.
+function onDeleteConfirmInput() {
+    const input = document.getElementById('delete-confirm-input');
+    const btn = document.getElementById('delete-confirm-btn');
+    // Case-sensitive exact match — typing the word forces the user to
+    // read what they're confirming. Standard pattern from GitHub repo
+    // deletion, AWS account closure, etc.
+    const matches = (input.value === 'Delete');
+    btn.disabled = !matches;
+    btn.style.opacity = matches ? '1' : '0.4';
+    btn.style.cursor  = matches ? 'pointer' : 'not-allowed';
+}
+
+function confirmAndDeleteInstance(instanceId) {
+    const input = document.getElementById('delete-confirm-input');
+    if (input.value !== 'Delete') {
+        // Defense-in-depth — button shouldn't even be enabled here.
+        alert('Type "Delete" exactly to confirm.');
+        return;
+    }
+    const btn = document.getElementById('delete-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+    const result = document.getElementById('delete-result');
+    result.textContent = '';
+    // Server-side gate: ?confirm=Delete (case-sensitive). Backend
+    // rejects without it (api.py /api/delete/<id>).
+    fetch('/api/delete/' + instanceId + '?confirm=Delete', { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                const msg = data.message || data.error || ('HTTP ' + status);
+                result.textContent = 'Delete failed: ' + msg;
+                btn.disabled = false;
+                btn.textContent = 'Delete Instance';
+            } else {
+                // Success — back to dashboard. Don't show a toast first;
+                // the dashboard reload tells the operator it's gone.
+                location.href = '{{ url_for("dashboard.index") }}';
+            }
+        })
+        .catch(err => {
+            result.textContent = 'Delete failed: ' + err;
+            btn.disabled = false;
+            btn.textContent = 'Delete Instance';
+        });
+}
+
+let term = null;
+let ws = null;
+let termOpen = false;
+
+function toggleTerminal() {
+    const container = document.getElementById('terminal-container');
+    const btn = document.getElementById('btn-term');
+    if (termOpen) {
+        container.style.display = 'none';
+        termOpen = false;
+        btn.textContent = 'Open Terminal';
+        if (ws) { ws.close(); ws = null; }
+        if (term) { term.dispose(); term = null; }
+    } else {
+        container.style.display = 'block';
+        container.style.height = '400px';
+        termOpen = true;
+        btn.textContent = 'Close Terminal';
+        initTerminal();
+    }
+}
+
+function initTerminal() {
+    const container = document.getElementById('terminal-container');
+    container.innerHTML = '';
+
+    term = new Terminal({
+        theme: {
+            background: '#1a1a1a',
+            foreground: '#e0e0e0',
+            cursor: '#CD1719',
+            selectionBackground: '#CD171940',
+        },
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 13,
+        cursorBlink: true,
+        scrollback: 2000,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    fitAddon.fit();
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws/terminal/{{ instance.id }}');
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+    };
+    ws.onmessage = (e) => {
+        term.write(typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data));
+    };
+    ws.onclose = () => {
+        term.write('\r\n\x1b[33m[session ended — click "Open Terminal" to reconnect]\x1b[0m\r\n');
+    };
+    ws.onerror = () => {
+        term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n');
+    };
+
+    term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'input', data}));
+        }
+    });
+
+    // Resize
+    const ro = new ResizeObserver(() => {
+        fitAddon.fit();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+        }
+    });
+    ro.observe(container);
+
+    // Keepalive
+    const keepalive = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'ping'}));
+        } else {
+            clearInterval(keepalive);
+        }
+    }, 45000);
+    ws.addEventListener('close', () => clearInterval(keepalive));
+}
+</script>
+</body>
+</html>

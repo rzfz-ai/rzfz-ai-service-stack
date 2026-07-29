@@ -1,0 +1,84 @@
+/* licenses-overrides.css — razzfazz-licenses container-local styles
+ *
+ * M026 S07 #1: companion to /static/razzfazz-common/razzfazz-base.css.
+ * Holds only the selectors that S06 deliberately left out of the shared
+ * baseline because they diverge from the other Flask UI containers:
+ *   - 12px border-radius on the outer .license-card (shared cards use 8px)
+ *   - the licensed-page footer (white text on the page background)
+ *   - the page background image (licenses is the only UI with one)
+ *   - bespoke .section-title / .license-type / .component-name patterns
+ *     that are only used here.
+ */
+
+body {
+    background: url("/static/media/razzfazz.png") no-repeat center center fixed;
+    background-size: cover;
+    color: var(--razz-text-secondary);
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 Helvetica, Arial, sans-serif;
+}
+
+/* Outer card uses 12px (shared baseline = 8px). Intentional emphasis. */
+.license-card {
+    background: var(--razz-bg-card);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+    padding: 0;
+    margin-bottom: 40px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+h2.section-title {
+    background-color: var(--razz-red);
+    color: #fff;
+    margin: 0;
+    padding: 15px 25px;
+    font-size: 18px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+}
+
+.license-card table { width: 100%; border-collapse: collapse; }
+.license-card td {
+    padding: 15px 25px;
+    border-bottom: 1px solid #eee;
+    vertical-align: middle;
+}
+.license-card tr:last-child td { border-bottom: none; }
+.license-card tr:hover { background-color: var(--razz-red-tint); }
+
+.component-name { font-weight: 600; color: #222; }
+
+.license-type {
+    color: var(--razz-text-secondary);
+    font-family: monospace;
+    background: #eee;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+a {
+    color: var(--razz-red);
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.2s;
+}
+a:hover {
+    color: var(--razz-red-hover);
+    text-decoration: underline;
+}
+
+/* Footer sits on top of the page background image, so white text + shadow. */
+.footer {
+    text-align: center;
+    padding: 40px;
+    color: #fff;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+    font-size: 0.9em;
+}

@@ -1,0 +1,115 @@
+# ==============================================================================
+# COGNEE FRONTEND (Next.js UI) [EXPERIMENTAL]
+# ==============================================================================
+# Builds the upstream cognee-frontend Next.js app from the same upstream tag
+# as the cognee backend image (cognee/cognee:1.0.1 → upstream tag v1.0.1).
+#
+# Upstream does NOT publish a frontend image at GHCR / Docker Hub. The source
+# is shipped under cognee-frontend/ in the topoteretes/cognee monorepo, so we
+# git-clone the tag and build it ourselves (mirrors the paperclip pattern).
+#
+# Strategy:
+#   Stage 1: alpine/git — sparse-checkout cognee-frontend/ at COGNEE_TAG.
+#   Stage 2: node:22-alpine — npm ci (matches upstream's own Dockerfile),
+#            then `next build` for a production bundle and `next start` at
+#            runtime. Upstream's reference Dockerfile uses `next dev` with
+#            turbopack; we deliberately use `next build` + `next start` for
+#            production-grade serving (no on-the-fly compile, no source on
+#            disk after build).
+#
+# Upstream Dockerfile reference (v1.0.1):
+#   https://github.com/topoteretes/cognee/blob/v1.0.1/cognee-frontend/Dockerfile
+#
+# Backend wiring:
+#   The frontend reads NEXT_PUBLIC_LOCAL_API_URL at build time (Next.js inlines
+#   NEXT_PUBLIC_* into the client bundle during `next build`). The .env.template
+#   shipped at v1.0.1 lists NEXT_PUBLIC_BACKEND_API_URL — but that name is NOT
+#   wired anywhere in src/; the actual var the code consults is
+#   NEXT_PUBLIC_LOCAL_API_URL (verified via `grep -r "process.env.NEXT_PUBLIC"
+#   .next/{server,static}` after a build).
+#
+#   We pass the public HOST URL (no `/api` suffix); source paths construct
+#   `${BASE}/api/v1/...` themselves. The cognee FastAPI backend mounts routes
+#   under /api/v1/... (cognee/api/client.py), so a browser request to
+#   https://<cognee>/api/v1/auth/login lands directly on the right backend
+#   handler. Caddy forwards the entire /api/* path through to cognee:8000
+#   unchanged (no prefix rewrite needed).
+# ==============================================================================
+
+# Pin must match cognee backend tag (modules/knowledge/cognee/Dockerfile: FROM cognee/cognee:1.4.0).
+ARG COGNEE_TAG=v1.4.0
+
+# ── Stage 1: sparse-checkout cognee-frontend/ at the pinned tag ───────────────
+FROM alpine/git:v2.47.2 AS source
+ARG COGNEE_TAG
+WORKDIR /src
+RUN git clone --depth 1 --branch ${COGNEE_TAG} --filter=blob:none --sparse \
+        https://github.com/topoteretes/cognee.git . \
+ && git sparse-checkout set cognee-frontend \
+ && test -f cognee-frontend/package.json \
+ && test -f cognee-frontend/Dockerfile
+
+# ── Stage 2: build + run the Next.js app ──────────────────────────────────────
+FROM node:22-alpine AS runtime
+WORKDIR /app
+
+# Manifests first for layer caching.
+# NOTE: upstream's package-lock.json is out-of-sync with package.json at v1.0.1
+# (npm ci fails with "lock file's brace-expansion@2.0.2 does not satisfy ...").
+# We use `npm install --no-audit --no-fund` so npm reconciles the tree fresh.
+# Trade-off: dependency versions are not byte-stable across builds, but the
+# upstream tag IS stable, so semver ranges resolve to the same major.minor.
+COPY --from=source /src/cognee-frontend/package.json /src/cognee-frontend/package-lock.json ./
+RUN npm install --no-audit --no-fund \
+ && npm rebuild lightningcss
+
+# Source
+COPY --from=source /src/cognee-frontend/src ./src
+COPY --from=source /src/cognee-frontend/public ./public
+COPY --from=source /src/cognee-frontend/next.config.mjs ./
+COPY --from=source /src/cognee-frontend/postcss.config.mjs ./
+COPY --from=source /src/cognee-frontend/tsconfig.json ./
+COPY --from=source /src/cognee-frontend/types ./types
+
+# NOTE: v1.0.1 had a case-sensitivity bug in src/ui/app/index.ts (imports
+# "./logo/…"/"./loading/…" while the on-disk dirs were "Logo/"/"Loading/",
+# so `next build` failed on Linux) and we sed-patched the imports to match.
+# Upstream FIXED this in a later release: at v1.4.0 the imports AND the on-disk
+# dirs are both lowercase ("./logo/"/"./loading/"), i.e. internally consistent
+# and already Linux-safe. Re-applying the old sed here would REWRITE the
+# correct lowercase imports to "./Logo/"/"./Loading/", which no longer match
+# the lowercase dirs → "Module not found: Can't resolve './Logo/TextLogo'".
+# So the patch is REMOVED for the 1.4.0 line. If reverting to <1.0.9, restore
+# the sed from git history.
+
+# Force type-check + ESLint failures to be non-fatal for the production build,
+# matching the upstream dev posture (`next dev` ignores both). Upstream's own
+# next.config.mjs at v1.4.0 is empty (`{}`), so this overwrite drops nothing.
+# Guards our build against upstream type/lint regressions that never fire under
+# `next dev` (e.g. the v1.0.1 ApiKeysList.tsx type error — since removed upstream).
+RUN cat > next.config.mjs <<'NEXT_EOF'
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  typescript: { ignoreBuildErrors: true },
+  eslint: { ignoreDuringBuilds: true },
+};
+export default nextConfig;
+NEXT_EOF
+
+# Build the production bundle.
+# v1.0.1 source actually reads `NEXT_PUBLIC_LOCAL_API_URL` (the .env.template
+# in the repo lists `NEXT_PUBLIC_BACKEND_API_URL` but that var is unused —
+# `grep -roE "process.env.NEXT_PUBLIC_[A-Z_]+" .next/server` confirms only
+# NEXT_PUBLIC_LOCAL_API_URL is wired in the SSR bundle). The base URL the
+# code uses is just the host root (NO `/api` suffix); the source paths add
+# `/api/v1/...` themselves. So pass `https://<COGNEE_DOMAIN>` (host only).
+ARG NEXT_PUBLIC_LOCAL_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_LOCAL_API_URL=${NEXT_PUBLIC_LOCAL_API_URL}
+RUN npm run build
+
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+EXPOSE 3000
+
+CMD ["npm", "run", "start"]

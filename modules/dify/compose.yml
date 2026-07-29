@@ -1,0 +1,421 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# DIFY MODULE (LLM Application Platform)
+# ==============================================================================
+# Profile: dify
+# Dependencies: postgres, valkey, caddy (from core)
+# Config: .env (global), .env.dify (module specific)
+# ==============================================================================
+services:
+
+  # ==========================================
+  # Dify Init: Permissions setup
+  # ==========================================
+  dify-init-permissions:
+    image: busybox:1.37
+    container_name: dify-init-permissions
+    profiles: ["dify"]
+    command:
+      - sh
+      - -c
+      - |
+        FLAG_FILE="/app/storage/.init_permissions"
+        if [ -f "$${FLAG_FILE}" ]; then
+          echo "Permissions already initialized. Exiting."
+          exit 0
+        fi
+        echo "Initializing permissions for /app/storage"
+        chown -R 1001:1001 /app/storage && touch "$${FLAG_FILE}"
+        echo "Permissions initialized. Exiting."
+    volumes:
+      - dify-app-data:/app/storage
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+
+  # ==========================================
+  # Dify API: Main Backend Service
+  # ==========================================
+  dify-api:
+    image: langgenius/dify-api:${DIFY_VERSION:-1.16.0}
+    profiles: ["dify"]
+    container_name: dify-api
+    restart: always
+    mem_limit: 2g
+    # Surgical patches for known upstream bugs (see dify/patches/entrypoint-wrapper.sh).
+    # The wrapper exec's the upstream /entrypoint.sh once patches are applied.
+    entrypoint: ["/bin/bash", "/dify-patches/entrypoint-wrapper.sh"]
+    environment:
+      # Verweis auf Core Services via Hostname
+      - DB_HOST=postgres
+      - REDIS_HOST=valkey
+      - PGVECTOR_HOST=postgres
+      # SSRF via Caddy Forward Proxy
+      - SSRF_PROXY_HTTP_URL=http://caddy:8195
+      - SSRF_PROXY_HTTPS_URL=http://caddy:8195
+      # rc6.7 #30: Dify uses LOG_TZ to timestamp all server-side log
+      # output AND the Console "Run history" UI. The upstream default
+      # in .env.dify is `LOG_TZ=UTC`, which makes the UI show times an
+      # hour or two off the operator's wall clock. Override here from
+      # the global TZ in .env so Dify follows the box's timezone.
+      # Set in `environment:` (not .env.dify) because env_file does no
+      # variable interpolation — `LOG_TZ=${TZ}` would land verbatim.
+      - LOG_TZ=${TZ:-UTC}
+      # Mode
+      - MODE=api
+      # URLs (Dynamic interpolation from .env)
+      - CONSOLE_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - APP_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - WEB_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - FILES_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - TRIGGER_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      # CORS & Security (F-020: restrict CORS to own domain instead of wildcard)
+      - WEB_API_CORS_ALLOW_ORIGINS=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - CONSOLE_CORS_ALLOW_ORIGINS=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - COOKIE_DOMAIN=${MAIN_DOMAIN:-razzfazz-box}
+      # Internal Service Discovery
+      # rc6.7 #27: dify-api/worker MUST hit marketplace.dify.ai directly through
+      # the SSRF forward proxy (caddy:8195). The earlier `caddy:8196` reverse-
+      # proxy override broke plugin downloads — caddy:8196 resolves to a 172.16.x
+      # IP, which the SSRF :8195 ACL denies (RFC1918 block) → 403 → empty body
+      # treated as a "package" → "not a valid difypkg".
+      - MARKETPLACE_API_URL=${MARKETPLACE_API_URL:-https://marketplace.dify.ai}
+      - INTERNAL_FILES_URL=http://dify-api:5001
+      # Secrets
+      - SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      - DB_PASSWORD=${DIFY_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      - REDIS_PASSWORD=${VALKEY_PASSWORD:-}
+      # ga.1 (day-1): the pgvector VECTOR_STORE connects as PGVECTOR_USER, which is
+      # the docker superuser (POSTGRES_USER) — see config/.env.dify.example — so its
+      # password MUST be POSTGRES_PASSWORD. The old ${DIFY_DB_PASSWORD:-…} paired the
+      # docker user with the dify_user password, so every pgvector write (dataset
+      # indexing) failed with "password authentication failed for user docker" and
+      # the dataset entered the 'error' state. DB_PASSWORD above stays as-is: the
+      # MAIN DB connects as DIFY_DB_USER (dify_user) → DIFY_DB_PASSWORD.
+      - PGVECTOR_PASSWORD=${POSTGRES_PASSWORD:-}
+      # 2026.05-ga.3: dify-api validates plugin-daemon callbacks on /inner
+      # endpoints against INNER_API_KEY_FOR_PLUGIN; without this it falls
+      # back to the upstream default "inner-api-key" which doesn't match
+      # plugin-daemon's PLUGIN_DIFY_INNER_API_KEY → callbacks 401. Same
+      # secret on both sides. (This was already broken on 1.14.0; 1.14.1
+      # just surfaced the env var in upstream .env.example.)
+      - INNER_API_KEY_FOR_PLUGIN=${PLUGIN_DIFY_INNER_API_KEY:-}
+    depends_on:
+      dify-init-permissions:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+      caddy:
+        condition: service_started
+    volumes:
+      - dify-app-data:/app/storage
+      - ./patches:/dify-patches:ro
+    networks:
+      - default
+      - ssrf_proxy_network
+      # #36 security-review — join egress-controlled coding-agents net (sandboxed coding agents reach dify-api by name).
+      - coding-agents
+    env_file:
+      - ../../.env
+      - ../../.env.dify
+
+  # ==========================================
+  # Dify Worker: Background Tasks
+  # ==========================================
+  # MODE=worker listens on ALL Celery queues by default, including:
+  #   - workflow_based_app_execution (Dify 1.13+, required for streaming & HITL resume)
+  #   - api_token (Dify 1.13+, required if ENABLE_API_TOKEN_LAST_USED_UPDATE_TASK=true)
+  dify-worker:
+    image: langgenius/dify-api:${DIFY_VERSION:-1.16.0}
+    profiles: ["dify"]
+    container_name: dify-worker
+    restart: always
+    mem_limit: 2g
+    entrypoint: ["/bin/bash", "/dify-patches/entrypoint-wrapper.sh"]
+    environment:
+      - DB_HOST=postgres
+      - REDIS_HOST=valkey
+      - PGVECTOR_HOST=postgres
+      - SSRF_PROXY_HTTP_URL=http://caddy:8195
+      - SSRF_PROXY_HTTPS_URL=http://caddy:8195
+      # rc6.7 #30: see dify-api block — keep worker's log timezone
+      # aligned with the box's TZ (and the api/beat services).
+      - LOG_TZ=${TZ:-UTC}
+      - MODE=worker
+      - CONSOLE_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - APP_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - WEB_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - FILES_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      # F-020: restrict CORS to own domain instead of wildcard
+      - WEB_API_CORS_ALLOW_ORIGINS=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - CONSOLE_CORS_ALLOW_ORIGINS=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - COOKIE_DOMAIN=${MAIN_DOMAIN:-razzfazz-box}
+      - MARKETPLACE_API_URL=${MARKETPLACE_API_URL:-https://marketplace.dify.ai}
+      - INTERNAL_FILES_URL=http://dify-api:5001
+      - SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      - DB_PASSWORD=${DIFY_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      - REDIS_PASSWORD=${VALKEY_PASSWORD:-}
+      # ga.1 (day-1): the pgvector VECTOR_STORE connects as PGVECTOR_USER, which is
+      # the docker superuser (POSTGRES_USER) — see config/.env.dify.example — so its
+      # password MUST be POSTGRES_PASSWORD. The old ${DIFY_DB_PASSWORD:-…} paired the
+      # docker user with the dify_user password, so every pgvector write (dataset
+      # indexing) failed with "password authentication failed for user docker" and
+      # the dataset entered the 'error' state. DB_PASSWORD above stays as-is: the
+      # MAIN DB connects as DIFY_DB_USER (dify_user) → DIFY_DB_PASSWORD.
+      - PGVECTOR_PASSWORD=${POSTGRES_PASSWORD:-}
+      # 2026.05-ga.3: see dify-api comment above — plugin-daemon → API
+      # auth secret. Worker reads it for the same /inner endpoints.
+      - INNER_API_KEY_FOR_PLUGIN=${PLUGIN_DIFY_INNER_API_KEY:-}
+    depends_on:
+      dify-init-permissions:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    volumes:
+      - dify-app-data:/app/storage
+      - ./patches:/dify-patches:ro
+    networks:
+      - default
+      - ssrf_proxy_network
+    env_file:
+      - ../../.env
+      - ../../.env.dify
+
+  # ==========================================
+  # Dify Worker Beat: Task Scheduler
+  # ==========================================
+  dify-worker-beat:
+    image: langgenius/dify-api:${DIFY_VERSION:-1.16.0}
+    restart: always
+    profiles: ["dify"]
+    container_name: dify-worker-beat
+    entrypoint: ["/bin/bash", "/dify-patches/entrypoint-wrapper.sh"]
+    environment:
+      - DB_HOST=postgres
+      - REDIS_HOST=valkey
+      - PGVECTOR_HOST=postgres
+      - SSRF_PROXY_HTTP_URL=http://caddy:8195
+      - SSRF_PROXY_HTTPS_URL=http://caddy:8195
+      # rc6.7 #30: see dify-api block.
+      - LOG_TZ=${TZ:-UTC}
+      - MODE=beat
+      - CONSOLE_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - APP_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - WEB_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - FILES_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      - DB_PASSWORD=${DIFY_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      - REDIS_PASSWORD=${VALKEY_PASSWORD:-}
+      # ga.1 (day-1): the pgvector VECTOR_STORE connects as PGVECTOR_USER, which is
+      # the docker superuser (POSTGRES_USER) — see config/.env.dify.example — so its
+      # password MUST be POSTGRES_PASSWORD. The old ${DIFY_DB_PASSWORD:-…} paired the
+      # docker user with the dify_user password, so every pgvector write (dataset
+      # indexing) failed with "password authentication failed for user docker" and
+      # the dataset entered the 'error' state. DB_PASSWORD above stays as-is: the
+      # MAIN DB connects as DIFY_DB_USER (dify_user) → DIFY_DB_PASSWORD.
+      - PGVECTOR_PASSWORD=${POSTGRES_PASSWORD:-}
+      # 2026.05-ga.3: see dify-api comment — beat scheduler reads the
+      # same key for any /inner endpoint it dispatches to.
+      - INNER_API_KEY_FOR_PLUGIN=${PLUGIN_DIFY_INNER_API_KEY:-}
+    depends_on:
+      dify-init-permissions:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    volumes:
+      - ./patches:/dify-patches:ro
+    networks:
+      - default
+      - ssrf_proxy_network
+    env_file:
+      - ../../.env
+      - ../../.env.dify
+
+  # ==========================================
+  # Dify Web: Frontend
+  # ==========================================
+  dify-web:
+    build:
+      # #68 de-vendor: the Dify web source is NO LONGER vendored. The build
+      # context is now just this module dir (Dockerfile + patches/); the
+      # Dockerfile clones the Dify monorepo at DIFY_VERSION and builds the
+      # frontend. Only the Dockerfile + patches/ + DIFY-LICENSE ship.
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - DIFY_VERSION=${DIFY_VERSION:-1.16.0}
+        - NEXT_PUBLIC_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+        - NEXT_PUBLIC_CONSOLE_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+        - NEXT_PUBLIC_APP_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+        - NEXT_PUBLIC_COOKIE_DOMAIN=1
+        - CONSOLE_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+        - APP_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["dify"]
+    container_name: dify-web
+    restart: always
+    environment:
+      - HOSTNAME=0.0.0.0
+      # Dify 1.15 (#26): NEW required topology key. The web (Next.js) server
+      # does its server-side Console fetches against SERVER_CONSOLE_API_URL.
+      # Upstream default is `http://api:5001`, which does NOT resolve in our
+      # topology — our backend container is `dify-api`, not `api`. Without this
+      # override the Console's SSR calls fail (blank/errored Console). Set it to
+      # the in-cluster dify-api address (dify-web and dify-api share the default
+      # net). Static literal (no ${…}) so it is also safe to carry in .env.dify.
+      - SERVER_CONSOLE_API_URL=http://dify-api:5001
+      - CONSOLE_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - APP_API_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - CONSOLE_WEB_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - APP_WEB_URL=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      # F-020: restrict CORS to own domain instead of wildcard
+      - WEB_API_CORS_ALLOW_ORIGINS=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - CONSOLE_CORS_ALLOW_ORIGINS=https://${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      - AMPLITUDE_API_KEY=${AMPLITUDE_API_KEY:-}
+      - SENTRY_DSN=${WEB_SENTRY_DSN:-}
+      - NEXT_TELEMETRY_DISABLED=${NEXT_TELEMETRY_DISABLED:-1}
+      - TEXT_GENERATION_TIMEOUT_MS=${TEXT_GENERATION_TIMEOUT_MS:-60000}
+      - CSP_WHITELIST=${CSP_WHITELIST:-}
+      - ALLOW_EMBED=${ALLOW_EMBED:-false}
+      - ALLOW_UNSAFE_DATA_SCHEME=${ALLOW_UNSAFE_DATA_SCHEME:-false}
+      - MARKETPLACE_API_URL=${MARKETPLACE_API_URL:-https://marketplace.dify.ai}
+      - MARKETPLACE_URL=${MARKETPLACE_URL:-https://marketplace.dify.ai}
+      - TOP_K_MAX_VALUE=${TOP_K_MAX_VALUE:-}
+      - INDEXING_MAX_SEGMENTATION_TOKENS_LENGTH=${INDEXING_MAX_SEGMENTATION_TOKENS_LENGTH:-}
+      - PM2_INSTANCES=${PM2_INSTANCES:-2}
+      - LOOP_NODE_MAX_COUNT=${LOOP_NODE_MAX_COUNT:-100}
+      - MAX_TOOLS_NUM=${MAX_TOOLS_NUM:-10}
+      - MAX_PARALLEL_LIMIT=${MAX_PARALLEL_LIMIT:-10}
+      - MAX_ITERATIONS_NUM=${MAX_ITERATIONS_NUM:-99}
+      - MAX_TREE_DEPTH=${MAX_TREE_DEPTH:-50}
+      - ENABLE_WEBSITE_JINAREADER=${ENABLE_WEBSITE_JINAREADER:-true}
+      - ENABLE_WEBSITE_FIRECRAWL=${ENABLE_WEBSITE_FIRECRAWL:-true}
+      - ENABLE_WEBSITE_WATERCRAWL=${ENABLE_WEBSITE_WATERCRAWL:-true}
+    env_file:
+      - ../../.env
+      - ../../.env.dify
+    networks:
+      - default
+      - ssrf_proxy_network
+
+  # ==========================================
+  # Dify Sandbox: Code Execution Environment
+  # ==========================================
+  dify-sandbox:
+    image: langgenius/dify-sandbox:${DIFY_SANDBOX_VERSION:-0.2.15}
+    profiles: ["dify"]
+    container_name: dify-sandbox
+    restart: always
+    mem_limit: 512m
+    environment:
+      API_KEY: ${SANDBOX_API_KEY:-dify-sandbox}
+      GIN_MODE: ${SANDBOX_GIN_MODE:-release}
+      WORKER_TIMEOUT: ${SANDBOX_WORKER_TIMEOUT:-15}
+      ENABLE_NETWORK: ${SANDBOX_ENABLE_NETWORK:-true}
+      # Proxy via Caddy
+      HTTP_PROXY: http://caddy:8195
+      HTTPS_PROXY: http://caddy:8195
+      SANDBOX_PORT: ${SANDBOX_PORT:-8194}
+      # dify-sandbox 0.2.15 ships python at /opt/python/bin/python3 but its
+      # default /conf/config.yaml points python_path at /usr/local/bin/python3,
+      # so every code node fails with 'fork/exec .../python3: no such file'.
+      # Override the path here (source-persistent across all boxes).
+      PYTHON_PATH: ${SANDBOX_PYTHON_PATH:-/opt/python/bin/python3}
+      PIP_MIRROR_URL: ${PIP_MIRROR_URL:-}
+    volumes:
+      - dify-sandbox-dependencies:/dependencies
+      - dify-sandbox-conf:/conf
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8194/health"]
+    env_file:
+      - ../../.env
+      - ../../.env.dify
+    networks:
+      - ssrf_proxy_network
+  
+  # ==========================================
+  # Dify Plugin Daemon: Plugin Management
+  # ==========================================
+  dify-plugin-daemon:
+    image: langgenius/dify-plugin-daemon:${DIFY_PLUGIN_VERSION:-0.6.4-local}
+    profiles: ["dify"]
+    container_name: dify-plugin-daemon
+    restart: always
+    environment:
+      DB_DATABASE: ${DB_PLUGIN_DATABASE:-dify_plugin}
+      DIFY_INNER_API_URL: http://dify-api:5001
+      SERVER_PORT: ${PLUGIN_DAEMON_PORT:-5002}
+      SERVER_KEY: ${PLUGIN_DAEMON_KEY:-lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi}
+      MAX_PLUGIN_PACKAGE_SIZE: ${PLUGIN_MAX_PACKAGE_SIZE:-52428800}
+      PPROF_ENABLED: ${PLUGIN_PPROF_ENABLED:-false}
+      DIFY_INNER_API_KEY: ${PLUGIN_DIFY_INNER_API_KEY:-QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1}
+      PLUGIN_REMOTE_INSTALLING_HOST: ${PLUGIN_DEBUGGING_HOST:-0.0.0.0}
+      PLUGIN_REMOTE_INSTALLING_PORT: ${PLUGIN_DEBUGGING_PORT:-5033}
+      PLUGIN_WORKING_PATH: ${PLUGIN_WORKING_PATH:-/app/storage/cwd}
+      FORCE_VERIFYING_SIGNATURE: ${FORCE_VERIFYING_SIGNATURE:-true}
+      PYTHON_ENV_INIT_TIMEOUT: ${PLUGIN_PYTHON_ENV_INIT_TIMEOUT:-120}
+      PLUGIN_MAX_EXECUTION_TIMEOUT: ${PLUGIN_MAX_EXECUTION_TIMEOUT:-600}
+      PLUGIN_STDIO_BUFFER_SIZE: ${PLUGIN_STDIO_BUFFER_SIZE:-1024}
+      PLUGIN_STDIO_MAX_BUFFER_SIZE: ${PLUGIN_STDIO_MAX_BUFFER_SIZE:-5242880}
+      PIP_MIRROR_URL: ${PIP_MIRROR_URL:-}
+      PLUGIN_STORAGE_TYPE: ${PLUGIN_STORAGE_TYPE:-local}
+      PLUGIN_STORAGE_LOCAL_ROOT: ${PLUGIN_STORAGE_LOCAL_ROOT:-/app/storage}
+      PLUGIN_INSTALLED_PATH: ${PLUGIN_INSTALLED_PATH:-plugin}
+      PLUGIN_PACKAGE_CACHE_PATH: ${PLUGIN_PACKAGE_CACHE_PATH:-plugin_packages}
+      PLUGIN_MEDIA_CACHE_PATH: ${PLUGIN_MEDIA_CACHE_PATH:-assets}
+      PLUGIN_STORAGE_OSS_BUCKET: ${PLUGIN_STORAGE_OSS_BUCKET:-}
+      # Secrets from .env
+      # Override both DB_USERNAME and DB_PASSWORD: .env.dify ships these as
+      # ${DIFY_DB_USER}/${DIFY_DB_PASSWORD} (the dify-api-shared user), which
+      # own dify_db but NOT dify_plugin_db. The plugin daemon needs to auth
+      # as dify_plugin_user against the dedicated dify_plugin_db. Without the
+      # DB_USERNAME override the daemon panics at db.Init with
+      # "password authentication failed for user dify_user".
+      DB_USERNAME: ${DIFY_PLUGIN_DB_USER:-${POSTGRES_USER:-docker}}
+      DB_PASSWORD: ${DIFY_PLUGIN_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      REDIS_HOST: valkey
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${VALKEY_PASSWORD:-}
+    ports:
+      # F-008: Bind to localhost only — plugin debugging port should not be externally reachable
+      - "127.0.0.1:${EXPOSE_PLUGIN_DEBUGGING_PORT:-5033}:${PLUGIN_DEBUGGING_PORT:-5033}"
+    volumes:
+      - dify-plugin-daemon:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    env_file:
+      - ../../.env
+      - ../../.env.dify
+    networks:
+      - default
+
+# ==========================================
+# Volumes & Networks (Referenced)
+# ==========================================
+volumes:
+  dify-app-data:
+  dify-sandbox-dependencies:
+  dify-sandbox-conf:
+  dify-plugin-daemon:
+  
+networks:
+  ssrf_proxy_network:
+    driver: bridge
+    internal: true
+  # #36 security-review — shared egress-controlled net (declared in
+  # core/compose.yml). Compose merges the identical `name:`-keyed declaration.
+  coding-agents:
+    name: coding-agents
+    driver: bridge

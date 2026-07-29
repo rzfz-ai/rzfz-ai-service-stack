@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block page_title %}Log Snapshots{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Log Snapshots</h1>
+    <p class="page-subtitle">{{ snapshots | length }} snapshot{{ 's' if snapshots | length != 1 else '' }} available</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+<div style="display:flex;gap:0.5rem;margin-bottom:1rem">
+    <form method="POST" action="{{ url_for('logs.create') }}">
+        <button type="submit" class="btn btn-primary">Create Snapshot</button>
+    </form>
+</div>
+
+<div class="detail-section full-width" style="margin-bottom:1rem">
+    <div class="detail-section-title">Snapshots</div>
+    {% if snapshots %}
+    <table class="container-table">
+        <thead><tr><th>Filename</th><th>Size</th><th>Actions</th></tr></thead>
+        <tbody>
+            {% for s in snapshots %}
+            <tr>
+                <td><code>{{ s.filename }}</code></td>
+                <td>{{ s.size_mb }} MB</td>
+                <td>
+                    <div style="display:flex;gap:0.25rem;align-items:center">
+                        <a href="{{ url_for('logs.download', filename=s.filename) }}" class="btn btn-sm btn-secondary">Download</a>
+                        <button class="btn btn-sm btn-secondary" onclick="sendToSupport('{{ s.filename }}')">Send</button>
+                        <form method="POST" action="{{ url_for('logs.delete') }}" style="margin:0">
+                            <input type="hidden" name="filename" value="{{ s.filename }}">
+                            <button type="submit" class="btn btn-sm btn-secondary" onclick="return confirm('Delete?')">Delete</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="padding:1rem;color:var(--color-text-muted)">No log snapshots. Create one to collect container logs, system info, and the audit log.</p>
+    {% endif %}
+</div>
+
+<!-- Send to support -->
+<div class="detail-section">
+    <div class="detail-section-title">Send to Support</div>
+    <p style="font-size:0.8125rem;color:var(--color-text-secondary);margin-bottom:0.75rem">
+        Create a new log snapshot and send it via email to support.
+    </p>
+    <div class="form-group">
+        <label class="form-label">Recipient email</label>
+        <input type="email" id="support-email" class="apply-input" value="{{ support_email }}" style="max-width:400px">
+    </div>
+    <div class="form-group">
+        <label class="form-label">Issue description (optional)</label>
+        <textarea id="support-description" class="apply-input" rows="3" style="max-width:400px;resize:vertical" placeholder="Describe the issue..."></textarea>
+    </div>
+    <button class="btn btn-primary" id="send-support-btn" onclick="sendNewSnapshot()">Create & Send to Support</button>
+    <div id="support-result" class="hidden" style="margin-top:0.5rem;font-size:0.8125rem"></div>
+</div>
+
+<script>
+function sendToSupport(filename) {
+    const email = document.getElementById('support-email').value;
+    if (!email) { alert('Enter a support email address.'); return; }
+    const desc = document.getElementById('support-description').value;
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('description', desc);
+    formData.append('filename', filename);
+    doSend(formData);
+}
+
+function sendNewSnapshot() {
+    const email = document.getElementById('support-email').value;
+    if (!email) { alert('Enter a support email address.'); return; }
+    const desc = document.getElementById('support-description').value;
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('description', desc);
+    formData.append('create_new', 'true');
+    doSend(formData);
+}
+
+function doSend(formData) {
+    const btn = document.getElementById('send-support-btn');
+    const result = document.getElementById('support-result');
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    result.className = 'hidden';
+
+    fetch('{{ url_for("logs.send_support") }}', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            result.className = data.success ? 'flash flash-success' : 'flash flash-error';
+            result.textContent = data.message;
+            btn.disabled = false;
+            btn.textContent = 'Create & Send to Support';
+            if (data.success) setTimeout(() => window.location.reload(), 1500);
+        })
+        .catch(err => {
+            result.className = 'flash flash-error';
+            result.textContent = 'Failed: ' + err.message;
+            btn.disabled = false;
+            btn.textContent = 'Create & Send to Support';
+        });
+}
+</script>
+{% endblock %}
