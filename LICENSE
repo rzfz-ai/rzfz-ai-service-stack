@@ -1,0 +1,83 @@
+razzfazz.ai Service Stack — Licensing Overview
+==============================================
+
+Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group, Vienna, Austria.
+Licensing contact: licensing@razzfazz.ai
+
+The razzfazz.ai Service Stack is distributed under an OPEN-CORE model. Three
+kinds of material live in this repository, each under its own licence. The
+authoritative, machine-readable mapping of every component to its licence is
+`stack.yaml` (fields `license` / `edition` / `built_from`); the razzfazz-licenses
+web UI (license.<your-domain>) renders it, and `NOTICE` lists the third-party
+attributions.
+
+--------------------------------------------------------------------------------
+1. Community — Apache License 2.0  (OPEN SOURCE)
+--------------------------------------------------------------------------------
+Our first-party wiring, configuration templates, documentation, build recipes,
+and base model wiring — everything marked `edition: community` /
+`SPDX-License-Identifier: Apache-2.0`. This is genuine Open Source: you may use
+it in production, freely and at no charge. Full text: `LICENSE-APACHE`.
+
+--------------------------------------------------------------------------------
+2. rzfz.ai Subscription — Business Source License 1.1  (SOURCE-AVAILABLE)
+--------------------------------------------------------------------------------
+Our first-party application and orchestration code — the Configuration/Help/
+Licenses/Start portals, the shared runtime library, Model Sync, Backup
+Management, the Agent Manager and MCP Manager, and the razzfazz.ai orchestration
+surface (scripts/, cli/, provisioning, migrations, security-review tooling,
+Authentik SSO provisioning templates) — everything carrying an
+`SPDX-License-Identifier: BUSL-1.1` header. Commercial production use of these
+components is governed by the rzfz.ai Subscription.
+
+The Business Source License 1.1 is SOURCE-AVAILABLE, **not** an OSI-approved
+Open Source licence. You may read, copy, modify and make NON-PRODUCTION use of
+it freely. Private, personal and evaluation use is free — no subscription and no
+registration. COMMERCIAL PRODUCTION use requires a valid rzfz.ai
+Subscription: a licence (not a service) to run the current, patched Stack
+commercially — installation, updates and support are separate offerings. A
+subscription valid when a version was released permanently authorizes commercial
+production use of that version. No license key is required — the containers run
+freely; the subscription governs permitted use, not technical function. On the
+version's Change Date it converts to Apache-2.0 regardless. For Version 2026.07-ga
+the Change Date is 2029-07-08 (release date + 3 years); the per-version schedule
+is `config/manifests/license-dates.json`. Full text and the filled BSL parameters:
+`LICENSE-BSL`.
+
+--------------------------------------------------------------------------------
+3. Third-party / upstream components — their own upstream licences
+--------------------------------------------------------------------------------
+The stack bundles or builds many independent upstream projects, each running as
+its own container (mere aggregation — they are not linked into our code). Each
+keeps its own licence (Apache-2.0, MIT, BSD, PostgreSQL, MPL-2.0, LGPL-3.0,
+GPL-3.0, AGPL-3.0, …), marked `license: upstream:<SPDX>` in `stack.yaml`. We do
+NOT relicense them. Attribution, versions/tags, and (for GPL/AGPL images) a
+version-pinned reference to the Corresponding Source are in `NOTICE`.
+
+Notable conditions carried through:
+  - Dify is Apache-2.0 with additional conditions (no multi-tenant use; the Dify
+    logo/copyright must remain in the web image). We ship Dify Community Edition
+    in compliance with those conditions — single-tenant, branding preserved — and
+    pass through Dify's own licence (modules/dify/DIFY-LICENSE). See
+    THIRD-PARTY-NOTICES.md and docs/LICENSING.md.
+  - AGPL-3.0 (Vaultwarden, SearXNG, Synapse, Element) and GPL-3.0 (Komodo,
+    paperless-ngx) components are shipped UNMODIFIED. See docs/LICENSING.md for
+    how that keeps §13 / copyleft clean.
+
+--------------------------------------------------------------------------------
+See also
+--------------------------------------------------------------------------------
+  LICENSE-APACHE          — Apache License 2.0 (Community, full text)
+  LICENSE-BSL             — Business Source License 1.1 (rzfz.ai Subscription, full text)
+  LICENSE-AGPL            — GNU AGPL v3 full text (bundled AGPL-3.0 upstreams)
+  LICENSE-GPL             — GNU GPL v3 full text (bundled GPL-3.0 upstreams)
+  LICENSE-LGPL            — GNU LGPL v3 full text (bundled LGPL-3.0 libraries)
+  NOTICE                  — third-party attributions + Corresponding Source references
+  THIRD-PARTY-NOTICES.md  — consolidated per-component table (version, SPDX, source, copyright)
+  docs/LICENSING.md       — plain-language explanation of the open-core model
+  stack.yaml              — machine-readable per-component licence map (SSOT)
+
+"razzfazz.ai" is a trademark of razzfazz.ai GmbH. Third-party names and logos are
+the trademarks of their respective owners and are used nominatively to identify
+the bundled components; no endorsement is implied. No licence grants any right in
+any trademark or logo except as expressly required by the applicable licence.

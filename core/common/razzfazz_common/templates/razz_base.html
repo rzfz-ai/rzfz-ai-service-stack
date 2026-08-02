@@ -1,0 +1,52 @@
+{# M026 S08: shared HTML shell for rzfz.ai UI containers.
+
+   Containers extend this with `{% extends "razz_base.html" %}` and override
+   only the blocks they need. The shared CSS at /static/razzfazz-common/
+   razzfazz-base.css is always linked first; per-container overrides go in
+   `extra_css` (or a local <link> in `extra_head`).
+
+   Block API (stable; bumping requires an M-slice):
+     title       — <title> text (defaults to service_name | 'rzfz.ai')
+     favicon     — favicon href (defaults to /branding/media/...)
+     extra_css   — additional <link rel="stylesheet"> tags
+     extra_head  — anything else inside <head> (meta, inline <script>, etc.)
+     body_attrs  — extra attributes injected into <body ...> (raw string)
+     header      — top-of-page header markup (logo, top-nav, etc.)
+     layout      — page chrome between header and footer; default wraps
+                   `content` in .razz-container (max-width 1100px).
+                   Override to opt out — e.g. config UI's sidebar+main
+                   layout needs to span the full viewport, not be capped.
+     content     — main page body (rendered inside the default layout's
+                   .razz-container; ignored if `layout` is overridden).
+     footer      — bottom-of-page footer markup
+     extra_js    — <script> tags appended just before </body>
+
+   No razz_header.html / razz_nav.html partial is shipped. The 3 containers
+   that have a real base.html today (help, config, setup) all paint very
+   different chrome — config is sidebar+htmx, help is top-nav with admin
+   link, setup is top-nav with inline reset/api-key JS. A "shared" header
+   would have to be either trivially empty (pointless) or force them all
+   into the same shape (a regression). Per-container `header` block content
+   stays per-container until S09 surfaces a real reuse pattern.
+#}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ service_name|default('rzfz.ai') }}{% endblock %}</title>
+    <link rel="icon" type="image/png" href="{% block favicon %}/branding/media/razzfazz-ai-favicon.png{% endblock %}">
+    <link rel="stylesheet" href="/static/razzfazz-common/razzfazz-base.css">
+    {% block extra_css %}{% endblock %}
+    {% block extra_head %}{% endblock %}
+</head>
+<body{% block body_attrs %}{% endblock %}>
+    {% block header %}{% endblock %}
+    {% block layout %}
+    <div class="razz-container">
+        {% block content %}{% endblock %}
+    </div>
+    {% endblock %}
+    {% block footer %}{% endblock %}
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

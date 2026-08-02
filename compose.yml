@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+name: razzfazz-stack
+
+# ==============================================================================
+# RAZZFAZZ AI SERVICE STACK - MAIN COMPOSE FILE
+# ==============================================================================
+# This is the entry point for the stack. It orchestrates all sub-modules using
+# Docker Compose `include` feature.
+#
+# CONFIGURATION:
+# - Global settings are in `.env` (check this file first!)
+# - Dify specific settings are in `.env.dify`
+# - Enabled services are controlled via `COMPOSE_PROFILES` in `.env`
+#
+# USAGE:
+# - Start all enabled profiles: docker compose up -d
+# - Start specific profile: docker compose --profile chat up -d
+# ==============================================================================
+
+include:
+  # 1. Core Infrastructure (IMMER AN)
+  - path: ./core/compose.yml
+    env_file: 
+      - .env
+      - .env.dify
+
+  # 2. Chat UI & Pipelines (Profile: chat)
+  - path: ./modules/chat/compose.yml
+    env_file: .env
+
+  # 4. Monitoring / Komodo (Profile: monitor)
+  - path: ./modules/monitor/compose.yml
+    env_file: .env
+
+  # 5. LLM Backend (Profile: llm)
+  - path: ./modules/llm/compose.yml
+    env_file: .env
+
+  # 5b. Mac LLM Gateway — LiteLLM fronting Macs running Ollama (Profile: mac-llm)
+  #     [EXPERIMENTAL, opt-in, off by default] (2026.08). GPUStack untouched.
+  - path: ./modules/llm/mac-gateway/compose.yml
+    env_file: .env
+
+  # 6. SearXNG (Profile: searxng)
+  - path: ./modules/search/searxng/compose.yml
+    env_file: .env
+
+  # 6b. Crawl4AI (Profile: crawl4ai) — RAG-friendly web crawler [EXPERIMENTAL]
+  - path: ./modules/search/crawl4ai/compose.yml
+    env_file: .env
+
+  # 7. Gotenberg (Profile: gotenberg)
+  - path: ./modules/doc-processing/gotenberg/compose.yml
+    env_file: .env
+
+  # 8. Speech (Profile: stts)
+  - path: ./modules/stts/compose.yml
+    env_file: .env
+
+  # 9. Dify (Profile: dify)
+  - path: ./modules/dify/compose.yml
+    env_file: 
+      - .env
+      - .env.dify
+
+  # 10. Gitea (Profile: gitea)
+  - path: ./modules/gitea/compose.yml
+    env_file: .env
+
+  # 11. LightRAG (Profile: lightrag) [EXPERIMENTAL]
+  - path: ./modules/knowledge/lightrag/compose.yml
+    env_file: .env
+
+  # 12. Cognee (Profile: cognee) [EXPERIMENTAL]
+  - path: ./modules/knowledge/cognee/compose.yml
+    env_file: .env
+
+  # 13. Apache Tika (Profile: tika) [EXPERIMENTAL]
+  - path: ./modules/doc-processing/tika/compose.yml
+    env_file: .env
+
+  # 14. Docling Serve (Profile: docling) [EXPERIMENTAL]
+  - path: ./modules/doc-processing/docling/compose.yml
+    env_file: .env
+
+  # 15. Presidio PII Detection (Profile: presidio) [EXPERIMENTAL]
+  - path: ./modules/doc-processing/presidio/compose.yml
+    env_file: .env
+
+  # 16. Stirling-PDF (Profile: stirling-pdf) [EXPERIMENTAL]
+  - path: ./modules/doc-processing/stirling-pdf/compose.yml
+    env_file: .env
+
+  # 17. Paperclip — AI Company Orchestration (Profile: paperclip) [EXPERIMENTAL]
+  - path: ./modules/apps/paperclip/compose.yml
+    env_file: .env
+
+  # 18. (M020 S07) hermes profile removed — moved to per-user via agent-manager.
+
+  # 19. Matrix — Synapse Homeserver + Element Web (Profile: matrix) [EXPERIMENTAL]
+  - path: ./modules/apps/matrix/compose.yml
+    env_file: .env
+
+  # 20. (M020 S07) moltis profile removed — moved to per-user via agent-manager.
+
+  # 21. Paperless-ngx — Document Management (Profile: paperless-ngx) [EXPERIMENTAL]
+  - path: ./modules/doc-processing/paperless-ngx/compose.yml
+    env_file: .env
+
+  # 22. Vaultwarden — Password Manager (Profile: vaultwarden) [EXPERIMENTAL]
+  - path: ./modules/apps/vaultwarden/compose.yml
+    env_file: .env
+
+  # 23. Infisical — Secrets Management (Profile: infisical) [EXPERIMENTAL]
+  - path: ./modules/apps/infisical/compose.yml
+    env_file: .env
+
+  # 24. Onyx — AI Enterprise Search (Profile: onyx) [EXPERIMENTAL]
+  - path: ./modules/apps/onyx/compose.yml
+    env_file: .env
+
+  # 25. OpenHands — AI Software Development Agent (Profile: openhands) [EXPERIMENTAL]
+  - path: ./modules/apps/openhands/compose.yml
+    env_file: .env
+
+  # 26. (M020 S07) coding-tools profile removed — moved to per-user via
+  # agent-manager. Build artifacts now live at agents/coding-tools/; the
+  # `razzfazz-coding-tools:latest` image is built by the coding-tools-image
+  # service in agents/compose.yml when the agents profile is active.
+
+  # 27. Agent Manager — Per-User Agent Instances (Profile: agents) [EXPERIMENTAL]
+  - path: ./modules/agents/compose.yml
+    env_file: .env
+
+  # 28. Observability — OpenLIT + ClickHouse (Profile: observability) [EXPERIMENTAL] (M019)
+  - path: ./modules/observability/compose.yml
+    env_file: .env
+
+  # 29. Personal MCP Manager — per-user MCP proxies + credential vault (Profile: mcp) [EXPERIMENTAL] (#36)
+  - path: ./modules/mcp-manager/compose.yml
+    env_file: .env
+
+# Globale Volumes
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres-data:
+  valkey-data:
+  local-backups:
+  open-webui-data:
+  pipelines-data:
+  postgres-komodo-data:
+  gpustack-data:
+  dify-app-data:
+  dify-sandbox-dependencies:
+  dify-sandbox-conf:
+  dify-plugin-daemon:
+  speaches-data:
+  searxng-data:
+  authentik-media:
+  authentik-templates:
+  authentik-certs:
+  authentik-blueprints:
+  gitea-data:
+  lightrag-data:
+  cognee-data:
+  cognee-data-storage:
+  docling-scratch:
+  stirling-pdf-config:
+  stirling-pdf-logs:
+  paperclip-data:
+  # M020 S07 + M023 S06: hermes / moltis volumes removed (per-user via
+  # agent-manager — agent-<type>-<slug>-* naming). pre-M020 stale data on
+  # operator boxes can be reclaimed manually via `docker volume rm`.
+  synapse-data:
+  smtp-relay-data:
+  paperless-data:
+  paperless-media:
+  vaultwarden-data:
+  onyx-vespa-data:
+  onyx-model-cache:
+  onyx-indexer-model-cache:
+  openhands-workspace:
+  # M020 S07 + M023 S06: coding-tools-workspace removed (per-user via
+  # agent-manager — `agent-coding-tools-<slug>-workspace`).
+
+networks:
+  default:
+    driver: bridge
+  ssrf_proxy_network:
+    driver: bridge
+    internal: true

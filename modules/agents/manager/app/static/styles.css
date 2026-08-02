@@ -1,0 +1,240 @@
+/* Agent Manager — razzfazz.ai branded styles */
+:root {
+    --bg-image: url('/branding/media/razzfazz.png');
+    --accent: #CD1719;
+    --accent-hover: #a31214;
+    --text: #1a1a1a;
+    --text-dim: #555;
+    --card-bg: rgba(255, 255, 255, 0.92);
+    --card-border: rgba(0, 0, 0, 0.08);
+    --header-bg: rgba(255, 255, 255, 0.90);
+    --green: #22c55e;
+    --yellow: #d97706;
+    --red: #dc2626;
+    --blue: #2563eb;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg-image) no-repeat center center fixed;
+    background-size: cover;
+    background-color: #f0f0f0;
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* Header */
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 32px;
+    background: var(--header-bg);
+    backdrop-filter: blur(8px);
+    border-radius: 12px;
+    padding: 12px 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.logo { height: 32px; }
+header h1 { font-size: 1.4rem; font-weight: 600; color: var(--text); }
+.user-info { display: flex; gap: 12px; align-items: center; color: var(--text-dim); }
+.user-info a { color: var(--accent); text-decoration: none; font-weight: 500; }
+.user-info a:hover { text-decoration: underline; }
+
+h2 { font-size: 1rem; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Cards grid */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.card {
+    background: var(--card-bg);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+.card-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card-header h3 { font-size: 1.1rem; color: var(--text); }
+/* #36 — per-agent-type icon + title grouping. Icon + name sit together on the
+   left; state badges stay right (card-header space-between). */
+.card-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-icon {
+    width: 32px; height: 32px;
+    object-fit: contain;
+    border-radius: 8px;
+    flex-shrink: 0;
+}
+
+/* #36/#61 — MCP Integrations section on the combined dashboard. */
+.mcp-section { margin-top: 28px; }
+.mcp-card {
+    background: var(--card-bg);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--card-border);
+    border-left: 4px solid var(--accent);
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.mcp-card-head { display: flex; align-items: flex-start; gap: 14px; }
+.mcp-card-head .agent-icon { width: 40px; height: 40px; }
+.mcp-card-head h3 { font-size: 1.15rem; color: var(--text); margin-bottom: 4px; }
+
+.description { color: var(--text-dim); font-size: 0.85rem; flex: 1; }
+.stats { font-size: 0.85rem; color: var(--text-dim); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* Badges */
+.badge { font-size: 0.75rem; padding: 2px 10px; border-radius: 12px; font-weight: 600; }
+.badge.running { background: rgba(34,197,94,0.12); color: var(--green); }
+.badge.stopped { background: rgba(217,119,6,0.12); color: var(--yellow); }
+.badge.provisioning { background: rgba(37,99,235,0.12); color: var(--blue); }
+.badge.error { background: rgba(220,38,38,0.12); color: var(--red); }
+.badge.restricted { background: rgba(0,0,0,0.06); color: var(--text-dim); }
+
+/* Buttons */
+.btn {
+    padding: 6px 16px;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    background: white;
+    color: var(--text);
+    text-decoration: none;
+    font-weight: 500;
+    transition: all 0.15s;
+}
+.btn:hover { border-color: var(--text-dim); background: #f5f5f5; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-secondary { background: #f0f0f0; border-color: #ddd; }
+.btn-danger { background: transparent; border-color: var(--red); color: var(--red); }
+.btn-danger:hover { background: rgba(220,38,38,0.06); }
+.btn-subtle { background: transparent; border-color: transparent; color: var(--text-dim); }
+.btn-subtle:hover { color: var(--text); }
+.restricted-msg { font-size: 0.8rem; color: var(--text-dim); }
+.error-msg { font-size: 0.8rem; color: var(--red); }
+
+/* Secret row (Moltis password) */
+.secret-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    background: rgba(0,0,0,0.03);
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+.secret-label { color: var(--text-dim); font-weight: 500; }
+.secret-value { font-size: 0.8rem; color: var(--text); letter-spacing: 0.5px; }
+.btn-copy {
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+    color: var(--text-dim);
+}
+.btn-copy:hover { background: #f0f0f0; color: var(--text); }
+
+/* Detail page */
+.detail-panel {
+    background: var(--card-bg);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.detail-table { width: 100%; }
+.detail-table td { padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); }
+.detail-table td:first-child { color: var(--text-dim); width: 150px; }
+.detail-table code { font-size: 0.85rem; }
+.danger-zone { border-color: var(--red); }
+.danger-zone h2 { color: var(--red); }
+
+/* Logs */
+.logs {
+    background: #1a1a1a;
+    color: #e0e0e0;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.8rem;
+    max-height: 400px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Admin table */
+.admin-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+.admin-table th, .admin-table td { padding: 8px 12px; border-bottom: 1px solid rgba(0,0,0,0.08); text-align: left; font-size: 0.85rem; }
+.admin-table th { color: var(--text-dim); font-weight: 600; }
+.admin-table code { font-size: 0.8rem; }
+
+/* Footer */
+footer {
+    margin-top: 32px;
+    padding-top: 16px;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+.error { color: var(--red); }
+.admin-stats {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+}
+.admin-stats p { margin-bottom: 4px; }
+.admin-stats a { color: var(--accent); }
+
+/* rc6.7 #91 — pending Open button (container is `running` per docker but
+ * the inner app may need a few seconds to actually serve traffic). The
+ * dashboard polls /api/ready/<id> and removes .btn-pending on first
+ * successful probe. */
+.btn-pending {
+    opacity: 0.6;
+    cursor: progress;
+    pointer-events: none;
+    position: relative;
+}
+.btn-pending::after {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-left: 8px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    vertical-align: middle;
+    animation: btn-spin 0.8s linear infinite;
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+/* Responsive */
+@media (max-width: 768px) {
+    .cards { grid-template-columns: 1fr; }
+    header { flex-direction: column; gap: 12px; }
+}

@@ -1,0 +1,589 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# LLM BACKEND MODULE (GPUStack)
+# ==============================================================================
+# Profiles (M018, post-consolidation):
+# - llm: Standard path. Upstream gpustack/gpustack:v2.1.x with custom backends
+#        registered by llm/gpustack/init-backends.py. Hardware (AMD Strix Halo,
+#        NVIDIA, CPU) selected via HARDWARE env var + a device overlay file
+#        (llm/compose.devices.{amd,nvidia,cpu}.yml). One service definition
+#        covers all hardware variants.
+# - llm-legacy: Rollback safety net for the M018 cycle. Activates the OLD
+#               custom AMD-Vulkan build (frozen at gpustack 0.7.1). Same
+#               container_name as the standard service, so flipping
+#               COMPOSE_PROFILES from `llm` → `llm-legacy` is the rollback.
+#               Will be removed in a later milestone once `llm` has been
+#               in production for ≥30 days.
+# - llm-cpu: DEPRECATED — kept for one release for in-place upgrade
+#            compatibility. New installs should use `llm` + HARDWARE=cpu.
+#            Existing `llm-cpu` operators are auto-migrated by
+#            razzfazz-upgrade.sh.
+#
+# LLM backend services using GPUStack to serve local models compatible with
+# the OpenAI API.
+#
+# GPUStack Mode (GPUSTACK_MODE in .env):
+# - standalone: GPUSTACK_HOST_BIND=127.0.0.1 (default, no external workers).
+# - master:     GPUSTACK_HOST_BIND=<specific LAN IP> — workers connect here.
+#               Do NOT use 0.0.0.0 — pin to one interface so external scanners
+#               don't see gpustack admin UI. Add ufw rules permitting 9090 +
+#               10150-10151 from worker IPs only.
+# - worker:     GPUSTACK_HOST_BIND=127.0.0.1 (no inbound from peers; outbound
+#               only to GPUSTACK_MASTER_SERVER_URL).
+#
+# F-RC5-1 (rc5.1): renamed from GPUSTACK_BIND to GPUSTACK_HOST_BIND because the
+# old name was overloaded — set during M018 to 0.0.0.0 to make the embedded
+# worker work, but the env var was ALSO used by compose `ports:` as the
+# host-side bind, accidentally exposing the admin UI to the LAN. The two roles
+# are now decoupled: GPUSTACK_HOST_BIND controls the host-side port mapping
+# (this file); the in-container gpustack server does not read GPUSTACK_BIND
+# (uses its own default 0.0.0.0 inside the container, required for docker
+# port forwarding to work). The legacy GPUSTACK_BIND key remains in .env for
+# backward compat but has no effect on the deployment.
+# ==============================================================================
+services:
+  # ----------------------------------------------------------------------------
+  # gpustack-legacy: rollback safety net for M018 (frozen at 0.7.1 + AMD Vulkan
+  # custom build). Same container_name as `gpustack`, so this is mutually
+  # exclusive with the standard service via COMPOSE_PROFILES. Image and tag
+  # are HARDCODED (no env var) because this entry is preserved as a known-good
+  # frozen state.
+  # ----------------------------------------------------------------------------
+  gpustack-legacy:
+    image: registry.gitlab.com/razzfazz.ai/razzfazz-ai-service-stack/gpustack:vulkan
+    build:
+      context: ./gpustack
+      dockerfile: Dockerfile.vulkan
+    pull_policy: never
+    profiles: ["llm-legacy"]
+    container_name: gpustack
+    platform: linux/amd64
+    restart: unless-stopped
+    # autoheal label REMOVED 2026-05-10. On Strix Halo (gfx1151) under
+    # sustained inference the amdgpu kworker storm pegs healthz for
+    # >5 min during big-model concurrent load (gemma4 + qwen3.6 caught
+    # autoheal even with retries=10 / start_period=300s). autoheal kills
+    # gpustack mid-storm → all 5 spawned llama-server children get
+    # SIGTERM'd → models reload → another storm. Net: autoheal turns a
+    # transient soft-hang into a cascading outage. `restart: unless-stopped`
+    # already catches real crashes; rely on that. If gpustack genuinely
+    # hangs (stack trace stuck, not storm-driven), operator can
+    # `docker restart gpustack` manually.
+    # labels:
+    #   autoheal: "true"
+    healthcheck:
+      # On Strix Halo (gfx1151) + 6.17 in-tree amdgpu, loading 5+ large GGUFs
+      # at startup triggers a transient amdgpu/TTM kworker burst that pegs
+      # the box for 60–180 s while gpustack's healthz endpoint stalls. With
+      # the previous timing (start_period 60 s, timeout 10 s, retries 3) the
+      # autoheal sidecar would kill gpustack at ~150 s — right when models
+      # were finishing first load — restarting the storm in a loop. Bump
+      # start_period to 300 s and timeout to 30 s; retries stay at 3 so a
+      # genuinely hung gpustack is still caught within ~90 s after the
+      # grace window. See memory project_strix_halo_kworker_storm.md.
+      # Worker mode listens on :10150 (worker API); master/standalone on
+       # :${GPUSTACK_PORT} (admin). Probe the right one per mode.
+      test: ["CMD-SHELL", "if [ \"$$GPUSTACK_MODE\" = worker ]; then curl -sf http://127.0.0.1:10150/healthz || exit 1; else curl -sf http://127.0.0.1:$$GPUSTACK_PORT/healthz || exit 1; fi"]
+      interval: 30s
+      timeout: 30s
+      # retries 10 (was 3): on Strix Halo (gfx1151) under sustained inference,
+      # the amdgpu kworker storm can pin sshd/healthz for 60-180 s while
+      # llama-server allocates GPU buffers. With retries=3, autoheal kills
+      # gpustack at ~90 s of unhealthy — which kills all 5 model children
+      # via SIGTERM (restart_count stays 0 because autoheal != gpustack
+      # controller restart) → models get re-loaded → another storm.
+      # Caught on worker-box-1 during concurrent gemma4+qwen3.6 inference.
+      # 10 retries = 5 min of consistent unhealth required; gives storms
+      # enough time to complete. start_period still protects fresh boots.
+      retries: 10
+      start_period: 300s
+    ports:
+      # Main API port - exposed for external worker connections
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:${GPUSTACK_PORT:-9090}:${GPUSTACK_PORT:-9090}"
+      # Worker ports - exposed for external worker connections
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10150:10150"      # Worker port
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10151:10151"      # Worker metrics
+      # Inference service ports - exposed for worker communication
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40000-40063:40000-40063"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40064-40095:40064-40095"
+      # Ray ports for distributed inference
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:8265:8265"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40096-40103:40096-40103"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:52365:52365"
+    cap_add: 
+      - LINUX_IMMUTABLE
+    devices: 
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    # SECURITY: seccomp:unconfined is required for GPU access (Vulkan/ROCm syscalls).
+    # GPU inference engines (llama-server, llama-box) need low-level GPU memory management
+    # syscalls that are blocked by the default seccomp profile. A custom seccomp profile
+    # allowing only GPU-specific syscalls would be ideal but is not yet available.
+    # Accepted technical debt — tracked as F-015.
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro
+      - /usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:ro
+      - gpustack-data:/var/lib/gpustack
+      # F-A3: no raw socket — talk to docker-socket-proxy via DOCKER_HOST below
+      - ./jinja:/opt/jinja:ro
+    env_file:
+      - ../../.env
+    environment:
+      LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
+      # F-A3: talk to docker-socket-proxy instead of raw /var/run/docker.sock
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ "$${GPUSTACK_MODE}" = "worker" ] && [ -n "$${GPUSTACK_MASTER_SERVER_URL}" ]; then
+          # Startup cleanup: ensure no leftover processes from a crashed run
+          pkill -9 -f llama-server 2>/dev/null || true
+          pkill -9 -f rpc-server 2>/dev/null || true
+
+          # Background watchdog: if master goes down (e.g. restarted), kill all local
+          # model instances to prevent OOM when master comes back and schedules them again.
+          (
+            MASTER_HEALTH_URL="$${GPUSTACK_MASTER_SERVER_URL%%/v1*}/healthz"
+            while true; do
+              if ! curl -sf "$$MASTER_HEALTH_URL" > /dev/null; then
+                echo "[watchdog] Master is unreachable! Killing all llama-server instances to prevent OOM..."
+                pkill -9 -f llama-server 2>/dev/null || true
+                pkill -9 -f rpc-server 2>/dev/null || true
+              fi
+              sleep 10
+            done
+          ) &
+
+          exec gpustack start \
+            --port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --server-url "$${GPUSTACK_MASTER_SERVER_URL}" \
+            --token "$${GPUSTACK_MASTER_SERVER_TOKEN}" \
+            --worker-ip "$${GPUSTACK_WORKER_IP}" \
+            --worker-name "$${GPUSTACK_WORKER_NAME:-$$(hostname)}"
+        else
+          unset GPUSTACK_WORKER_IP
+          unset GPUSTACK_WORKER_NAME
+          exec gpustack start \
+            --port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --bootstrap-password "$${GPUSTACK_ADMIN_PASSWORD}"
+        fi
+    # #36 security-review — also join coding-agents so sandboxed agents reach gpustack.
+    networks:
+      - default
+      - coding-agents
+
+  model-sync-legacy:
+    build:
+      context: ./sync_models
+      dockerfile: Dockerfile.sync_models
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["llm-legacy"]
+    container_name: model-sync
+    restart: unless-stopped
+    environment:
+      - GPUSTACK_URL=http://gpustack:${GPUSTACK_PORT:-9090}/v1-openai/models
+      - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
+      - DB_HOST=postgres
+      - DB_NAME=${OPENWEBUI_DB:-openwebui_db}
+      - DB_USER=${POSTGRES_USER:-docker}
+      - DB_PASS=${POSTGRES_PASSWORD:-}
+    env_file:
+      - ../../.env
+    depends_on:
+      gpustack-legacy:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # gpustack: standard path (M018). Upstream gpustack/gpustack v2.1.x with
+  # custom backends (kyuz0 for AMD Strix Halo, llama.cpp for CPU) registered
+  # by llm/gpustack/init-backends.py. NVIDIA uses the built-in vLLM backend.
+  # Hardware-specific device mounts come from a separate overlay file selected
+  # via COMPOSE_FILE + HARDWARE env (see llm/compose.devices.{amd,nvidia,cpu}.yml).
+  # Same container_name as `gpustack-legacy`, so the two are mutually exclusive.
+  # ----------------------------------------------------------------------------
+  gpustack:
+    image: gpustack/gpustack:${GPUSTACK_VERSION:-v2.1.2}
+    profiles: ["llm"]
+    container_name: gpustack
+    platform: linux/amd64
+    restart: unless-stopped
+    # rc6.7 #48: contain gpustack RSS within an 8 GiB cgroup so the upstream
+    # event-bus + metrics-cache leak (issues #5121 / #5073 / PR #5255) becomes
+    # a contained container restart instead of a full-host OOM panic. Pairs
+    # with vm.panic_on_oom = 1 in /etc/sysctl.d/99-razzfazz-stability.conf —
+    # cgroup OOMs do NOT panic the kernel under that setting, so docker's
+    # restart policy brings gpustack back. oom_score_adj steers the kernel
+    # OOM-killer to prefer gpustack as the target if a host-wide OOM ever
+    # does fire (e.g. host RAM legitimately exhausted by everything else).
+    mem_limit: 8g
+    mem_reservation: 4g
+    oom_score_adj: 500
+    # autoheal label REMOVED 2026-05-10 — see gpustack-legacy comment above.
+    # On Strix Halo (gfx1151) under sustained inference, healthz stalls past
+    # 5 min during big-model concurrent load → autoheal kills gpustack
+    # mid-storm → cascade. restart: unless-stopped catches real crashes.
+    # M018 v2.x wedge case: operator can `docker restart gpustack` manually
+    # if gpustack genuinely hangs (rare; storm is the common case).
+    # labels:
+    #   autoheal: "true"
+    healthcheck:
+      # On Strix Halo (gfx1151) + 6.17 in-tree amdgpu, loading 5+ large GGUFs
+      # at startup triggers a transient amdgpu/TTM kworker burst that pegs
+      # the box for 60–180 s while gpustack's healthz endpoint stalls. With
+      # the previous timing (start_period 60 s, timeout 10 s, retries 3) the
+      # autoheal sidecar would kill gpustack at ~150 s — right when models
+      # were finishing first load — restarting the storm in a loop. Bump
+      # start_period to 300 s and timeout to 30 s; retries stay at 3 so a
+      # genuinely hung gpustack is still caught within ~90 s after the
+      # grace window. See memory project_strix_halo_kworker_storm.md.
+      # Worker mode listens on :10150 (worker API); master/standalone on
+       # :${GPUSTACK_PORT} (admin). Probe the right one per mode.
+      test: ["CMD-SHELL", "if [ \"$$GPUSTACK_MODE\" = worker ]; then curl -sf http://127.0.0.1:10150/healthz || exit 1; else curl -sf http://127.0.0.1:$$GPUSTACK_PORT/healthz || exit 1; fi"]
+      interval: 30s
+      timeout: 30s
+      # retries 10 (was 3): on Strix Halo (gfx1151) under sustained inference,
+      # the amdgpu kworker storm can pin sshd/healthz for 60-180 s while
+      # llama-server allocates GPU buffers. With retries=3, autoheal kills
+      # gpustack at ~90 s of unhealthy — which kills all 5 model children
+      # via SIGTERM (restart_count stays 0 because autoheal != gpustack
+      # controller restart) → models get re-loaded → another storm.
+      # Caught on worker-box-1 during concurrent gemma4+qwen3.6 inference.
+      # 10 retries = 5 min of consistent unhealth required; gives storms
+      # enough time to complete. start_period still protects fresh boots.
+      retries: 10
+      start_period: 300s
+    ports:
+      # Main API port — exposed for external worker connections AND the
+      # operator's debug curl. Caddy reaches gpustack via the internal
+      # `gpustack:9090` DNS name, so the host bind is purely for
+      # debugging / external workers; default 127.0.0.1 (loopback) is
+      # the safe single-box choice.
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:${GPUSTACK_PORT:-9090}:${GPUSTACK_PORT:-9090}"
+      # Worker ports — rc6.7 #17: must be reachable from the gpustack
+      # server container itself (which talks to its own embedded worker
+      # via host.docker.internal:10150 → docker-bridge IP, NOT 127.0.0.1).
+      # Bind on 0.0.0.0 so the docker bridge IP has a listener; UFW
+      # gates external (LAN) reach via the rule installed by
+      # scripts/harden-host.sh:
+      #     ufw allow proto tcp from 172.16.0.0/12 to any port 10150
+      #     ufw allow proto tcp from 172.16.0.0/12 to any port 10151
+      # In master mode operators set GPUSTACK_WORKER_HOST_BIND to a
+      # specific LAN IP and harden-host.sh adds matching ufw rules from
+      # the worker subnet. Pre-rc6.7 these used the same loopback bind
+      # as 9090 above which closed the door to the embedded worker on
+      # standalone boxes (the dominant deployment shape).
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10150:10150"      # Worker port
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10151:10151"      # Worker metrics
+      # NOTE: GPUStack 2.x runs each model in a separate "pod" (pause + run-0
+      # containers) on host networking. The pause container holds host-net
+      # port 40000-40103 directly. If we ALSO map host:40000-40103 here via
+      # docker-proxy, the runner llama-server bind() collides with the proxy
+      # that's already holding the host-side port → runners crash with
+      # "couldn't bind HTTP server socket". So those ranges are deliberately
+      # NOT mapped — runners reach the host directly.
+    cap_add:
+      - LINUX_IMMUTABLE
+    # NOTE: hardware-specific bits (devices, group_add, runtime: nvidia, GPU
+    # reservations) live in the device overlay files, NOT here. The overlay
+    # is selected by razzfazz-init.sh based on detected hardware via
+    # COMPOSE_FILE=docker-compose.yml:llm/compose.devices.<HARDWARE>.yml.
+    # See llm/compose.devices.{amd,nvidia,cpu}.yml.
+    # SECURITY: seccomp:unconfined — see gpustack-legacy comment (F-015)
+    security_opt:
+      - seccomp:unconfined
+    # GPUStack 2.x runners use host networking; this gpustack-server container
+    # is on the bridge. The server needs an address it can use to call its
+    # own runners — and that's the host's gateway IP, not the bridge IP it
+    # would auto-detect for itself. Resolve via Docker's host-gateway magic.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # NOTE: 0.7.1 had host /usr/share/vulkan/icd.d + /usr/lib/x86_64-linux-gnu mounts
+      # so the custom Vulkan build could share the host's ROCm/Vulkan user-space.
+      # 2.x runner containers (kyuz0/amd-strix-halo-toolboxes etc.) ship their own
+      # ROCm/glibc and INHERIT mounts from this container via GPUStack's "mirrored
+      # deployment" pattern — host-lib mounts caused glibc symbol-lookup errors
+      # (e.g. __nptl_change_stack_perm@GLIBC_PRIVATE) inside runners. Removed.
+      - gpustack-data:/var/lib/gpustack
+      # F-A3: no raw socket — talk to docker-socket-proxy via DOCKER_HOST below
+      - ./jinja:/opt/jinja:ro
+      # M022 monkey-patch: route llama-box-custom GGUF placements through the
+      # optimistic CustomBackendResourceFitSelector instead of the pessimistic
+      # GGUFResourceFitSelector. See file header for rationale.
+      - ./gpustack/usercustomize.py:/usr/local/lib/python3.11/dist-packages/usercustomize.py:ro
+      # rc6.7 #48: surgical backport of gpustack PR #5255 (open against main,
+      # not yet released). Fixes 3 server-side memory leaks in v2.1.x:
+      # Subscriber.latest_by_key strands entries on QueueFull; publisher tasks
+      # pin ghost subscribers via parked _putters; subscriber.enqueue races
+      # closed-state. Imported by usercustomize.py at process start.
+      - ./gpustack/usercustomize_bus_fix.py:/usr/local/lib/python3.11/dist-packages/usercustomize_bus_fix.py:ro
+    environment:
+      # F-A3: talk to docker-socket-proxy instead of raw /var/run/docker.sock
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ "$${GPUSTACK_MODE}" = "worker" ] && [ -n "$${GPUSTACK_MASTER_SERVER_URL}" ]; then
+          # Startup cleanup: ensure no leftover processes from a crashed run
+          pkill -9 -f llama-server 2>/dev/null || true
+          pkill -9 -f rpc-server 2>/dev/null || true
+
+          # Background watchdog: if master goes down (e.g. restarted), kill all local
+          # model instances to prevent OOM when master comes back and schedules them again.
+          (
+            MASTER_HEALTH_URL="$${GPUSTACK_MASTER_SERVER_URL%%/v1*}/healthz"
+            while true; do
+              if ! curl -sf "$$MASTER_HEALTH_URL" > /dev/null; then
+                echo "[watchdog] Master is unreachable! Killing all llama-server instances to prevent OOM..."
+                pkill -9 -f llama-server 2>/dev/null || true
+                pkill -9 -f rpc-server 2>/dev/null || true
+              fi
+              sleep 10
+            done
+          ) &
+
+          exec gpustack start \
+            --gateway-mode disabled \
+            --api-port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --server-url "$${GPUSTACK_MASTER_SERVER_URL}" \
+            --token "$${GPUSTACK_MASTER_SERVER_TOKEN}" \
+            --worker-ip "$${GPUSTACK_WORKER_IP}" \
+            --worker-name "$${GPUSTACK_WORKER_NAME:-$$(hostname)}" \
+            --system-reserved "{\"ram\": $${GPUSTACK_RESERVED_RAM_GIB:-8}, \"vram\": $${GPUSTACK_RESERVED_VRAM_GIB:-4}}"
+        else
+          unset GPUSTACK_WORKER_NAME
+          # 2.x: the embedded worker spawns runners as host-net containers.
+          # Tell it to advertise the host's gateway IP so the bridge-side
+          # gpustack-server can reach back into the runner.
+          # --system-reserved (M018 / S03.5): scheduler will refuse placement
+          # if doing so would push host RAM or VRAM use past these reserves.
+          # Mitigation for the host-OOM cascade observed in S03.1 stress test
+          # (5h sustained inference → svm/userptr workqueue thrash → OOM-killed
+          # llama-server). 8 GiB RAM + 4 GiB VRAM is the rc5 baseline for the
+          # 32-GiB-host / 96-GiB-VRAM Strix Halo single-box layout; tunable
+          # via GPUSTACK_RESERVED_RAM_GIB / GPUSTACK_RESERVED_VRAM_GIB in .env.
+          # rc6.7 #23: --enable-worker explicit. GPUStack v2.0.1+ NO LONGER spawns
+          # the embedded worker by default for new installs (only legacy upgrades
+          # from <2.0.1 keep auto-on for backward compat). On a fresh single-box
+          # deploy the server starts but no worker registers → no cluster ever
+          # forms → model creation fails with "null value in column cluster_id".
+          # The flag is harmless on legacy upgrades (it just makes the implicit
+          # behaviour explicit). Required for standalone and master modes.
+          exec gpustack start \
+            --gateway-mode disabled \
+            --api-port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --bootstrap-password "$${GPUSTACK_ADMIN_PASSWORD}" \
+            --enable-worker \
+            --worker-ip "$${GPUSTACK_WORKER_IP:-host.docker.internal}" \
+            --system-reserved "{\"ram\": $${GPUSTACK_RESERVED_RAM_GIB:-8}, \"vram\": $${GPUSTACK_RESERVED_VRAM_GIB:-4}}"
+        fi
+    # #36 security-review — also join coding-agents so sandboxed agents reach gpustack.
+    networks:
+      - default
+      - coding-agents
+
+  model-sync:
+    build:
+      context: ./sync_models
+      dockerfile: Dockerfile.sync_models
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["llm"]
+    container_name: model-sync
+    restart: unless-stopped
+    environment:
+      - GPUSTACK_URL=http://gpustack:${GPUSTACK_PORT:-9090}/v1-openai/models
+      - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
+      - DB_HOST=postgres
+      - DB_NAME=${OPENWEBUI_DB:-openwebui_db}
+      - DB_USER=${POSTGRES_USER:-docker}
+      - DB_PASS=${POSTGRES_PASSWORD:-}
+    env_file:
+      - ../../.env
+    depends_on:
+      gpustack:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+  
+  gpustack-cpu:
+    image: gpustack/gpustack:${GPUSTACK_CPU_VERSION:-v0.7.1-cpu}
+    profiles: ["llm-cpu"]
+    container_name: gpustack
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    # autoheal label REMOVED 2026-05-10 — see gpustack-legacy comment above.
+    # labels:
+    #   autoheal: "true"
+    healthcheck:
+      # On Strix Halo (gfx1151) + 6.17 in-tree amdgpu, loading 5+ large GGUFs
+      # at startup triggers a transient amdgpu/TTM kworker burst that pegs
+      # the box for 60–180 s while gpustack's healthz endpoint stalls. With
+      # the previous timing (start_period 60 s, timeout 10 s, retries 3) the
+      # autoheal sidecar would kill gpustack at ~150 s — right when models
+      # were finishing first load — restarting the storm in a loop. Bump
+      # start_period to 300 s and timeout to 30 s; retries stay at 3 so a
+      # genuinely hung gpustack is still caught within ~90 s after the
+      # grace window. See memory project_strix_halo_kworker_storm.md.
+      # Worker mode listens on :10150 (worker API); master/standalone on
+       # :${GPUSTACK_PORT} (admin). Probe the right one per mode.
+      test: ["CMD-SHELL", "if [ \"$$GPUSTACK_MODE\" = worker ]; then curl -sf http://127.0.0.1:10150/healthz || exit 1; else curl -sf http://127.0.0.1:$$GPUSTACK_PORT/healthz || exit 1; fi"]
+      interval: 30s
+      timeout: 30s
+      # retries 10 (was 3): on Strix Halo (gfx1151) under sustained inference,
+      # the amdgpu kworker storm can pin sshd/healthz for 60-180 s while
+      # llama-server allocates GPU buffers. With retries=3, autoheal kills
+      # gpustack at ~90 s of unhealthy — which kills all 5 model children
+      # via SIGTERM (restart_count stays 0 because autoheal != gpustack
+      # controller restart) → models get re-loaded → another storm.
+      # Caught on worker-box-1 during concurrent gemma4+qwen3.6 inference.
+      # 10 retries = 5 min of consistent unhealth required; gives storms
+      # enough time to complete. start_period still protects fresh boots.
+      retries: 10
+      start_period: 300s
+    ports:
+      # Main API port - exposed for external worker connections
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:${GPUSTACK_PORT:-9090}:${GPUSTACK_PORT:-9090}"
+      # Worker ports - exposed for external worker connections
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10150:10150"      # Worker port
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10151:10151"      # Worker metrics
+      # Inference service ports - exposed for worker communication
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40000-40063:40000-40063"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40064-40095:40064-40095"
+      # Ray ports for distributed inference
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:8265:8265"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40096-40103:40096-40103"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:52365:52365"
+    cap_add: 
+      - LINUX_IMMUTABLE
+    group_add:
+      - video
+    # SECURITY: seccomp:unconfined — required for GPU/CUDA syscalls even in CPU mode.
+    # GPUStack probes for GPU devices at startup regardless of mode. A custom seccomp
+    # profile would be the proper fix but is not yet available. Accepted technical debt (F-015).
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - gpustack-data:/var/lib/gpustack
+      # F-A3: no raw socket — talk to docker-socket-proxy via DOCKER_HOST below
+      - ./gpustack/patch_null_content.py:/opt/patches/patch_null_content.py:ro
+      - ./jinja:/opt/jinja:ro
+    environment:
+      LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
+      # F-A3: talk to docker-socket-proxy instead of raw /var/run/docker.sock
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        python3 /opt/patches/patch_null_content.py || true
+        if [ "$${GPUSTACK_MODE}" = "worker" ] && [ -n "$${GPUSTACK_MASTER_SERVER_URL}" ]; then
+          # Startup cleanup: ensure no leftover processes from a crashed run
+          pkill -9 -f llama-server 2>/dev/null || true
+          pkill -9 -f rpc-server 2>/dev/null || true
+          
+          # Background watchdog: if master goes down (e.g. restarted), kill all local 
+          # model instances to prevent OOM when master comes back and schedules them again.
+          (
+            MASTER_HEALTH_URL="$${GPUSTACK_MASTER_SERVER_URL%%/v1*}/healthz"
+            while true; do
+              if ! curl -sf "$$MASTER_HEALTH_URL" > /dev/null; then
+                echo "[watchdog] Master is unreachable! Killing all llama-server instances to prevent OOM..."
+                pkill -9 -f llama-server 2>/dev/null || true
+                pkill -9 -f rpc-server 2>/dev/null || true
+              fi
+              sleep 10
+            done
+          ) &
+          
+          exec gpustack start \
+            --port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --server-url "$${GPUSTACK_MASTER_SERVER_URL}" \
+            --token "$${GPUSTACK_MASTER_SERVER_TOKEN}" \
+            --worker-ip "$${GPUSTACK_WORKER_IP}" \
+            --worker-name "$${GPUSTACK_WORKER_NAME:-$$(hostname)}"
+        else
+          unset GPUSTACK_WORKER_IP
+          unset GPUSTACK_WORKER_NAME
+          exec gpustack start \
+            --port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --bootstrap-password "$${GPUSTACK_ADMIN_PASSWORD}"
+        fi
+    # #36 security-review — also join coding-agents so sandboxed agents reach gpustack.
+    networks:
+      - default
+      - coding-agents
+
+  model-sync-cpu:
+    build:
+      context: ./sync_models
+      dockerfile: Dockerfile.sync_models
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["llm-cpu"]
+    container_name: model-sync
+    restart: unless-stopped
+    environment:
+      - GPUSTACK_URL=http://gpustack:${GPUSTACK_PORT:-9090}/v1-openai/models
+      - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
+      - DB_HOST=postgres
+      - DB_NAME=${OPENWEBUI_DB:-openwebui_db}
+      - DB_USER=${POSTGRES_USER:-docker}
+      - DB_PASS=${POSTGRES_PASSWORD:-}
+    env_file:
+      - ../../.env
+    depends_on:
+      gpustack-cpu:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  ollama-proxy:
+    image: eyalrot2/ollama-openai-proxy:0.7.0
+    profiles: ["llm","llm-cpu","llm-legacy"]
+    container_name: ollama-proxy
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_BASE_URL=http://caddy:8989/v1
+      # rc6.7 #61/#62 unified Open WebUI ↔ GPUStack auth on a single
+      # GPUSTACK_API_KEY. The legacy GPUSTACK_OPENAI_API_KEY var was
+      # dropped from .env.example; pre-rc6.9 ollama-proxy still read
+      # the legacy var here, so a fresh install (no GPUSTACK_OPENAI_API_KEY
+      # in .env) hit "OPENAI_API_KEY cannot be empty" on first boot.
+      # rc6.9 finishes the rename: ollama-proxy now reads the same
+      # canonical key everything else uses.
+      - OPENAI_API_KEY=${GPUSTACK_API_KEY:-}
+    env_file:
+      - ../../.env
+    ports:
+      - "127.0.0.1:11434:11434"
+
+networks:
+  # #36 security-review — shared egress-controlled net (declared in
+  # core/compose.yml). Compose merges the identical `name:`-keyed declaration.
+  coding-agents:
+    name: coding-agents
+    driver: bridge

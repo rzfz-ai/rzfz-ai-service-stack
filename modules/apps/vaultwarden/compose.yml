@@ -1,0 +1,123 @@
+# ==============================================================================
+# VAULTWARDEN MODULE (Password Manager)
+# ==============================================================================
+# Profile: vaultwarden
+# Description: Self-hosted Bitwarden-compatible password manager.
+#              Authentik OIDC SSO gates login. Vault encryption is local
+#              (master password is independent of the SSO provider).
+# Status: Experimental — validate with Bitwarden mobile/desktop clients
+# Config: .env (VAULTWARDEN_* variables)
+# Dependencies: shared PostgreSQL (VAULTWARDEN_DB, created by core/init-db.sh).
+#   #226: Vaultwarden previously fell back to its SQLite default because no
+#   DATABASE_URL was set, while init-db.sh created an UNUSED VAULTWARDEN_DB.
+#   It is now wired to the shared Postgres like every other stateful service
+#   (one instance, per-service DB), so its data lands in the Postgres backup/
+#   restore path. Boxes upgrading with existing SQLite data are migrated once
+#   by scripts/migrate-vaultwarden-to-postgres.sh (invoked from the upgrade).
+# Upstream: https://github.com/dani-garcia/vaultwarden (GPL-3.0)
+# ==============================================================================
+services:
+  vaultwarden:
+    image: vaultwarden/server:1.36.0
+    profiles: ["vaultwarden"]
+    container_name: vaultwarden
+    restart: unless-stopped
+    # #226: wait for Postgres to be healthy before starting (DATABASE_URL below).
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${VAULTWARDEN_PORT:-8222}:80"
+    environment:
+      # #226: use the shared PostgreSQL (VAULTWARDEN_DB) instead of the SQLite
+      # default. The `docker` superuser + per-service DB mirrors how every other
+      # stateful service connects. Interpolated from .env at compose time; if
+      # POSTGRES_PASSWORD is somehow empty the container fails fast on connect
+      # (never silently falls back to SQLite). Existing-SQLite boxes are migrated
+      # once by scripts/migrate-vaultwarden-to-postgres.sh before this takes over.
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-docker}:${POSTGRES_PASSWORD}@postgres/${VAULTWARDEN_DB:-vaultwarden_db}"
+      # Public URL (required for WebSocket push notifications and email links)
+      DOMAIN: https://${VAULTWARDEN_DOMAIN:-vault.${MAIN_DOMAIN:-razzfazz-box}}
+      # Admin panel — access at /admin with this token
+      ADMIN_TOKEN: ${VAULTWARDEN_ADMIN_TOKEN:-}
+      # SSO / OIDC via Authentik
+      SSO_ENABLED: "true"
+      SSO_ONLY: "false"
+      SSO_AUTHORITY: https://auth.${MAIN_DOMAIN:-razzfazz-box}/application/o/vaultwarden/
+      SSO_CLIENT_ID: vaultwarden_oidc_client
+      SSO_CLIENT_SECRET: ${VAULTWARDEN_CLIENT_SECRET:-}
+      SSO_PKCE: "true"
+      SSO_SIGNUPS_MATCH_EMAIL: "true"
+      # Trust the Authentik+upstream-IdP chain to gate verification before
+      # ever issuing the OIDC token. Authentik's default OIDC scope mapping
+      # leaves `email_verified=false` regardless of upstream Google SSO state
+      # (Google upstream pre-verifies; the mapping doesn't propagate the
+      # claim). Without this, every SSO bounce returns
+      #   "You need to verify your email with your provider before you can log in"
+      # — a false negative because the user IS pre-verified at Authentik.
+      # Operator alternative: extend Authentik's `email` scope mapping to
+      # surface `email_verified` from the bound user. Until that is shipped,
+      # the trust-mode here is the right product behavior.
+      SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION: "true"
+      # F-041: Only accept invalid certs in self-signed TLS mode (TLS_MODE=internal)
+      # For Let's Encrypt (TLS_MODE empty), this should be false
+      SSO_ACCEPTINVALIDCERTS: "${VAULTWARDEN_SSO_ACCEPT_INVALID_CERTS:-false}"
+      # Trust Caddy's self-signed CA for internal SSO discovery requests
+      SSL_CERT_FILE: /usr/local/share/ca-certificates/caddy-ca.crt
+      # Invite-only signup kept alongside SSO (admin can still invite users directly)
+      SIGNUPS_ALLOWED: "false"
+      INVITATIONS_ALLOWED: "true"
+      # Organization Groups — group-based collection access (off by default in
+      # Vaultwarden). Enabled so org Owners/Admins grant collection permissions to
+      # GROUPS instead of per-member, which scales collection management. Configurable
+      # via VAULTWARDEN_ORG_GROUPS_ENABLED; defaults on.
+      ORG_GROUPS_ENABLED: "${VAULTWARDEN_ORG_GROUPS_ENABLED:-true}"
+      # Allow imports from Proton Pass / 1Password / KeePass exports that have
+      # SecureNote entries exceeding the 10 000-char Bitwarden default. This
+      # raises the cap to ~100 000 chars per cipher field. Vaultwarden source
+      # name: INCREASE_NOTE_SIZE_LIMIT (paired with optional MAX_NOTE_SIZE
+      # for explicit cap; we leave the default).
+      INCREASE_NOTE_SIZE_LIMIT: "true"
+      # Email via the internal smtp-relay (#12). Vaultwarden has NO MAIL_ENABLED
+      # toggle — mail is enabled purely by setting SMTP_HOST. Off by default (empty
+      # host); set VAULTWARDEN_SMTP_HOST=smtp-relay to enable. The relay requires
+      # SASL auth (noanonymous): mail@<domain> / SMTP_INTERNAL_PASSWORD. Putting this
+      # in source replaces the prod hot-patch that was lost on every recreate.
+      SMTP_HOST: ${VAULTWARDEN_SMTP_HOST:-}
+      SMTP_PORT: ${VAULTWARDEN_SMTP_PORT:-587}
+      SMTP_SECURITY: ${VAULTWARDEN_SMTP_SECURITY:-off}
+      SMTP_FROM: ${SMTP_FROM:-noreply@localhost}
+      SMTP_USERNAME: mail@${MAIN_DOMAIN:-razzfazz-box}
+      SMTP_PASSWORD: ${SMTP_INTERNAL_PASSWORD:-}
+      REQUIRE_DEVICE_EMAIL: "false"
+      # Logging
+      LOG_LEVEL: warn
+      EXTENDED_LOGGING: "true"
+    volumes:
+      - vaultwarden-data:/data
+      # #55 — This compose file lives at modules/apps/vaultwarden/, one level
+      # deeper than modules/<mod>/, so the in-stack Caddy CA trust anchor is
+      # THREE levels up (../../../certs), not two. Compose resolves this bind
+      # relative to THIS file's directory; `../../certs` wrongly landed in
+      # modules/certs/ (a non-existent path Docker then auto-created as an empty
+      # DIRECTORY), so Vaultwarden's SSL_CERT_FILE was a dir → every server-to-
+      # server TLS call to *.${MAIN_DOMAIN} (Authentik OIDC discovery, SMTP)
+      # x509-failed on self-signed boxes. init.sh (#55 Step 7a) writes the live
+      # CA to the repo-root certs/caddy-ca.pem — the same file OWUI/Gitea mount.
+      - ../../../certs/caddy-ca.pem:/usr/local/share/ca-certificates/caddy-ca.crt:ro
+    # No `extra_hosts` for AUTHENTIK_DOMAIN: Caddy carries
+    # ${AUTHENTIK_DOMAIN} as a Docker network alias on the default
+    # bridge (see core/compose.yml). Docker's embedded DNS resolves
+    # it to whatever IP Caddy currently holds — survives Caddy
+    # restarts without any static-IP detection step.
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:80/alive || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  vaultwarden-data:

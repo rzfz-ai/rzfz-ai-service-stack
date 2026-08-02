@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Error - razzfazz.ai Agents</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+<div class="container">
+    <h1>Error</h1>
+    <p>{{ message }}</p>
+    <a href="{{ url_for('dashboard.index') }}">Back to Dashboard</a>
+</div>
+</body>
+</html>

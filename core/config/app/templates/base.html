@@ -1,0 +1,60 @@
+{# M026 S09 #5: extends the shared razz_base.html shell (S08).
+
+   Override the `layout` block (added by rc6.7 #54 fix) instead of
+   `content`. The default razz_base layout wraps `content` in
+   .razz-container (max-width 1100px), which is right for help/setup/
+   backup/license but wrong for config — config has a fixed 240px sidebar
+   + main layout that must span the full viewport. Capping at 1100px
+   squeezed everything into the left third of the page (rc6.7 #54).
+
+   Block structure exposed to child templates (.html files in dashboard/,
+   settings/, backup/, governance/, modules/, security/, logs/, docs/):
+     page_title   — page <title> text; appended with " — rzfz.ai"
+     page_content — the per-page main content (rendered inside <main>)
+     page_extra_css — optional per-page additional <link> tags
+
+   NOTE: child templates were renamed in S09 from {% block title %}
+   → {% block page_title %} and {% block content %} → {% block page_content %}
+   so the outer config-shell `title` and `content` blocks (which override
+   razz_base's same-named blocks) are not clobbered. 18 child templates
+   were touched by that rename (mechanical, content-preserving). After the
+   rc6.7 #54 fix we override `layout`, not `content`, but the per-page
+   {% block page_content %} hook is unchanged.
+
+   The razzfazz-base.css link is owned by razz_base.html — do not re-link.
+   Local styles.css is loaded AFTER it via extra_css so config-specific
+   selectors win.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}{% block page_title %}Management{% endblock %} — rzfz.ai{% endblock %}
+
+{% block extra_css %}
+    {# Cache-bust per release: without this, browsers keep serving the old
+       styles.css across upgrades, so CSS fixes look "not applied" until a
+       manual hard-refresh (#216 follow-up — the release-notes scroll fix was
+       correct on-box but the browser served the cached pre-fix CSS). #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v={{ stack_version|default('0') }}">
+    {% block page_extra_css %}{% endblock %}
+{% endblock %}
+
+{# config has no top header — the sidebar IS the navigation chrome. #}
+{% block header %}{% endblock %}
+
+{% block layout %}
+<div class="layout">
+    <nav class="sidebar">
+        {% include "components/nav.html" %}
+    </nav>
+    <main class="content">
+        {% block page_content %}{% endblock %}
+    </main>
+</div>
+{% include "components/apply_dialog.html" %}
+{% include "components/release_notes_whats_new.html" %}
+{% endblock %}
+
+{% block extra_js %}
+    <script src="{{ url_for('static', filename='htmx.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,307 @@
+{# Dashboard live fragment.
+
+   Layout (per operator feedback, 2026-04-27):
+   1. Health banner (full width)
+   2. Container Updates Available summary (full width, only if any)
+   3. Six-card row: CPU | RAM | GPU Util | GPU VRAM | Disk | Containers
+   4. Three-column grid:
+      - 30% Container Memory by Profile
+      - 30% Backup + Image Updates + LLM Models (with VRAM)
+      - 40% Recent Activity (full height)
+   5. Container Status Matrix (full width, sortable)
+   6. Alerts (full width, only if any)
+
+   Polled every 15s via HTMX outerHTML swap on the parent #dashboard-live
+   wrapper in index.html. The same template renders on first page load
+   via {% include %} from index.html. #}
+
+{# 1. Health banner #}
+<div class="card" style="margin-bottom:0.625rem;border-left:4px solid {% if health_status == 'healthy' %}#22c55e{% elif health_status == 'degraded' %}#eab308{% else %}#ef4444{% endif %}">
+    <div class="card-body" style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.875rem">
+        <div>
+            <span class="status-dot status-{% if health_status == 'healthy' %}green{% elif health_status == 'degraded' %}yellow{% else %}red{% endif %}" style="width:12px;height:12px"></span>
+            <strong style="margin-left:0.25rem">Stack {{ health_status | capitalize }}</strong>
+            <span style="color:var(--color-text-muted);margin-left:0.75rem">{{ running }} / {{ total }} containers running</span>
+        </div>
+        <div style="font-size:0.75rem;color:var(--color-text-muted)">{{ config.domain }} &middot; refresh 15 s</div>
+    </div>
+</div>
+
+{# 2. Container Updates Summary (full width, only when something to show) #}
+{% if manifest_update_count > 0 or cve_alerts %}
+<div class="card" style="margin-bottom:0.625rem;border-left:4px solid {% if cve_alerts %}#ef4444{% else %}#3b82f6{% endif %}">
+    <div class="card-body" style="padding:0.5rem 0.875rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.8125rem">
+            <div>
+                <strong style="color:{% if cve_alerts %}#991b1b{% else %}#1e40af{% endif %}">
+                    {% if cve_alerts %}Security Updates Available{% else %}Container Updates Available{% endif %}
+                </strong>
+                <span style="margin-left:0.5rem;color:var(--color-text-muted)">{{ manifest_update_count }} update{{ 's' if manifest_update_count != 1 else '' }}</span>
+                {% if cve_alerts %}
+                <span style="margin-left:0.5rem">
+                    {% for cve in cve_alerts[:3] %}
+                    <span class="badge" style="background:#fee2e2;color:#991b1b;font-size:0.6875rem">{{ cve.cve }}</span>
+                    {% endfor %}
+                    {% if cve_alerts | length > 3 %}<span style="color:var(--color-text-muted);font-size:0.6875rem">+{{ cve_alerts | length - 3 }} more</span>{% endif %}
+                </span>
+                {% endif %}
+            </div>
+            <a href="{{ url_for('modules.overview', status='updates') }}" style="font-size:0.75rem;color:var(--color-brand)">View modules &rarr;</a>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# 3. Six-card resource row: CPU | RAM | GPU Util | GPU VRAM | Disk | Containers
+   No-GPU and multi-GPU layouts auto-fit (each GPU adds 2 cards: util + VRAM). #}
+{% set gpu_count = gpus | length %}
+{% set total_cards = 4 + (2 * gpu_count) %}
+<div style="display:grid;grid-template-columns:repeat({{ total_cards }},1fr);gap:0.5rem;margin-bottom:0.875rem">
+    {# CPU #}
+    <div class="card">
+        <div class="card-header" style="padding:0.4rem 0.625rem;font-size:0.75rem">CPU</div>
+        <div class="card-body" style="padding:0.5rem 0.625rem">
+            <div class="memory-bar" style="margin-bottom:0.25rem">
+                <div class="memory-bar-fill" style="width:{{ cpu_pct }}%;background:{% if cpu_pct > 80 %}#f97316{% elif cpu_pct > 50 %}#eab308{% else %}#3b82f6{% endif %}"></div>
+            </div>
+            <div style="font-size:1rem;font-weight:600;line-height:1.1">{{ cpu_pct }}<span style="font-size:0.625rem;color:var(--color-text-muted);margin-left:0.125rem">%</span></div>
+            <div style="font-size:0.6875rem;color:var(--color-text-muted)">host load</div>
+        </div>
+    </div>
+    {# RAM #}
+    <div class="card">
+        <div class="card-header" style="padding:0.4rem 0.625rem;font-size:0.75rem">RAM</div>
+        <div class="card-body" style="padding:0.5rem 0.625rem">
+            {% set ram_pct = ((system.used_mb / system.total_mb * 100) if system.total_mb else 0) | round(1) %}
+            <div class="memory-bar" style="margin-bottom:0.25rem">
+                <div class="memory-bar-fill" style="width:{{ ram_pct }}%;background:{% if ram_pct > 85 %}#f97316{% elif ram_pct > 70 %}#eab308{% else %}#3b82f6{% endif %}"></div>
+            </div>
+            <div style="font-size:1rem;font-weight:600;line-height:1.1">{{ (system.used_mb / 1024) | round(1) }}<span style="font-size:0.625rem;color:var(--color-text-muted);margin-left:0.125rem">/ {{ (system.total_mb / 1024) | round(1) }} GB</span></div>
+            <div style="font-size:0.6875rem;color:var(--color-text-muted)">host system</div>
+        </div>
+    </div>
+    {# Per-GPU pair: util card + VRAM card. Header carries host name when the
+       GPU comes from a worker box (gpu.host != 'local'); on single-box
+       installs every GPU is local and the host suffix is omitted. #}
+    {% for gpu in gpus %}
+    {% set host_suffix = '' %}
+    {% if gpu.host and gpu.host != 'local' %}
+        {% set host_suffix = ' · ' ~ gpu.host %}
+    {% endif %}
+    <div class="card">
+        <div class="card-header" style="padding:0.4rem 0.625rem;font-size:0.75rem">GPU{% if gpu_count > 1 %} {{ loop.index0 }}{% endif %} Util{{ host_suffix }}</div>
+        <div class="card-body" style="padding:0.5rem 0.625rem">
+            {% set util = gpu.busy_pct if gpu.busy_pct is not none else 0 %}
+            <div class="memory-bar" style="margin-bottom:0.25rem">
+                <div class="memory-bar-fill" style="width:{{ util }}%;background:{% if util > 85 %}#f97316{% elif util > 60 %}#eab308{% else %}#10b981{% endif %}"></div>
+            </div>
+            <div style="font-size:1rem;font-weight:600;line-height:1.1">{{ util }}<span style="font-size:0.625rem;color:var(--color-text-muted);margin-left:0.125rem">%</span></div>
+            <div style="font-size:0.6875rem;color:var(--color-text-muted)">compute load</div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header" style="padding:0.4rem 0.625rem;font-size:0.75rem">GPU{% if gpu_count > 1 %} {{ loop.index0 }}{% endif %} VRAM{{ host_suffix }}</div>
+        <div class="card-body" style="padding:0.5rem 0.625rem">
+            {% if gpu.vram_total_mib %}
+                {% set vpct = (gpu.vram_used_mib / gpu.vram_total_mib * 100) | round(1) %}
+                <div class="memory-bar" style="margin-bottom:0.25rem">
+                    <div class="memory-bar-fill" style="width:{{ vpct }}%;background:{% if vpct > 90 %}#f97316{% elif vpct > 75 %}#eab308{% else %}#10b981{% endif %}"></div>
+                </div>
+                <div style="font-size:1rem;font-weight:600;line-height:1.1">{{ (gpu.vram_used_mib / 1024) | round(1) }}<span style="font-size:0.625rem;color:var(--color-text-muted);margin-left:0.125rem">/ {{ (gpu.vram_total_mib / 1024) | round(0) }} GB</span></div>
+                <div style="font-size:0.6875rem;color:var(--color-text-muted)">{{ vpct }}% used</div>
+            {% else %}
+                <div style="font-size:0.875rem;color:var(--color-text-muted)">no VRAM info</div>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+    {# Disk #}
+    <div class="card">
+        <div class="card-header" style="padding:0.4rem 0.625rem;font-size:0.75rem">Disk</div>
+        <div class="card-body" style="padding:0.5rem 0.625rem">
+            <div class="memory-bar" style="margin-bottom:0.25rem">
+                <div class="memory-bar-fill" style="width:{{ disk.pct }}%;background:{% if disk.pct > 90 %}#ef4444{% elif disk.pct > 80 %}#f97316{% else %}#3b82f6{% endif %}"></div>
+            </div>
+            <div style="font-size:1rem;font-weight:600;line-height:1.1">{{ disk.used_gb }}<span style="font-size:0.625rem;color:var(--color-text-muted);margin-left:0.125rem">/ {{ disk.total_gb }} GB</span></div>
+            <div style="font-size:0.6875rem;color:var(--color-text-muted)">{{ disk.pct }}% used</div>
+        </div>
+    </div>
+    {# Containers #}
+    <div class="card">
+        <div class="card-header" style="padding:0.4rem 0.625rem;font-size:0.75rem">Containers</div>
+        <div class="card-body" style="padding:0.5rem 0.625rem">
+            <div style="font-size:1rem;font-weight:600;line-height:1.1">{{ running }}<span style="font-size:0.625rem;color:var(--color-text-muted);margin-left:0.125rem">/ {{ total }}</span></div>
+            <div style="font-size:0.6875rem;color:var(--color-text-muted)">running / total</div>
+        </div>
+    </div>
+</div>
+
+{# 4. Three-column grid: equal thirds. Col 1 = Container Memory by Profile,
+   Col 2 = Backup + Image Updates + LLM Models stacked, Col 3 = Recent Activity. #}
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.625rem;margin-bottom:0.875rem">
+
+    {# Col 1: Container Memory by Profile (30%) — host RAM by docker-compose profile.
+       The "(VRAM is in the GPU card)" label disambiguates from LLM model memory. #}
+    <div class="detail-section" style="margin:0">
+        <div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:baseline">
+            <span>Container Memory by Profile</span>
+            <span style="font-size:0.625rem;color:var(--color-text-muted);text-transform:none;letter-spacing:0;font-weight:400">host RAM only</span>
+        </div>
+        {% for pid, res in profile_resources.items() | sort(attribute='1.total_mb', reverse=true) %}
+        {% if res.total_mb > 10 and pid != '_untracked' %}
+        <div class="detail-row" style="font-size:0.8125rem">
+            <span class="detail-row-label">
+                <a href="{{ url_for('modules.detail', profile_id=pid) }}" style="color:inherit;text-decoration:none">{{ pid }}</a>
+            </span>
+            <span class="detail-row-value">
+                <span style="display:inline-block;width:60px;text-align:right;font-size:0.75rem">{{ (res.total_mb / 1024) | round(2) }} GB</span>
+                <span style="display:inline-block;width:55px;margin-left:0.375rem;vertical-align:middle">
+                    <span class="memory-bar" style="height:6px;display:inline-block;width:100%">
+                        <span class="memory-bar-fill" style="width:{{ (res.total_mb / system.total_mb * 100) | round(1) }}%"></span>
+                    </span>
+                </span>
+            </span>
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+
+    {# Col 2: Backup, Image Updates, LLM Models stacked (30%) #}
+    <div style="display:flex;flex-direction:column;gap:0.625rem">
+        <div class="detail-section" style="margin:0">
+            <div class="detail-section-title">Backup</div>
+            {% if backup %}
+            <div class="detail-row" style="font-size:0.8125rem"><span class="detail-row-label">Last</span><span class="detail-row-value" style="font-size:0.75rem">{{ backup.filename }}</span></div>
+            <div class="detail-row" style="font-size:0.8125rem"><span class="detail-row-label">Size</span><span class="detail-row-value">{{ backup.size_mb }} MB</span></div>
+            <div class="detail-row" style="font-size:0.8125rem"><span class="detail-row-label">Total</span><span class="detail-row-value">{{ backup.count }}</span></div>
+            {% else %}
+            <p style="font-size:0.8125rem;color:var(--color-text-muted)">No backups found.</p>
+            {% endif %}
+            <a href="{{ url_for('backup.index') }}" style="font-size:0.6875rem;color:var(--color-brand)">Manage backups &rarr;</a>
+        </div>
+
+        <div class="detail-section" style="margin:0" id="image-updates">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="detail-section-title" style="margin-bottom:0">Image Updates</div>
+                <button class="btn btn-sm btn-secondary" hx-post="/api/updates/check" hx-target="#update-results" hx-swap="innerHTML" hx-indicator="#update-spinner" style="font-size:0.6875rem;padding:0.125rem 0.375rem">Check</button>
+            </div>
+            <div id="update-results" hx-get="/api/updates" hx-trigger="load" hx-swap="innerHTML" style="margin-top:0.375rem;font-size:0.8125rem">
+                <p style="font-size:0.75rem;color:var(--color-text-muted)">Loading…</p>
+            </div>
+            <span id="update-spinner" class="htmx-indicator" style="font-size:0.6875rem;color:var(--color-text-muted)">Checking…</span>
+        </div>
+
+        <div class="detail-section" style="margin:0" id="gpustack-models">
+            <div class="detail-section-title">LLM Models <span style="font-size:0.625rem;color:var(--color-text-muted);text-transform:none;letter-spacing:0;font-weight:400">— loaded into the GPU above</span></div>
+            <div hx-get="/api/gpustack/models" hx-trigger="load, every 30s" hx-swap="innerHTML">
+                <p style="font-size:0.75rem;color:var(--color-text-muted)">Loading…</p>
+            </div>
+        </div>
+    </div>
+
+    {# Col 3: Recent Activity (40%, full height) #}
+    <div class="detail-section" style="margin:0">
+        <div class="detail-section-title">Recent Activity <a href="{{ url_for('governance.index') }}" style="float:right;font-size:0.625rem;color:var(--color-brand);text-transform:none;letter-spacing:0;font-weight:400">View all &rarr;</a></div>
+        {% for e in recent_entries %}
+        <div class="detail-row" style="align-items:flex-start">
+            <span class="detail-row-label" style="font-size:0.6875rem;color:var(--color-text-muted);min-width:90px">{{ e.timestamp[:16] if e.timestamp else '' }}</span>
+            <span class="detail-row-value" style="font-size:0.75rem">
+                <span class="badge badge-origin" style="font-size:0.625rem">{{ e.event }}</span>
+                {{ e.detail or e.target or '' }}
+            </span>
+        </div>
+        {% endfor %}
+        {% if not recent_entries %}
+        <p style="font-size:0.8125rem;color:var(--color-text-muted)">No recent activity.</p>
+        {% endif %}
+    </div>
+</div>
+
+{# 5. Container Status Matrix — sortable; uptime + image are new columns. #}
+<div class="detail-section full-width" style="margin-bottom:0.625rem">
+    <div class="detail-section-title">Container Status Matrix ({{ container_matrix | length }})</div>
+    <table class="container-table" id="matrix-table" style="font-size:0.8125rem">
+        <thead><tr>
+            <th data-sort-col="0" data-sort-type="text" style="cursor:pointer">Container ⇅</th>
+            <th data-sort-col="1" data-sort-type="text" style="cursor:pointer">Profile ⇅</th>
+            <th data-sort-col="2" data-sort-type="text" style="cursor:pointer">Status ⇅</th>
+            <th data-sort-col="3" data-sort-type="numeric" data-sort-key="uptime" style="cursor:pointer">Uptime ⇅</th>
+            <th data-sort-col="4" data-sort-type="text" style="cursor:pointer">Image ⇅</th>
+            <th data-sort-col="5" data-sort-type="numeric" style="cursor:pointer;text-align:right">Memory ⇅</th>
+            <th data-sort-col="6" data-sort-type="numeric" style="cursor:pointer;text-align:right">CPU ⇅</th>
+        </tr></thead>
+        <tbody>
+            {% for c in container_matrix %}
+            <tr>
+                <td><code style="font-size:0.6875rem">{{ c.name }}</code></td>
+                <td>{% if c.profile != '_untracked' %}<a href="{{ url_for('modules.detail', profile_id=c.profile) }}" style="font-size:0.75rem;color:var(--color-brand);text-decoration:none">{{ c.profile }}</a>{% else %}<span style="color:var(--color-text-muted)">—</span>{% endif %}</td>
+                <td><span class="status-dot status-{{ 'green' if c.state == 'running' else 'red' if c.state == 'restarting' else 'gray' }}"></span> {{ c.state }}</td>
+                {# Uptime: display the human string but stash the numeric value in data-sort for sortable. #}
+                <td data-sort-value="{{ c.uptime_s }}" style="font-size:0.75rem;color:var(--color-text-muted)">
+                    {% if c.uptime_s > 0 %}{{ c.status_text | replace('Up ', '') }}{% else %}—{% endif %}
+                </td>
+                <td style="font-size:0.6875rem;color:var(--color-text-muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ c.image }}">
+                    <code>{{ c.image }}</code>
+                </td>
+                <td style="text-align:right">{{ c.memory_mb }} MB</td>
+                <td style="text-align:right">{{ c.cpu_pct }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{# 6. Alerts — only when something to show #}
+{% if alerts %}
+<div class="detail-section" style="border-left:3px solid #eab308">
+    <div class="detail-section-title">Alerts ({{ alerts | length }})</div>
+    {% for alert in alerts %}
+    <div class="detail-row" style="font-size:0.8125rem">
+        <span class="detail-row-label">
+            {% if alert.level == 'error' %}<span class="badge badge-risk-danger">error</span>
+            {% else %}<span class="badge badge-risk-caution">warning</span>{% endif %}
+        </span>
+        <span class="detail-row-value">
+            {{ alert.text }}
+            {% if alert.link %}<a href="{{ alert.link }}" style="font-size:0.6875rem;color:var(--color-brand);margin-left:0.5rem">Fix &rarr;</a>{% endif %}
+        </span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# Sortable matrix: data-sort-value on <td> overrides textContent for numeric
+   sorting (so "Up 12 minutes" sorts by uptime_s, "Memory" sorts by mb).
+   Header click toggles direction; arrow indicator updates. #}
+<script>
+(function() {
+    var table = document.getElementById('matrix-table');
+    if (!table) return;
+    var sortDir = window.__matrixSortDir || (window.__matrixSortDir = {});
+    var headers = table.querySelectorAll('th[data-sort-col]');
+    headers.forEach(function(th) {
+        th.addEventListener('click', function() {
+            var col = parseInt(th.getAttribute('data-sort-col'), 10);
+            var type = th.getAttribute('data-sort-type') || 'text';
+            var dir = sortDir[col] = !(sortDir[col] || false);
+            var tbody = table.querySelector('tbody');
+            var rows = Array.from(tbody.querySelectorAll('tr'));
+            rows.sort(function(a, b) {
+                var ca = a.cells[col], cb = b.cells[col];
+                var va = ca.getAttribute('data-sort-value');
+                var vb = cb.getAttribute('data-sort-value');
+                if (va === null) va = ca.textContent.trim();
+                if (vb === null) vb = cb.textContent.trim();
+                if (type === 'numeric') {
+                    var na = parseFloat(va), nb = parseFloat(vb);
+                    if (isNaN(na)) na = -Infinity;
+                    if (isNaN(nb)) nb = -Infinity;
+                    return dir ? na - nb : nb - na;
+                }
+                return dir ? va.localeCompare(vb) : vb.localeCompare(va);
+            });
+            rows.forEach(function(r) { tbody.appendChild(r); });
+        });
+    });
+})();
+</script>

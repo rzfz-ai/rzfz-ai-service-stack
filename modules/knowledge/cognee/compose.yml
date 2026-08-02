@@ -1,0 +1,324 @@
+# ==============================================================================
+# COGNEE MODULE (GraphRAG Knowledge Engine) [EXPERIMENTAL]
+# ==============================================================================
+# Profile: cognee
+# Description: Knowledge engine for AI agent memory with GraphRAG.
+#              Uses Kuzu (embedded) for graph storage, PostgreSQL/pgvector for
+#              relational and vector data, GPUStack for LLM/embedding.
+# Status: Experimental — not included in any init package preset.
+#         Must be enabled manually via setup UI or COMPOSE_PROFILES.
+# Config: .env (global)
+# Dependencies: postgres (pgvector), GPUStack
+# ==============================================================================
+services:
+  # ==========================================
+  # Cognee: Knowledge Engine with GraphRAG
+  # ==========================================
+  cognee:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["cognee"]
+    container_name: cognee
+    restart: unless-stopped
+    # #36 security-review — coding-agents net for sandbox tools; #36 BLOCKER-1 —
+    # ALSO cognee-backend so per-user cognee proxies reach cognee:8000 WITHOUT
+    # sharing the coding-agents bridge with sandboxes.
+    networks:
+      - default
+      - coding-agents
+      - cognee-backend
+    ports:
+      - "127.0.0.1:${COGNEE_PORT:-8000}:8000"
+    environment:
+      # Server settings
+      - HOST=0.0.0.0
+      # ENVIRONMENT MUST be `production` (2026.07 #79). Upstream cognee
+      # entrypoint.sh runs gunicorn with `--reload --log-level debug` when
+      # ENVIRONMENT is `dev` OR `local`, and only the plain production line
+      # (`--log-level error`, no `--reload`) otherwise. The `--reload` path
+      # arms gunicorn's file-watching reloader, which spawns a
+      # multiprocessing child (resource_tracker + spawn) under the single
+      # UvicornWorker. On (re)start this intermittently deadlocks: every
+      # worker thread parks in futex_do_wait, /health never returns 200,
+      # and `health: starting` sticks forever (CPU idle). Dropping --reload
+      # (ENVIRONMENT=production) removed it: 8/8 clean restarts on 0.91
+      # (2026.07 tree) vs. the prior intermittent hang. `--reload` is a
+      # dev-only convenience with no place in a shipped image anyway.
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - LOG_LEVEL=${COGNEE_LOG_LEVEL:-INFO}
+      # F-020: Restrict CORS to specific origins instead of wildcard
+      - CORS_ALLOWED_ORIGINS=https://${COGNEE_DOMAIN:-cognee.${MAIN_DOMAIN:-razzfazz-box}},https://${OPENWEBUI_DOMAIN:-chat.${MAIN_DOMAIN:-razzfazz-box}}
+      - TELEMETRY_DISABLED=true
+      # rc6.7 #69: trust Caddy's X-Forwarded-Proto so FastAPI's
+      # redirect_slashes (e.g. POST /api/v1/datasets/ → /api/v1/datasets)
+      # emits `Location: https://…` instead of `http://…`. Without this,
+      # uvicorn's default `forwarded_allow_ips=127.0.0.1` ignores the
+      # header (Caddy connects from a docker-bridge IP), so the redirect
+      # URL uses the plain-HTTP transport scheme between Caddy and
+      # cognee. The browser then refuses to follow the 307 (mixed-content
+      # downgrade from an HTTPS page) and surfaces it as `TypeError:
+      # Failed to fetch` / `[LOCAL-API] ✗ POST … ERROR: TypeError: Failed
+      # to fetch` in the cognee-frontend dataset-create flow.
+      # GUNICORN_CMD_ARGS makes gunicorn forward --forwarded-allow-ips=*
+      # to the uvicorn worker, enabling ProxyHeadersMiddleware. `*` is
+      # safe here because cognee:8000 only accepts traffic from the
+      # docker bridge (Caddy is the sole reachable peer; the host port
+      # is bound to 127.0.0.1).
+      - GUNICORN_CMD_ARGS=--forwarded-allow-ips=*
+
+      # Authentication (fastapi-users with email/password + JWT)
+      - DEFAULT_USER_EMAIL=razzfazz-ai-admin@${MAIN_DOMAIN:-razzfazz-box}
+      - DEFAULT_USER_PASSWORD=${COGNEE_ADMIN_PASSWORD:-${AUTHENTIK_BOOTSTRAP_PASSWORD:-}}
+
+      # Relational database (shared PostgreSQL instance, dedicated database)
+      - DB_PROVIDER=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${COGNEE_DB:-cognee_db}
+      - DB_USERNAME=${POSTGRES_USER:-docker}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-}
+
+      # Vector database (pgvector in shared PostgreSQL)
+      - VECTOR_DB_PROVIDER=pgvector
+      - VECTOR_DB_URL=postgres
+      # VECTOR_DB_HOST is REQUIRED when ENABLE_BACKEND_ACCESS_CONTROL=true (#36):
+      # cognee's access-control path builds the pgvector DSN from
+      # host+port+username+password (create_vector_engine.py) and raises
+      # "Missing required pgvector credentials" if host is unset — which wedges
+      # /health at 503 and blocks dependents. The non-access-control path uses
+      # VECTOR_DB_URL instead, so this was previously unset. Set to the same host.
+      - VECTOR_DB_HOST=postgres
+      - VECTOR_DB_PORT=5432
+      - VECTOR_DB_NAME=${COGNEE_DB:-cognee_db}
+      - VECTOR_DB_USERNAME=${POSTGRES_USER:-docker}
+      - VECTOR_DB_PASSWORD=${POSTGRES_PASSWORD:-}
+
+      # Graph database: Kuzu (embedded — no separate container)
+      # Default; cognee 1.0 uses kuzu under .cognee_system if unset.
+      - GRAPH_DATABASE_PROVIDER=kuzu
+      # #186 (Defect 1): on start, kuzu-migrate.py compares the on-disk graph
+      # storage FORMAT (major.minor) against the running ladybug engine and, when
+      # OLDER (e.g. a box that crossed 0.16 -> 0.17), runs cognee's official
+      # export/import migration — AFTER taking its own backup copy of the store
+      # (backup-or-abort; the original is also kept as *_old_). Storage-format
+      # gated (a patch-level diff is a no-op) and non-fatal. Set false to disable
+      # the automatic migration on air-gapped boxes / under a maintenance window:
+      # the helper then still DETECTS the stale format and logs the manual
+      # `ladybug_migrate …` recovery command instead of running it.
+      - COGNEE_KUZU_AUTO_MIGRATE=${COGNEE_KUZU_AUTO_MIGRATE:-true}
+      # #36 two-tier memory: access control gates per-user isolation. When ON,
+      # every /api/* call requires auth and datasets are owned/scoped per user —
+      # this is what makes "Personal Memory (private)" TRULY isolated (and the
+      # mcp-manager FAIL-CLOSES personal cognee provisioning when it's OFF, so we
+      # never claim isolation we can't deliver). All in-stack callers already
+      # authenticate (OWUI pipe + sidecars log in / present API keys), so turning
+      # this on does not break them — see the caller inventory in the PR. Default
+      # ON for the two-tier model; operators can force OFF via .env for a
+      # single-tenant box. REQUIRE_AUTHENTICATION follows the same switch.
+      # #186 (Defect 2) KNOWN LIMITATION: with access control ON, the
+      # knowledge-graph VISUALIZATION reads the per-user/per-dataset graph store
+      # (.cognee_system/databases/<user_id>/<name>), NOT the global
+      # cognee_graph_kuzu store. The per-dataset store is only populated by the
+      # normal add/cognify pipeline while access control is on — cognee ships NO
+      # API to rebuild it from the global graph, and a re-cognify idempotent-skips
+      # already-processed docs. So on a box whose data pre-dates access control
+      # (or was migrated by kuzu-migrate.py, which fixes the GLOBAL store), the
+      # viz can still read empty. The only lever that makes the viz read the
+      # populated global graph is COGNEE_ACCESS_CONTROL=false (set explicitly —
+      # unset defaults ON for kuzu/ladybug). We do NOT flip the default here
+      # (that would drop per-user isolation, #36); operators who need the global
+      # viz on a single-tenant box set COGNEE_ACCESS_CONTROL=false in .env.
+      - ENABLE_BACKEND_ACCESS_CONTROL=${COGNEE_ACCESS_CONTROL:-true}
+      - REQUIRE_AUTHENTICATION=${COGNEE_ACCESS_CONTROL:-true}
+
+      # LLM configuration (via GPUStack OpenAI-compatible API)
+      # 'custom' provider uses GenericAPIAdapter (litellm-based, no strict Ollama validation)
+      - LLM_PROVIDER=custom
+      - LLM_ENDPOINT=http://gpustack:9090/v1-openai
+      - LLM_API_KEY=${GPUSTACK_API_KEY:-}
+      - LLM_MODEL=${COGNEE_LLM_MODEL:-}
+      # M031 S3: LLM_ARGS resolves from .env so core/llm/sync.py can push
+      # max_tokens (per_slot_context / 4) into the value alongside the
+      # operator-set thinking-disable. Default below preserves the baseline
+      # when sync.py hasn't run yet. NOTE (#170): GPUStack/llama-box only
+      # honours the disable via chat_template_kwargs — the bare
+      # extra_body.enable_thinking is ignored, so qwen3.6 keeps reasoning and
+      # cognify times out. Must be the chat_template_kwargs nesting.
+      - LLM_ARGS=${LLM_ARGS:-{"extra_body":{"chat_template_kwargs":{"enable_thinking":false}}}}
+      # Skip the pre-flight LLM connection test that runs on every /api/v1/add.
+      # The test has a hard 30s timeout and hangs against GPUStack's
+      # /v1-openai/chat/completions when other gemma4 slots are saturated
+      # (e.g. parallel chat traffic), causing every upload to 500 even though
+      # the actual LLM endpoint is healthy. Real upload requests fail fast on
+      # their own if the LLM is genuinely down — the pre-flight is redundant.
+      - COGNEE_SKIP_CONNECTION_TEST=true
+      # Rate limit LLM calls to 1 concurrent request (leaves GPUStack slots for chat)
+      - LLM_RATE_LIMIT_ENABLED=true
+      - LLM_RATE_LIMIT_REQUESTS=1
+      - LLM_RATE_LIMIT_INTERVAL=1
+      - EMBEDDING_RATE_LIMIT_ENABLED=true
+      - EMBEDDING_RATE_LIMIT_REQUESTS=1
+      - EMBEDDING_RATE_LIMIT_INTERVAL=1
+
+      # Embedding configuration (via GPUStack OpenAI-compatible API)
+      # 'openai_compatible' uses cognee's OpenAICompatibleEmbeddingEngine — talks
+      # to an arbitrary /v1/embeddings endpoint, passes the model id verbatim
+      # (no 'openai/' prefix mangling), and forwards the dimensions param.
+      - EMBEDDING_PROVIDER=openai_compatible
+      # NOTE: /v1 (not /v1-openai) — cognee's OpenAICompatibleEmbeddingEngine
+      # normalizes to end in /v1 then lets the openai SDK append /embeddings.
+      # GPUStack serves both /v1 and /v1-openai; /v1 is the one this engine
+      # can reach. LLM_ENDPOINT above keeps /v1-openai because the LLM side
+      # uses the 'custom' provider / GenericAPIAdapter, not this engine.
+      - EMBEDDING_ENDPOINT=http://gpustack:9090/v1
+      - EMBEDDING_API_KEY=${GPUSTACK_API_KEY:-}
+      - EMBEDDING_MODEL=${COGNEE_EMBEDDING_MODEL:-}
+      - EMBEDDING_DIMENSIONS=${COGNEE_EMBEDDING_DIM:-768}
+      - HUGGINGFACE_TOKENIZER=${COGNEE_EMBEDDING_TOKENIZER:-}
+    volumes:
+      - cognee-data:/app/cognee/.cognee_system
+      - cognee-data-storage:/app/cognee/.data_storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+
+  # ==========================================
+  # Cognee Frontend: Next.js UI [EXPERIMENTAL]
+  # ==========================================
+  # Built from upstream cognee-frontend source at the same tag as the cognee
+  # backend image (see knowledge/cognee/frontend/Dockerfile). Upstream does
+  # NOT publish a frontend image, so this is a local build (mirrors paperclip).
+  #
+  # Routing: Caddy serves cognee.<domain>/ from this container and forwards
+  # /api/* to the cognee backend on :8000. The browser talks to the frontend
+  # over HTTPS only — never directly to :3000.
+  cognee-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Backend HOST base URL the browser will hit. v1.0.1 source code
+        # builds API URLs as `${NEXT_PUBLIC_LOCAL_API_URL}/api/v1/...`, so
+        # we pass JUST the host (no /api suffix). Caddy on the cognee
+        # subdomain forwards /api/* through to cognee:8000 unchanged.
+        # NOTE: NEXT_PUBLIC_* is INLINED AT BUILD TIME by Next.js — the
+        # runtime env var below is only a safety net for SSR.
+        NEXT_PUBLIC_LOCAL_API_URL: "https://${COGNEE_DOMAIN:-cognee.${MAIN_DOMAIN:-razzfazz-box}}"
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["cognee"]
+    container_name: cognee-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${COGNEE_FRONTEND_PORT:-8012}:3000"
+    environment:
+      # Mirrors the build arg — used by SSR routes like /api/visualize that
+      # read process.env.NEXT_PUBLIC_LOCAL_API_URL at request time.
+      - NEXT_PUBLIC_LOCAL_API_URL=https://${COGNEE_DOMAIN:-cognee.${MAIN_DOMAIN:-razzfazz-box}}
+    depends_on:
+      cognee:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ==========================================
+  # cognee-mcp: MCP server exposing cognee as agent memory (M033 S12)
+  # ==========================================
+  # Lets MCP-capable agents (Moltis, Hermes) use cognee as a long-term memory
+  # backend. Runs in HTTP/streamable mode and talks to the cognee FastAPI above
+  # in "API mode" (no embedded DB) using a cognee API key as API_TOKEN.
+  #
+  # Validated live 2026-05-24 (dev): cognee/cognee-mcp:main exposes tools
+  # remember / recall / forget (+ cognify_file, list_datasets_json, …);
+  # API-mode auth to http://cognee:8000 with API_TOKEN=<cognee api key> works
+  # (list_datasets_json returned the real datasets). Serves MCP at
+  # http://cognee-mcp:8000/mcp. Agents wire it as a streamable-http MCP server.
+  #
+  # MCP_ALLOWED_HOSTS is REQUIRED: the MCP transport's DNS-rebinding guard
+  # defaults to localhost-only and rejects the service-name Host header with
+  # "Invalid Host header" — without this entry agents get connection failures.
+  #
+  # COGNEE_MCP_API_KEY is a cognee API key minted post-install (cognee
+  # /api/v1/auth/api-keys); empty → the sidecar can't authenticate to cognee.
+  cognee-mcp:
+    # Pinned to the immutable version tag matching the cognee backend base
+    # (cognee/cognee:1.4.0, see Dockerfile). Was the commit-pinned main-5fedeec;
+    # cognee now publishes semver mcp tags, so we track the backend line (#79).
+    # Bump deliberately on review, in lockstep with the backend base bump.
+    image: cognee/cognee-mcp:1.4.0
+    profiles: ["cognee"]
+    container_name: cognee-mcp
+    restart: unless-stopped
+    # #36 BLOCKER-2 — this sidecar authenticates to cognee as the ADMIN superuser
+    # (COGNEE_MCP_API_KEY) and exposes remember/recall/forget/cognify_file across
+    # ALL users with NO per-request auth. It MUST NOT sit on coding-agents (any
+    # sandbox could POST http://cognee-mcp:8000/mcp -> unauth admin-scoped all-user
+    # access + cognify_file RCE). Now on cognee-backend ONLY, off the sandbox
+    # bridge. Sandbox memory is the per-user cognee-personal/-company proxies; the
+    # shared-registry entry that wired this in (core/mcp/mcp-servers.yaml) is off.
+    networks:
+      - cognee-backend
+    environment:
+      - TRANSPORT_MODE=http
+      - API_URL=http://cognee:8000
+      - API_TOKEN=${COGNEE_MCP_API_KEY:-}
+      - LLM_API_KEY=${GPUSTACK_API_KEY:-}
+      - MCP_ALLOWED_HOSTS=cognee-mcp:8000
+    depends_on:
+      cognee:
+        condition: service_healthy
+    healthcheck:
+      # /mcp requires the streamable-http handshake; a TCP-level connect check
+      # is enough to confirm the server is listening.
+      test: ["CMD-SHELL", "python -c \"import socket;socket.create_connection(('127.0.0.1',8000),3)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # #36 BLOCKER-1 — auth-shim image builder for per-user cognee proxies. Builds
+  # razzfazz-mcp-cognee-authshim (cognee-mcp on loopback :8001 + a Host-
+  # independent per-instance bearer gate on :8000). One-shot builder.
+  cognee-authshim-image:
+    build:
+      context: ../../mcp-manager/cognee-authshim
+      dockerfile: Dockerfile
+    image: razzfazz-mcp-cognee-authshim:latest
+    pull_policy: never
+    profiles: ["cognee"]
+    container_name: cognee-authshim-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+volumes:
+  cognee-data:
+  cognee-data-storage:
+
+networks:
+  # #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+  coding-agents:
+    name: coding-agents
+    driver: bridge
+  # #36 BLOCKER-1 — dedicated net: cognee + per-user cognee proxies + the shared
+  # admin cognee-mcp sidecar ONLY (NOT sandboxes).
+  cognee-backend:
+    name: cognee-backend
+    driver: bridge

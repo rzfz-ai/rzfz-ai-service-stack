@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# Hardware overlay: AMD GPU (ROCm).
+# Used by the `llm` profile when HARDWARE=amd in .env. Activated via
+# COMPOSE_FILE=docker-compose.yml:llm/compose.devices.amd.yml (set automatically
+# by razzfazz-init.sh / razzfazz-upgrade.sh based on detected hardware).
+#
+# This is the validated path on AMD Ryzen AI Max+ PRO 395 (Radeon 8060S, gfx1151,
+# Strix Halo). For non-Strix-Halo AMD GPUs the same overlay applies, but the
+# custom backend registered by init-backends.py (kyuz0/amd-strix-halo-toolboxes)
+# may need to be swapped for a different runner image — see manifests/VERSIONS.md
+# `gpustack-rocm-runner` notes.
+
+services:
+  gpustack:
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # rc6.7 #63: pass the host's render gid by NUMBER, not by name. Both
+    # /dev/dri/renderD128 AND /dev/kfd are owned by root:render on the host
+    # (gid 992 on Ubuntu 24.04 / Strix Halo). Adding `render` by name does
+    # NOT work because docker-compose looks the name up in the IMAGE's
+    # /etc/group — gpustack's debian-based image has render at gid 109,
+    # which doesn't match the host devices. Result on a fresh init:
+    # `_amdgpu_device_initialize: amdgpu_query_info(ACCEL_WORKING) failed
+    # (-13)` (EACCES) and every model deploy hangs at replicas:1,
+    # ready_replicas:0 indefinitely.
+    #
+    # Wired via RENDER_GID in .env (razzfazz-init.sh detects it from
+    # `getent group render`; default 992 covers Ubuntu 24.04 / most modern
+    # distros, fall back is harmless on hosts where render owns the
+    # devices but lives at a different gid — operator can override via
+    # the .env knob).
+    group_add:
+      - video
+      - "${RENDER_GID:-992}"

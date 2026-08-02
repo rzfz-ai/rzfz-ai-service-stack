@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# OBSERVABILITY MODULE
+# ==============================================================================
+# Profile: observability
+# Description: Stack-wide LLM observability via OpenLIT (Apache 2.0). Captures
+#              LLM cost, latency, token usage, prompt analysis. Receives traces
+#              from the OpenWebUI pipe-filter (M019 S05).
+# Status: experimental
+# Config: .env (global)
+# Dependencies: none
+# Upstream: ghcr.io/openlit/openlit (Apache-2.0), clickhouse/clickhouse-server (Apache-2.0)
+# Web UI: https://observability.<domain>
+#
+# Three containers:
+#   openlit         — dashboard UI ONLY (Next.js on :3000). The openlit image
+#                     ships NO OTLP receiver — #193. It reads spans FROM
+#                     ClickHouse; it does not receive them.
+#   otel-collector  — the real OTLP collector (otel/opentelemetry-collector-
+#                     contrib). Receives OTLP on 4317/4318 (from the OpenWebUI
+#                     openlit_filter.py + any SDK) and writes otel_traces/
+#                     otel_logs/otel_metrics into ClickHouse via the clickhouse
+#                     exporter (create_schema). THIS is what makes the OpenLIT
+#                     dashboard populate — fixes #193. Optionally also ships ALL
+#                     container logs to an external OTLP target (#197) via the
+#                     otel-collector-logs-export.yaml overlay (opt-in, off by
+#                     default).
+#   clickhouse      — span/trace/metric/log store, memory-capped at 6g via
+#                     compose + internal config tuning (configs/
+#                     clickhouse-config.xml). 30-day TTL on the OpenLIT span
+#                     tables (configs/clickhouse-init.sh). A network-authable
+#                     `default` user (configs/clickhouse-users.xml) lets the
+#                     collector write over the docker network — #193 point 3.
+#
+# Backups: native ClickHouse `BACKUP TO Disk('backups', ...)` from
+#          core/backup/pre-backup.sh writes into the clickhouse-backup
+#          named volume; docker-volume-backup rolls it into the tar.gz.
+# ==============================================================================
+services:
+
+  openlit:
+    image: ghcr.io/openlit/openlit:${OBSERVABILITY_VERSION:-1.24.1}
+    profiles: ["observability"]
+    container_name: openlit
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "127.0.0.1:${OBSERVABILITY_PORT:-8200}:3000"
+    # NB: openlit exposes ONLY its UI (:3000). It does NOT listen on 4317/4318 —
+    # the openlit image ships no OTLP receiver (#193). Those receivers live on
+    # the otel-collector service below.
+    env_file:
+      - ../../.env
+    environment:
+      INIT_DB_HOST: clickhouse
+      INIT_DB_PORT: "8123"
+      INIT_DB_USERNAME: ${CLICKHOUSE_USER:-default}
+      INIT_DB_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      INIT_DB_DATABASE: openlit
+      # OpenLIT's Next.js client uses Prisma + SQLite for its own session/user
+      # state (separate from the ClickHouse trace store). Without this env var
+      # Prisma fails schema validation and the container restart-loops.
+      SQLITE_DATABASE_URL: "file:/app/client/data/data.db"
+      # Disable OpenLIT's own OAuth — auth handled by Caddy + Authentik forward_auth.
+      # Single shared admin session for the "razzfazz.ai Observability Users" group.
+      DISABLE_OAUTH_PROVIDERS: "true"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - observability-data:/app/client/data
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      # The openlit image ships only Node.js (no curl/wget/nc), and its Next.js
+      # server binds the container's bridge IP rather than 127.0.0.1. Probe via
+      # the container's hostname so it resolves to the bound interface.
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://'+require('os').hostname()+':3000',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.8.28.1}
+    profiles: ["observability"]
+    container_name: clickhouse
+    restart: unless-stopped
+    # 2026-05-17 (prod hotfix, ships in ga.4): bumped 2g → 6g. On prod-vm
+    # the prior 2g cgroup was hit by OpenLIT's continuous trace-write
+    # pattern — May 12 OOM event in dmesg; persistent ~300% CPU constantly
+    # merging 300+ small parts; even `SELECT system.query_log` failed with
+    # "Memory limit (total) exceeded: would use 1.75 GiB, maximum: 1.00 GiB".
+    # 6g gives ClickHouse engine ~3 GiB (per the 0.5 ratio in
+    # configs/clickhouse-config.xml) + 3 GiB for merge bursts + OS cache.
+    # See releases/v2026.05-ga.4/RELEASE_CHECKLIST.md Phase 1 findings.
+    mem_limit: 6g
+    user: "101:101"   # ClickHouse upstream image uid; aligns with clickhouse-backup volume owner
+    expose:
+      - "8123"   # HTTP — used by openlit
+      - "9000"   # native — used for backup queries
+    env_file:
+      - ../../.env
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DB: openlit
+      CLICKHOUSE_ALWAYS_RUN_INITDB_SCRIPTS: "true"
+      OBSERVABILITY_RETENTION_DAYS: ${OBSERVABILITY_RETENTION_DAYS:-30}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-backup:/var/lib/clickhouse/backups   # native BACKUP TO Disk target
+      - ./configs/clickhouse-config.xml:/etc/clickhouse-server/config.d/razzfazz-overrides.xml:ro
+      - ./configs/clickhouse-users.xml:/etc/clickhouse-server/users.d/zz-razzfazz-network.xml:ro
+      - ./configs/clickhouse-init.sh:/docker-entrypoint-initdb.d/init-openlit.sh:ro
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      # Use space-separated args (not --password=…) so an empty $CLICKHOUSE_PASSWORD
+      # doesn't trigger "the argument for option '--password' should follow
+      # immediately after the equal sign". When the password is empty, omit
+      # --password entirely — clickhouse-client 24.x doesn't accept --no-password
+      # (UNRECOGNIZED_ARGUMENTS) and a bare client call won't prompt because
+      # we're not on a TTY.
+      test: ["CMD-SHELL", "if [ -n \"$$CLICKHOUSE_PASSWORD\" ]; then clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'; else clickhouse-client --user \"$$CLICKHOUSE_USER\" --query 'SELECT 1'; fi"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 100s
+
+  # ==========================================================================
+  # OpenTelemetry Collector (M-OTEL, 2026.08) — fixes #193, delivers #197
+  # ==========================================================================
+  # The OTLP receiver + ClickHouse writer the openlit image never shipped. Two
+  # jobs, cleanly separated by config-file merge:
+  #   BASE  (otel-collector-config.yaml)          → OTLP in → ClickHouse. Always
+  #                                                 on. Makes OpenLIT populate.
+  #   OVERLAY (OTEL_COLLECTOR_LOGS_OVERLAY)        → filelog → external OTLP.
+  #         - otel-collector-logs-disabled.yaml (default, no-op)
+  #         - otel-collector-logs-export.yaml   (opt-in, #197)
+  # The disabled overlay means an unset external endpoint can NEVER break boot.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.130.1}
+    profiles: ["observability"]
+    container_name: otel-collector
+    restart: unless-stopped
+    mem_limit: 512m
+    # Merge base + the selected logs overlay. The overlay filename is the opt-in
+    # switch (razzfazz-init.sh / Config Portal set it from OTEL_LOG_EXPORT_ENABLED).
+    command:
+      - "--config=/etc/otelcol/otel-collector-config.yaml"
+      - "--config=/etc/otelcol/logs-overlay.yaml"
+    expose:
+      - "4317"   # OTLP gRPC — openlit_filter.py emits chat spans here
+      - "4318"   # OTLP HTTP — SDK auto-instrumentation from other backends
+    env_file:
+      - ../../.env
+    environment:
+      # Help the Go runtime honour the 512m cgroup (GC pressure before OOM).
+      GOMEMLIMIT: 450MiB
+      # Referenced via ${env:...} in the collector configs. env_file already
+      # loads these; listed explicitly for readability of the wiring.
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      OBSERVABILITY_RETENTION_DAYS: ${OBSERVABILITY_RETENTION_DAYS:-30}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-false}
+      MAIN_DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+    volumes:
+      - ./configs/otel-collector-config.yaml:/etc/otelcol/otel-collector-config.yaml:ro
+      - ./configs/${OTEL_COLLECTOR_LOGS_OVERLAY:-otel-collector-logs-disabled.yaml}:/etc/otelcol/logs-overlay.yaml:ro
+      # Container logs source for the #197 filelog receiver (read-only). Only
+      # tailed when the export overlay is active; harmless otherwise.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # filelog checkpoint storage (offsets survive restarts).
+      - otel-collector-data:/var/lib/otelcol
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    # No healthcheck: the contrib image is distroless (no shell/curl/wget/nc) so
+    # a CMD probe can't run. The collector exposes a health_check extension on
+    # :13133 for external monitors; liveness here is `restart: unless-stopped`.
+
+volumes:
+  observability-data:
+  clickhouse-data:
+  clickhouse-backup:
+  otel-collector-data:

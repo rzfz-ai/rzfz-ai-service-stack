@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{# M026 S07 #2: per-page styles moved to static/help-overrides.css. #}
+
+{% block content %}
+<div class="panel">
+    <h2>📚 Documentation</h2>
+    <p class="welcome-text">Welcome, <strong>{{ username }}</strong>. Choose a topic to get started.</p>
+
+    {# rzfz.ai Guides — auto-discovered from docs/enterprise/** (2026.07 docs
+       rework). Shown FIRST, above the per-app help. The index() view already
+       ROLE-FILTERED `own_sections`: stack admins see every Guide; non-admins see
+       only end-user-facing pages (tutorials, how-tos marked end-user), so the
+       whole block simply disappears for an end user with nothing to show. #}
+    {% if own_sections %}
+    <h3 class="section-title">rzfz.ai Guides</h3>
+    {% for group in own_sections %}
+    <h4 class="own-docs-section">{{ group.label }}</h4>
+    <div class="docs-grid">
+        {% for app in group.apps %}
+        <a class="doc-card" href="{{ url_for('view_docs', app_id=app.id) }}">
+            <img class="doc-card-icon" src="{{ url_for('static', filename='razzfazz-guide.svg') }}" alt="">
+            <div class="doc-card-content">
+                <div class="doc-card-title">{{ app.name }}</div>
+                {% if app.description %}
+                <div class="doc-card-desc">{{ app.description }}</div>
+                {% endif %}
+                <div class="doc-card-meta">
+                    <span class="badge">rzfz.ai</span>
+                </div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {# Application help — the upstream per-app documentation mirrors. Below the Guides. #}
+    {% set external_apps = apps | rejectattr('is_own', 'equalto', true) | list %}
+    {% if external_apps %}
+    {% if own_sections %}<hr class="own-docs-divider">{% endif %}
+    <h3 class="section-title">Application Help</h3>
+    <div class="docs-grid">
+        {% for app in external_apps %}
+        <a class="doc-card" href="{{ url_for('view_docs', app_id=app.id) }}">
+            {% if app.get('icon') %}
+            <img src="{{ app.icon }}" alt="{{ app.name }}">
+            {% endif %}
+            <div class="doc-card-content">
+                <div class="doc-card-title">{{ app.name }}</div>
+                <div class="doc-card-desc">{{ app.description }}</div>
+                <div class="doc-card-meta">
+                    {% if app.version %}
+                    <span class="badge" title="Installed version (from manifests/versions.json)">{{ app.version }}</span>
+                    {% endif %}
+                    <span class="badge badge-info">{{ app.license }}</span>
+                    {% if app.get('cached') %}
+                    <span class="badge badge-success">✓ Cached</span>
+                    {% else %}
+                    <span class="badge badge-warning">⚠ Not cached</span>
+                    {% endif %}
+                </div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+{% if is_admin %}
+<div class="panel" style="text-align: center;">
+    <p style="color: #666; margin: 0;">
+        <a href="{{ url_for('admin_cache') }}" class="button button-secondary button-small">⚙️ Manage Documentation Cache</a>
+    </p>
+</div>
+{% endif %}
+{% endblock %}
