@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# Hardware overlay: NVIDIA GPU (CUDA).
+# Used by the `llm` profile when HARDWARE=nvidia in .env. Activated via
+# COMPOSE_FILE=docker-compose.yml:llm/compose.devices.nvidia.yml.
+#
+# UNTESTED in M018 — design only. We don't have NVIDIA hardware in the SEQIS
+# fleet at the time of this commit. The structure follows GPUStack's documented
+# pattern: gpustack/runner:cuda12.X-vllm0.X.X is auto-pulled by GPUStack's
+# scheduler when a model targets the built-in vLLM backend on a worker that
+# advertises an NVIDIA device (see https://github.com/gpustack/runner README).
+#
+# Requires nvidia-container-toolkit installed on the host (apt-get install
+# nvidia-container-toolkit; systemctl restart docker).
+#
+# Validate against a real NVIDIA box before relying on this in production.
+
+services:
+  gpustack:
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

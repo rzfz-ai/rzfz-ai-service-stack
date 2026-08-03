@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block page_title %}MCP Integrations{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>MCP Integrations</h1>
+    <p class="page-subtitle">Govern which per-user MCP integrations are available and the minimum tier required to provision each one</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{% if mcp_err %}
+<div class="flash flash-error" style="margin-bottom:1rem">{{ mcp_err }}</div>
+<p style="font-size:0.8125rem;color:var(--color-text-muted)">
+    MCP integration governance requires the MCP Manager to be running.
+    Enable the <strong>mcp</strong> profile in Modules and ensure
+    <code>MCP_INTERNAL_TOKEN</code> is set.
+</p>
+{% else %}
+<p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:1rem">
+    Each row controls a personal MCP integration. Disable one to hide it from
+    every user, or raise its minimum tier so only Power/Admin users can provision
+    it. Enforcement is server-side in the MCP Manager — a lower-tier user cannot
+    see or provision an integration above their tier even via the API. Applied
+    live (no restart).
+</p>
+{% for integ in integrations %}
+<div class="detail-section" style="margin-bottom:0.75rem">
+    <form method="post" action="{{ url_for('settings.mcp_integration_save', mcp_id=integ.mcp_id) }}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+            <div>
+                <strong>{{ integ.display_name }}</strong>
+                <span style="font-size:0.75rem;color:var(--color-text-muted)">({{ integ.mcp_id }})</span>
+                <span class="badge" style="font-size:0.7rem;margin-left:0.5rem;padding:0.1rem 0.4rem;border:1px solid var(--color-border);border-radius:3px">
+                    tenancy: {{ integ.tenancy }}
+                </span>
+            </div>
+            <div style="display:flex;align-items:center;gap:1rem">
+                <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8125rem">
+                    <input type="checkbox" name="available" value="true" {% if integ.available %}checked{% endif %}>
+                    Available
+                </label>
+                <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8125rem">
+                    Min tier
+                    <select name="min_tier">
+                        {% for t in tiers %}
+                        <option value="{{ t }}" {% if integ.min_tier == t %}selected{% endif %}>{{ t }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <button type="submit" class="btn btn-sm">Save</button>
+            </div>
+        </div>
+    </form>
+</div>
+{% endfor %}
+
+{# Company Brain (shared Cognee memory) — #36 two-tier #}
+<div class="detail-section" style="margin-top:1.5rem">
+    <h2 style="font-size:1rem;margin-bottom:0.5rem">Company Brain (shared Cognee memory)</h2>
+    <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:0.75rem">
+        Create a shared, curated knowledge base every entitled user can READ from
+        their agents. Writing is reserved for power/admin users (curated). This is
+        distinct from <strong>Personal Memory (private)</strong>, which is truly
+        isolated per user (each user sees only their own).
+    </p>
+    <form method="post" action="{{ url_for('settings.mcp_company_brain_create') }}"
+          style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+        <input type="text" name="company_dataset" placeholder="company_brain"
+               style="min-width:220px" required>
+        <button type="submit" class="btn btn-sm">Create / curate company brain</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

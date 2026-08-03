@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block page_title %}RAG Models{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>RAG Models</h1>
+    <p class="page-subtitle">LLM, embedding and reranker model selection for the Cognee &amp; LightRAG knowledge engines</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{# Shared datalist of model IDs GPUStack currently exposes. Empty when
+   GPUStack is unreachable or no API key is set — the inputs then accept
+   free text. #}
+<datalist id="gpustack-models-list">
+    {% for m in available_models %}<option value="{{ m }}">{% endfor %}
+</datalist>
+{% if not available_models %}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    GPUStack model list is unavailable (key not set or server unreachable). You can still type a model name manually.
+</div>
+{% endif %}
+
+<!-- Cognee -->
+<form method="POST" action="{{ url_for('settings.rag_models_cognee_save') }}" class="settings-form">
+    <div class="detail-section" style="margin-bottom:1.5rem">
+        <div class="detail-section-title">Cognee
+            {% if config.cognee.is_configured %}<span class="badge badge-production">Configured</span>{% else %}<span class="badge badge-experimental">Not configured</span>{% endif %}
+        </div>
+        <p style="font-size:0.8125rem;color:var(--color-text-secondary);margin-bottom:0.75rem">
+            Cognee routes through litellm — its LLM model needs a
+            <code>&lt;provider&gt;/&lt;model&gt;</code> prefix (e.g. <code>openai/qwen3.6</code>).
+        </p>
+        <div class="form-group">
+            <label class="form-label">LLM model</label>
+            <input type="text" name="llm_model" list="gpustack-models-list" required
+                   value="{{ config.cognee.llm_model }}" class="apply-input" placeholder="openai/qwen3.6">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Embedding model</label>
+            <input type="text" name="embedding_model" list="gpustack-models-list" required
+                   value="{{ config.cognee.embedding_model }}" class="apply-input" placeholder="qwen3-embedding">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Embedding dimension</label>
+            <input type="text" name="embedding_dim" value="{{ config.cognee.embedding_dim }}"
+                   class="apply-input" placeholder="768">
+        </div>
+        <div class="apply-actions" style="padding-top:0.5rem">
+            <button type="submit" class="btn btn-primary">Save &amp; Apply (Cognee)</button>
+        </div>
+    </div>
+</form>
+
+<!-- LightRAG -->
+<form method="POST" action="{{ url_for('settings.rag_models_lightrag_save') }}" class="settings-form">
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">LightRAG
+            {% if config.lightrag.is_configured %}<span class="badge badge-production">Configured</span>{% else %}<span class="badge badge-experimental">Not configured</span>{% endif %}
+        </div>
+        <p style="font-size:0.8125rem;color:var(--color-text-secondary);margin-bottom:0.75rem">
+            LightRAG uses the OpenAI SDK directly — use the bare model name (e.g. <code>qwen3.6</code>).
+        </p>
+        <div class="form-group">
+            <label class="form-label">LLM model</label>
+            <input type="text" name="llm_model" list="gpustack-models-list" required
+                   value="{{ config.lightrag.llm_model }}" class="apply-input" placeholder="qwen3.6">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Embedding model</label>
+            <input type="text" name="embedding_model" list="gpustack-models-list" required
+                   value="{{ config.lightrag.embedding_model }}" class="apply-input" placeholder="qwen3-embedding">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Reranker binding</label>
+            <select name="rerank_binding" class="apply-input" onchange="toggleRerank()">
+                <option value="null" {% if config.lightrag.rerank_binding == 'null' %}selected{% endif %}>None (disabled)</option>
+                <option value="cohere" {% if config.lightrag.rerank_binding == 'cohere' %}selected{% endif %}>cohere</option>
+                <option value="jina" {% if config.lightrag.rerank_binding == 'jina' %}selected{% endif %}>jina</option>
+            </select>
+        </div>
+        <div class="form-group" id="rerank-model-group" style="{% if config.lightrag.rerank_binding == 'null' %}display:none{% endif %}">
+            <label class="form-label">Reranker model</label>
+            <input type="text" name="rerank_model" value="{{ config.lightrag.rerank_model }}"
+                   class="apply-input" placeholder="rerank model name">
+        </div>
+        <div class="apply-actions" style="padding-top:0.5rem">
+            <button type="submit" class="btn btn-primary">Save &amp; Apply (LightRAG)</button>
+        </div>
+    </div>
+</form>
+<script>
+function toggleRerank() {
+    var v = document.querySelector('select[name="rerank_binding"]').value;
+    document.getElementById('rerank-model-group').style.display = (v === 'null') ? 'none' : '';
+}
+</script>
+{% endblock %}

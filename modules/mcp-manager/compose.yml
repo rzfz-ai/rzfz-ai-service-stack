@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+services:
+  # ==========================================
+  # MCP Manager: Per-User Personal MCP Orchestration (#36)
+  # ==========================================
+  # Provisions per-user MCP-proxy sidecars (one per user+integration) that hold
+  # THAT user's external credentials and expose an SSO-gated HTTP MCP endpoint,
+  # wired into the user's own agents (Hermes / Moltis / OpenCode).
+  #
+  # SECURITY: holds the AES-GCM master key (MCP_MANAGER_SECRET_KEY) in memory;
+  # credentials are encrypted at rest in mcp_manager_db. Talks to docker via
+  # docker-socket-proxy (SAME constrained grants as agent-manager — no BUILD /
+  # SECRETS / SWARM). Stores every user's external creds → SECURITY REVIEW
+  # REQUIRED before merge.
+  mcp-manager:
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
+    image: razzfazz-mcp-manager:latest
+    pull_policy: never
+    container_name: mcp-manager
+    profiles: ["mcp"]
+    restart: unless-stopped
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${MCP_MANAGER_PORT:-5120}:5000"
+    env_file:
+      - ../../.env
+    environment:
+      MCP_MANAGER_SECRET_KEY: ${MCP_MANAGER_SECRET_KEY:-}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-}
+      MAIN_DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+      MCP_DOMAIN: mcp.${MAIN_DOMAIN:-razzfazz-box}
+      MCP_MANAGER_DATABASE_URL: postgresql://${MCP_MANAGER_DB_USER:-${POSTGRES_USER:-docker}}:${MCP_MANAGER_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}@postgres/${MCP_MANAGER_DB:-mcp_manager_db}
+      MCP_NETWORK: mcp-network
+      MCP_MAX_INSTANCES: ${MCP_MAX_INSTANCES:-50}
+      # #61 (HIGH-1): shared secret gating /internal/* (agent-manager presents
+      # it). Empty => /internal fails closed (401).
+      MCP_INTERNAL_TOKEN: ${MCP_INTERNAL_TOKEN:-}
+      CADDY_ADMIN_URL: http://caddy:2019
+      # F-A3: talk to docker-socket-proxy, never the raw socket.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      # OAuth client secrets (server-side only). Empty until the operator
+      # registers OAuth apps per box; the OAuth start route returns
+      # "not configured" until then.
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      # #36 two-tier cognee memory: the manager auto-provisions per-user cognee
+      # accounts + API keys (personal memory) and grants company-brain reads,
+      # authenticating to the cognee backend as the admin/default user. The
+      # personal cognee integration is FAIL-CLOSED when these are unset or the
+      # backend does not enforce access control.
+      COGNEE_BASE_URL: http://cognee:8000
+      COGNEE_ADMIN_EMAIL: razzfazz-ai-admin@${MAIN_DOMAIN:-razzfazz-box}
+      COGNEE_ADMIN_PASSWORD: ${COGNEE_ADMIN_PASSWORD:-${AUTHENTIK_BOOTSTRAP_PASSWORD:-}}
+      # Shared lib on the import path (bind-mounted below).
+      PYTHONPATH: /app/common
+    networks:
+      # #61 NEW-2: mcp-manager is on `default` ONLY, deliberately NOT on
+      # mcp-network. The per-user proxies live on mcp-network; if mcp-manager
+      # also joined it, a user who influenced any proxy could reach
+      # mcp-manager:5000/internal/* by container name and enumerate other users'
+      # proxies + bearer tokens (the /internal token gate is the primary control,
+      # but defense-in-depth means NOT putting the manager on the proxy network).
+      # mcp-manager never needs to dial a proxy by network: it creates/starts
+      # them via the docker API (docker-socket-proxy on `default`) and routes
+      # them via the Caddy admin API. Caddy is the ONLY thing on mcp-network that
+      # bridges to the proxies, and it forward-auths + bearer-gates every hop.
+      # agent-manager reaches mcp-manager's /internal over `default` (both there).
+      - default
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      # Live-edit catalog + provider registry without rebuilding the image
+      # (docker restart mcp-manager picks up edits).
+      - ../../core/mcp/personal-mcp-catalog.yaml:/personal-mcp-catalog.yaml:ro
+      - ../../core/mcp/oauth-providers.yaml:/oauth-providers.yaml:ro
+      # Shared auth library (build context can't COPY it — same as agent-manager).
+      - ../../core/common/razzfazz_common:/app/common/razzfazz_common:ro
+
+  # ==========================================
+  # Test/Echo MCP image builder (#36 P2)
+  # ==========================================
+  # Build-only one-shot (like agent-manager's coding-tools-image). Builds the
+  # self-contained test MCP image the catalog references for `test-echo` so the
+  # provisioning → routing → cred-injection → agent-reachability chain can be
+  # proven end-to-end on 0.91 WITHOUT real third-party creds.
+  mcp-test-echo-image:
+    build:
+      context: ./test-echo-mcp
+      dockerfile: Dockerfile
+    image: razzfazz-mcp-test-echo:latest
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["mcp"]
+    container_name: mcp-test-echo-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+networks:
+  mcp-network:
+    name: mcp-network
+    driver: bridge

@@ -1,0 +1,70 @@
+version: 1
+metadata:
+  name: "Module - Synapse Matrix OIDC"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2/OIDC Provider for Synapse
+  # ==========================================
+  # NOTE: This is an OAuth2/OIDC provider, NOT a proxy forward-auth provider.
+  # Synapse handles authentication internally via OIDC redirect.
+  # There is NO user-visible app tile for Synapse itself.
+  # Users log in via Element Web → Synapse → Authentik OIDC → back to Matrix.
+  #
+  # Authentik configuration as documented at:
+  # https://element-hq.github.io/synapse/latest/openid.html#authentik
+  # Requirements:
+  # - Client Type: Confidential
+  # - JWT Algorithm: RSA256 (ECC does NOT work)
+  # - Redirect URI: https://${MATRIX_DOMAIN}/_synapse/client/oidc/callback
+  # ==========================================
+  - model: authentik_providers_oauth2.oauth2provider
+    identifiers:
+      name: "Synapse Matrix OIDC Provider"
+    attrs:
+      client_id: "${MATRIX_CLIENT_ID}"
+      client_secret: "${SYNAPSE_CLIENT_SECRET}"
+      client_type: confidential
+      # F-046 (accepted risk): Implicit consent is used because Synapse OIDC redirect
+      # flow does not display a user-facing consent screen — the user has already
+      # authenticated via Element Web. Switching to explicit consent would add an
+      # unnecessary extra click without security benefit.
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      redirect_uris:
+        - matching_mode: strict
+          url: "https://${MATRIX_DOMAIN}/_synapse/client/oidc/callback"
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      access_code_validity: "minutes=1"
+      access_token_validity: "hours=1"
+      refresh_token_validity: "days=30"
+      include_claims_in_id_token: true
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'openid'"]]
+        # True SSO group->role mapping (#33): the `groups` claim is made available
+        # here for consistency. Synapse OIDC can GATE login on a group via
+        # `attribute_requirements` (homeserver.yaml), but server-admin is NOT
+        # settable from an OIDC claim in stable Synapse — it is a DB/admin-API
+        # flag. See modules/apps/matrix/synapse/homeserver.yaml for the documented
+        # limitation. Elevate a Matrix admin manually after first login.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: groups"]]
+
+  # Application entry — required to link the OIDC provider to an Authentik
+  # application object. Synapse uses this for OAuth2 redirect authentication
+  # only — no direct user access. M028 S05-redo: meta_launch_url=blank://blank
+  # ensures the tile stays out of the user library (an unset value would let
+  # the provider's external_host pass the frontend filter and render).
+  - model: authentik_core.application
+    identifiers:
+      slug: synapse
+    attrs:
+      name: Matrix Synapse (OIDC)
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, "Synapse Matrix OIDC Provider"]]
+      meta_description: "Matrix homeserver OIDC authentication provider (internal)"
+      meta_launch_url: "blank://blank"
+      policy_engine_mode: any
+      open_in_new_tab: false
+      group: ""

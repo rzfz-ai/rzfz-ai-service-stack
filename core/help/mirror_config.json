@@ -1,0 +1,418 @@
+{
+  "apps": [
+    {
+      "id": "authentik",
+      "name": "Authentik",
+      "manifest_key": "images.authentik",
+      "description": "Identity, authentication and single sign-on",
+      "icon": "/static/media/razzfazz-ai_admin_icon.png",
+      "mirror_url": "https://docs.goauthentik.io/",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "copyright": "Authentik Security Inc.",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/developer-docs",
+        "/api",
+        "/blog",
+        "/if",
+        "/integrations/services",
+        "/releases"
+      ]
+    },
+    {
+      "id": "openwebui",
+      "name": "Open WebUI",
+      "manifest_key": "images.openwebui",
+      "description": "AI chat interface for local language models",
+      "icon": "/static/media/razzfazz-ai_chat_icon.png",
+      "mirror_url": "https://docs.openwebui.com/",
+      "license": "BSD-3-Clause",
+      "license_url": "https://github.com/open-webui/docs/blob/main/LICENSE",
+      "copyright": "Open WebUI Contributors",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/blog",
+        "/contributing"
+      ]
+    },
+    {
+      "id": "dify",
+      "name": "Dify",
+      "manifest_key": "images.dify-api",
+      "description": "Workflow automation, RAG and agentic AI platform",
+      "icon": "/static/media/razzfazz-ai_workflow_icon.png",
+      "mirror_url": "https://docs.dify.ai/",
+      "local_doc": "dify.md",
+      "license": "CC-BY-4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "copyright": "LangGenius Inc.",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/plugins/develop",
+        "/api-reference"
+      ]
+    },
+    {
+      "id": "komodo",
+      "name": "Komodo",
+      "manifest_key": "images.komodo",
+      "description": "Docker infrastructure management and monitoring",
+      "icon": "/static/media/razzfazz-ai_admin_icon.png",
+      "mirror_url": "https://komo.do/docs/intro",
+      "local_doc": "komodo.md",
+      "license": "GPL-3.0",
+      "license_url": "https://www.gnu.org/licenses/gpl-3.0.html",
+      "copyright": "Mogh Tech",
+      "required_groups": [],
+      "depth": 5
+    },
+    {
+      "id": "gitea",
+      "name": "Gitea",
+      "manifest_key": "images.gitea",
+      "description": "Self-hosted Git service for version control",
+      "icon": "/static/media/razzfazz-ai_git_icon.png",
+      "mirror_url": "https://docs.gitea.com/",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "The Gitea Authors",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/api",
+        "/contributing"
+      ]
+    },
+    {
+      "id": "gpustack-v0.7",
+      "name": "GPUStack v0.7.1 (stable)",
+      "manifest_key": "custom_built.razzfazz-gpustack",
+      "profiles": [
+        "llm-legacy",
+        "llm-cpu"
+      ],
+      "description": "LLM model management \u2014 STABLE path (llm-legacy / llm-cpu profiles, AMD Strix Halo default). Docs pinned to the v0.7.1 UI/CLI/API.",
+      "icon": "/static/media/razzfazz-ai_llm_icon.png",
+      "mirror_url": "https://docs.gpustack.ai/0.7/",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "GPUStack Contributors",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/api-reference"
+      ]
+    },
+    {
+      "id": "gpustack-v2.1",
+      "name": "GPUStack v2.1.x (experimental)",
+      "manifest_key": "images.gpustack",
+      "profiles": [
+        "llm"
+      ],
+      "description": "LLM model management \u2014 EXPERIMENTAL opt-in path (llm profile, v2.1.x upstream + custom backends). Docs pinned to the v2.1.x UI/CLI/API.",
+      "icon": "/static/media/razzfazz-ai_llm_icon.png",
+      "mirror_url": "https://docs.gpustack.ai/2.1/",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "GPUStack Contributors",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/api-reference"
+      ]
+    },
+    {
+      "id": "gotenberg",
+      "name": "Gotenberg",
+      "manifest_key": "images.gotenberg",
+      "description": "API for converting HTML, Markdown, and Office files to PDF via Chromium and LibreOffice",
+      "icon": "/static/media/razzfazz-ai_documents_icon.png",
+      "mirror_url": "https://gotenberg.dev/docs/getting-started/introduction",
+      "local_doc": "gotenberg.md",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "Julien Neuhart",
+      "required_groups": [],
+      "depth": 4,
+      "exclude_directories": [
+        "/blog",
+        "/community"
+      ]
+    },
+    {
+      "id": "searxng",
+      "name": "SearXNG",
+      "manifest_key": "images.searxng",
+      "description": "Privacy-respecting metasearch engine \u2014 user guide and administration",
+      "icon": "/static/media/razzfazz-ai_search_icon.png",
+      "mirror_url": "https://docs.searxng.org/",
+      "license": "AGPL-3.0",
+      "license_url": "https://www.gnu.org/licenses/agpl-3.0.html",
+      "copyright": "The SearXNG Community",
+      "required_groups": [],
+      "depth": 4,
+      "exclude_directories": [
+        "/_modules",
+        "/_sources",
+        "/genindex.html",
+        "/py-modindex.html"
+      ]
+    },
+    {
+      "id": "speaches",
+      "name": "Speaches",
+      "manifest_key": "images.speaches",
+      "description": "Speech-to-text and text-to-speech service with OpenAI-compatible API",
+      "icon": "/static/media/razzfazz-ai_chat_icon.png",
+      "mirror_url": "https://speaches.ai/",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "Speaches Contributors",
+      "required_groups": [],
+      "depth": 4,
+      "exclude_directories": [
+        "/search"
+      ]
+    },
+    {
+      "id": "lightrag",
+      "name": "LightRAG",
+      "manifest_key": "images.lightrag",
+      "description": "Graph-based retrieval-augmented generation with dual-level indexing",
+      "icon": "/static/media/razzfazz-ai_rag_icon.png",
+      "mirror_url": "https://lightrag.github.io/",
+      "local_doc": "lightrag.md",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "HKUDS Research Group",
+      "required_groups": [],
+      "depth": 2
+    },
+    {
+      "id": "cognee",
+      "name": "Cognee",
+      "manifest_key": "custom_built.razzfazz-cognee",
+      "description": "AI memory and knowledge graph engine for contextual reasoning",
+      "icon": "/static/media/razzfazz-ai_cognee_icon.png",
+      "mirror_url": "https://docs.cognee.ai/",
+      "local_doc": "cognee.md",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "Cognee Inc.",
+      "required_groups": [],
+      "depth": 2
+    },
+    {
+      "id": "tika",
+      "name": "Apache Tika",
+      "manifest_key": "hardcoded.tika",
+      "description": "Document text and metadata extraction supporting 1000+ file formats",
+      "icon": "/static/media/razzfazz-ai_documents_icon.png",
+      "mirror_url": "https://tika.apache.org/",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "The Apache Software Foundation",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/mail-lists.html",
+        "/contribute.html",
+        "/download.html"
+      ]
+    },
+    {
+      "id": "docling",
+      "name": "Docling",
+      "manifest_key": "hardcoded.docling",
+      "description": "Document parsing and conversion with layout analysis and VLM support",
+      "icon": "/static/media/razzfazz-ai_docling_icon.png",
+      "mirror_url": "https://docling-project.github.io/docling/",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "IBM Research",
+      "required_groups": [],
+      "depth": 4,
+      "exclude_directories": [
+        "/assets",
+        "/search"
+      ]
+    },
+    {
+      "id": "presidio",
+      "name": "Presidio",
+      "manifest_key": "hardcoded.presidio-analyzer",
+      "description": "PII detection and anonymization \u2014 Analyzer and Image Redactor REST APIs",
+      "icon": "/static/media/razzfazz-ai_documents_icon.png",
+      "mirror_url": "https://microsoft.github.io/presidio/",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "Microsoft Corporation",
+      "required_groups": [],
+      "depth": 4,
+      "exclude_directories": [
+        "/assets",
+        "/search"
+      ]
+    },
+    {
+      "id": "stirling-pdf",
+      "name": "Stirling-PDF",
+      "manifest_key": "hardcoded.stirling-pdf",
+      "description": "Self-hosted PDF processing suite with 50+ operations \u2014 merge, split, OCR, compress, convert",
+      "icon": "/static/media/razzfazz-ai_pdf_icon.png",
+      "mirror_url": "https://docs.stirlingpdf.com/",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "Stirling-Tools Contributors",
+      "required_groups": [],
+      "depth": 4,
+      "exclude_directories": [
+        "/img",
+        "/search"
+      ]
+    },
+    {
+      "id": "paperless-ngx",
+      "name": "paperless-ngx",
+      "manifest_key": "hardcoded.paperless-ngx",
+      "description": "Self-hosted document management \u2014 scan, OCR, archive, and search your documents",
+      "icon": "/static/media/razzfazz-ai_documents_icon.png",
+      "mirror_url": "https://paperless-ngx.readthedocs.io/en/latest/",
+      "license": "GPL-3.0",
+      "license_url": "https://opensource.org/licenses/GPL-3.0",
+      "copyright": "paperless-ngx Contributors",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/assets",
+        "/search"
+      ]
+    },
+    {
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "manifest_key": "hardcoded.vaultwarden",
+      "description": "Self-hosted Bitwarden-compatible password manager with Authentik OIDC SSO",
+      "icon": "/static/media/razzfazz-ai_vault_icon.png",
+      "mirror_url": "https://github.com/dani-garcia/vaultwarden/wiki",
+      "license": "GPL-3.0",
+      "license_url": "https://opensource.org/licenses/GPL-3.0",
+      "copyright": "dani-garcia and Vaultwarden Contributors",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/assets",
+        "/search"
+      ]
+    },
+    {
+      "id": "infisical",
+      "name": "Infisical",
+      "manifest_key": "hardcoded.infisical",
+      "description": "Self-hosted secrets management platform for developers and AI coding agents",
+      "icon": "/static/media/razzfazz-ai_secrets_icon.png",
+      "mirror_url": "https://infisical.com/docs/",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "Infisical, Inc.",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/assets",
+        "/search",
+        "/api"
+      ]
+    },
+    {
+      "id": "onyx",
+      "name": "Onyx",
+      "manifest_key": "hardcoded.onyx",
+      "description": "AI-powered enterprise search across Gitea repos and paperless-ngx documents",
+      "icon": "/static/media/razzfazz-ai_search_icon.png",
+      "mirror_url": "https://docs.onyx.app/",
+      "license": "MIT",
+      "license_url": "https://opensource.org/licenses/MIT",
+      "copyright": "Onyx Contributors",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/assets",
+        "/search",
+        "/api"
+      ]
+    },
+    {
+      "id": "matrix",
+      "name": "Synapse / Element Web",
+      "manifest_key": "hardcoded.synapse",
+      "description": "Self-hosted Matrix homeserver (Synapse) with Element Web browser client and Authentik OIDC single sign-on",
+      "icon": "/static/media/razzfazz-ai_matrix_icon.png",
+      "mirror_url": "https://element-hq.github.io/synapse/latest/",
+      "license": "AGPL-3.0",
+      "license_url": "https://github.com/element-hq/synapse/blob/develop/LICENSE",
+      "copyright": "Element HQ",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/assets",
+        "/_sources",
+        "/_modules"
+      ]
+    },
+    {
+      "id": "openlit",
+      "name": "OpenLIT",
+      "manifest_key": "images.openlit",
+      "description": "Stack-wide LLM observability: cost, latency, tokens, prompt analysis.",
+      "icon": "/static/media/razzfazz-ai_admin_icon.png",
+      "mirror_url": "https://docs.openlit.io/",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "OpenLIT contributors",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": []
+    },
+    {
+      "id": "crawl4ai",
+      "name": "Crawl4AI",
+      "manifest_key": "images.crawl4ai",
+      "description": "RAG-friendly web crawler \u2014 Markdown extraction, structured scraping, browser automation.",
+      "icon": "/static/media/razzfazz-ai_search_icon.png",
+      "mirror_url": "https://docs.crawl4ai.com/",
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "copyright": "Crawl4AI contributors",
+      "required_groups": [],
+      "depth": 5,
+      "exclude_directories": [
+        "/blog",
+        "/changelog"
+      ]
+    },
+    {
+      "id": "openhands",
+      "name": "OpenHands",
+      "manifest_key": "hardcoded.openhands",
+      "description": "Autonomous AI software-development agent \u2014 delegate coding tasks to an AI agent in a sandboxed runtime",
+      "icon": "/static/media/razzfazz-ai_workflow_icon.png",
+      "mirror_url": "https://docs.openhands.dev/",
+      "local_doc": "openhands.md",
+      "license": "MIT",
+      "license_url": "https://github.com/All-Hands-AI/OpenHands/blob/main/LICENSE",
+      "copyright": "All-Hands-AI",
+      "required_groups": [],
+      "depth": 3,
+      "exclude_directories": [
+        "/cloud",
+        "/enterprise"
+      ]
+    }
+  ],
+  "_own_docs_policy": "POLICY (2026.07 docs rework): own_docs are NO LONGER configured here. They are the canonical customer docs authored in the repo at docs/enterprise/**.md, baked into the help image at /app/own_docs by the Dockerfile, and AUTO-DISCOVERED at runtime by cache_manager.discover_own_docs() (one card per .md, title = the file's H1, grouped by docs/enterprise/<section>/). To add/edit an own doc, change docs/enterprise/ \u2014 never this file. This 'own_docs' section is intentionally empty and kept only so legacy readers of the key see [] rather than the old hand-maintained stub list. The 'apps' array above (the 27 upstream cached mirrors) is unaffected: external modules still get a mirror_url entry there, never an own_docs stub."
+}

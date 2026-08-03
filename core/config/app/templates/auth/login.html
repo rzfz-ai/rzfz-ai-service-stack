@@ -1,0 +1,12 @@
+{# rzfz.ai Configuration login.
+
+   Extends the shared razzfazz_common razz_login.html partial — local-auth
+   gate before the Configuration Portal lets the operator change anything.
+   Visual + form structure live in the partial; this template just sets
+   the title + heading. Inherited by Jinja's ChoiceLoader from
+   razzfazz_common (registered in create_base_app).
+#}
+{% extends "razz_login.html" %}
+
+{% block title %}rzfz.ai Management — Login{% endblock %}
+{% block heading %}Configuration{% endblock %}
