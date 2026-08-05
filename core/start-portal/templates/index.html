@@ -1,0 +1,141 @@
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai - local matters{% endblock %}
+
+{% block favicon %}/static/favicon.png{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/start-portal-overrides.css">
+{% endblock %}
+
+{% block layout %}
+<div class="portal-bg">
+    <div class="portal-shell">
+        <header class="portal-header">
+            {# S11.1 #2 — rzfz.ai logo upper-left. #}
+            <div class="portal-header-left">
+                <img class="portal-logo" src="/static/razzfazz-ai-logo.png" alt="razzfazz.ai">
+                <h1 class="portal-title">My Applications</h1>
+            </div>
+            {% if user.username %}
+            <div class="portal-header-right">
+                <span class="portal-user-greet">Hello, {{ user.username }}</span>
+                {% if user.is_admin %}<span class="portal-user-badge">Admin</span>{% endif %}
+                {# #185 — admins reach the shortcut-tile editor from here (was only
+                   reachable by typing /admin/shortcuts by hand). Same-host route,
+                   itself is_admin-gated server-side. #}
+                {% if user.is_admin %}
+                <a class="portal-manage-shortcuts" href="/admin/shortcuts"
+                   title="Create and manage shortcut tiles for your users">
+                   Manage shortcuts
+                </a>
+                {% endif %}
+                {# S11.6 — reset the user's layout (pins, custom categories,
+                   per-tile category moves) back to the manifest default. #}
+                <button class="portal-reset" type="button"
+                        title="Reset pins, custom categories, and tile order to defaults">
+                    Reset layout
+                </button>
+                {# #54 — surface the central password broker. Same-host route,
+                   SSO-gated; lets any signed-in user change their own local-auth
+                   password (Dify/Cognee/optional Authentik) instead of having to
+                   know the bare /password URL. #}
+                {# #54 — opens the in-page password modal (data-pw-open). The
+                   href stays /password as a progressive-enhancement fallback:
+                   with JS disabled the link navigates to the full page. #}
+                <a class="portal-change-pw" href="/password" data-pw-open
+                   title="Change your password">
+                   Change password
+                </a>
+                {# S11.2 #5 / ga.2 (#220) — logout MUST hit the forward-auth
+                   outpost sign_out on THIS domain, not the Authentik core
+                   invalidation flow. The start portal is protected by Caddy
+                   forward-auth to the Authentik outpost, which keeps its OWN
+                   per-domain proxy-session cookie. `/if/flow/default-invalidation-flow/`
+                   ends only the core IdP session — the outpost proxy cookie
+                   survives, so forward-auth silently re-admits the user (looks
+                   still-logged-in) while the IdP session is gone: a broken
+                   half-logged-in state (prod-observed 2026-07-29).
+                   `/outpost.goauthentik.io/sign_out` clears the proxy session
+                   AND chains to the invalidation flow. Caddy routes
+                   `/outpost.goauthentik.io/*` on start.<domain> straight to
+                   authentik-server (Caddyfile), so this relative URL is correct. #}
+                <a class="portal-logout" href="/outpost.goauthentik.io/sign_out"
+                   title="Sign out">
+                   Logout
+                </a>
+            </div>
+            {% endif %}
+        </header>
+
+        {% if not user.username %}
+        <div class="portal-empty">
+            <p>Login required.</p>
+            <p><a href="https://auth.{{ main_domain }}/" class="portal-link">Sign in</a></p>
+        </div>
+        {% elif not favorites and not sections %}
+        <div class="portal-empty">
+            <p>No applications available.</p>
+            <p>Contact your administrator to be added to the right groups, or
+               <a href="https://help.{{ main_domain }}" class="portal-link">visit the Help Center</a>.</p>
+        </div>
+        {% endif %}
+
+        {# Favorites row, only when there are pinned tiles. S11.3 #7 — heart, not star. #}
+        {% if favorites %}
+        <section class="portal-section portal-section-favorites" data-section-id="__favorites__">
+            <h2 class="portal-section-title">♥ Favorites</h2>
+            <div class="portal-grid" data-sort-group="favorites">
+                {% for tile in favorites %}
+                    {% include "_tile.html" %}
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+
+        {# S11.5 #10 — categories side-by-side at wide screens via flex container.
+           Wraps to multi-column / single-column at narrower viewports. #}
+        <div class="portal-categories">
+            {% for section in sections %}
+            <section class="portal-section" data-section-id="{{ section.name }}">
+                {# S11.3 #13 — strip the leading numeric prefix from the heading
+                   (manifest still uses it as the sort key). #}
+                <h2 class="portal-section-title">{{ section.display_name }}</h2>
+                <div class="portal-grid" data-sort-group="{{ section.name }}">
+                    {% for tile in section.tiles %}
+                        {% include "_tile.html" %}
+                    {% endfor %}
+                </div>
+            </section>
+            {% endfor %}
+        </div>
+    </div>
+
+    {# #54 — change-password modal. Hidden by default; the .portal-change-pw
+       trigger (data-pw-open) reveals it client-side. Backdrop is a light dim
+       overlay; the dialog is dismissible (Esc / click-outside / × button).
+       The form is the shared broker form (_password_form.html), so a no-JS
+       client still has the /password page fallback. #}
+    {% if user.username %}
+    <div id="pw-modal" class="pw-modal" hidden>
+        <div class="pw-modal-backdrop" id="pw-modal-backdrop" data-pw-close></div>
+        <div class="pw-modal-dialog" role="dialog" aria-modal="true"
+             aria-labelledby="pw-modal-title">
+            <button type="button" class="pw-modal-close" data-pw-close
+                    aria-label="Close">&times;</button>
+            <h2 class="pw-modal-title" id="pw-modal-title">Change password</h2>
+            {% include "_password_form.html" %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{# SortableJS is vendored under static/vendor/ so we don't depend on a CDN
+   (M028 must work in airgapped deployments — the stack ships offline). #}
+<script src="/static/vendor/Sortable.min.js"></script>
+<script src="/static/start-portal.js"></script>
+{# #54 — password modal behaviour (open/close, live validation, AJAX submit). #}
+<script src="/static/start-portal-pw.js"></script>
+{% endblock %}

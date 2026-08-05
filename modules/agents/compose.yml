@@ -1,0 +1,364 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+services:
+  # ==========================================
+  # Agent Manager: Per-User Agent Orchestration
+  # ==========================================
+  agent-manager:
+    build:
+      # #36: corrected post-reorg context. The compose file lives at
+      # modules/agents/compose.yml, so ../../agents/manager resolved to the
+      # pre-reorg path (agents/manager, now gone) and the build silently failed
+      # — leaving a stale image. The manager source is ./manager (same relative
+      # form coding-tools/hermes/moltis builds already use below).
+      context: ./manager
+      dockerfile: Dockerfile
+    image: razzfazz-agent-manager:latest
+    # Image is built locally, never pushed to a registry. `never` tells compose
+    # to skip the pull attempt (no noisy "pull access denied for
+    # razzfazz-agent-manager" warning) AND to never build at runtime — the image
+    # is built once at install (`docker compose build`, which ignores
+    # pull_policy); a missing image fails clear via verify-images, never a
+    # silent runtime build (#184 WS2a, universal no-runtime-build).
+    pull_policy: never
+    container_name: agent-manager
+    profiles: ["agents"]
+    restart: unless-stopped
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${AGENT_MANAGER_PORT:-5110}:5000"
+    env_file:
+      - ../../.env
+    environment:
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-}
+      MAIN_DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+      AGENTS_DOMAIN: agents.${MAIN_DOMAIN:-razzfazz-box}
+      AGENT_MANAGER_DATABASE_URL: postgresql://${AGENT_MANAGER_DB_USER:-${POSTGRES_USER:-docker}}:${AGENT_MANAGER_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}@postgres/${AGENT_MANAGER_DB:-agent_manager_db}
+      AGENT_NETWORK: agent-network
+      CADDY_ADMIN_URL: http://caddy:2019
+      AGENT_MAX_INSTANCES: ${AGENT_MAX_INSTANCES:-20}
+      AGENT_IDLE_TIMEOUT_LIGHTWEIGHT: ${AGENT_IDLE_TIMEOUT_LIGHTWEIGHT:-1800}
+      AGENT_IDLE_TIMEOUT_HEAVY: ${AGENT_IDLE_TIMEOUT_HEAVY:-7200}
+      AGENT_CLEANUP_AFTER_DAYS: ${AGENT_CLEANUP_AFTER_DAYS:-30}
+      # rc6.7 #93: per-user agents do background work (matrix bots, openhands
+      # sandbox callbacks, scheduled jobs) — auto-stop is OFF by default. Set
+      # to "true" on memory-bound boxes to re-enable the idle reaper.
+      AGENT_IDLE_AUTO_STOP_ENABLED: ${AGENT_IDLE_AUTO_STOP_ENABLED:-false}
+      # #36 / PR #84 — agent memory governance. Per-instance max + default are
+      # env (rarely changed); the global budget + per-user cap are DB-backed
+      # (agent_settings, set via the Config UI → live, no recreate, no .env
+      # inode bug). AGENT_CORE_STACK_RESERVE_MB is the RAM held back for the
+      # core stack when deriving the dynamic host ceiling for the budget.
+      AGENT_MEM_PER_INSTANCE_MAX_GB: ${AGENT_MEM_PER_INSTANCE_MAX_GB:-16}
+      AGENT_MEM_DEFAULT_GB: ${AGENT_MEM_DEFAULT_GB:-2}
+      AGENT_CORE_STACK_RESERVE_MB: ${AGENT_CORE_STACK_RESERVE_MB:-8192}
+      GPUSTACK_API_KEY: ${GPUSTACK_API_KEY:-}
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:-}
+      # #36 gap 2 — pull each user's personal MCP-proxy endpoints from the
+      # mcp-manager at agent launch (per-user analog of the stack-wide MCP
+      # registry). Reached on the shared `default` network; the client
+      # fail-safes to no-injection when the mcp profile is inactive. Empty
+      # default so a box without the mcp profile simply injects nothing.
+      MCP_MANAGER_URL: ${MCP_MANAGER_URL:-http://mcp-manager:5000}
+      # #61 (HIGH-1): shared secret presented to mcp-manager's /internal/*
+      # (X-MCP-Internal-Token). Must match the mcp-manager value; empty on a
+      # box without the mcp profile (the wiring fetch then just 401s/no-ops).
+      MCP_INTERNAL_TOKEN: ${MCP_INTERNAL_TOKEN:-}
+      # C1 "came through Caddy" (PR #84): the manager now anchors on the Caddy
+      # SOURCE IP (proxy.py `_proxy_proof_ok` requires request.remote_addr ==
+      # caddy) rather than a Caddy-injected proof HEADER — Caddy's per-instance
+      # forward_auth does not reliably propagate a route-set request header to
+      # the upstream (it 403'd the real owner). MANAGER_PROXY_SECRET is retained
+      # (harmless) for one cycle to avoid churning the env/migration surface but
+      # is no longer read; the source-IP anchor needs no shared secret.
+      MANAGER_PROXY_SECRET: ${MANAGER_PROXY_SECRET:-}
+      # PR #84 C1 wiring: the manager registers a per-instance `forward_single`
+      # Authentik provider+app at provision (deregisters at stop/delete) so the
+      # embedded outpost authenticates each coding-agent subdomain. Uses the
+      # admin API with the bootstrap token (same one config-portal /
+      # password-broker use). Empty => the manager logs a warning and the
+      # outpost 404s the instance host (the C1 anchors still fence it).
+      AUTHENTIK_URL: http://authentik-server:9000
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      # F-A3: talk to docker-socket-proxy instead of raw /var/run/docker.sock
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      # M033 A2: put the bind-mounted shared library on the import path so
+      # `from razzfazz_common.X import Y` resolves (the lib is mounted at
+      # /app/common/razzfazz_common below).
+      PYTHONPATH: /app/common
+    networks:
+      - default
+      - agent-network
+      # #36 security-review — the agent-manager joins the egress-controlled
+      # coding-agents net so it can proxy the sandboxed coding-agent terminals
+      # (opencode/gsd-pi/codex/user-defined), which live ONLY on this net.
+      - coding-agents
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # M031-FOLLOWUPS A3: bind-mount catalog.py so operator-side edits land
+    # without rebuilding the agent-manager image. `docker restart agent-manager`
+    # is enough to re-run AgentCatalog._seed() and pick up version + env_template
+    # changes. Without this, every catalog.py edit needs a `docker cp` dance.
+    #
+    # M031 S1: bind-mount the LLM single-source-of-truth YAML + the new
+    # llm_config helper that reads it. The same `docker restart` cycle
+    # propagates operator-edited model defaults to the next-provisioned
+    # agent without rebuilding the image. Helper falls back to its
+    # baseline if the YAML is missing.
+    volumes:
+      - ./manager/app/services/catalog.py:/app/app/services/catalog.py:ro
+      - ./manager/app/services/llm_config.py:/app/app/services/llm_config.py:ro
+      - ../../core/llm/standard-models.yaml:/standard-models.yaml:ro
+      # M035 P1: MCP registry + helper, bind-mounted like the LLM config above
+      # so operator edits propagate on `docker restart agent-manager` (no rebuild).
+      - ./manager/app/services/mcp_config.py:/app/app/services/mcp_config.py:ro
+      - ../../core/mcp/mcp-servers.yaml:/mcp-servers.yaml:ro
+      # #36 gap 2: per-user personal-MCP wiring client (pulls each user's
+      # running MCP proxies from mcp-manager at agent launch). Bind-mounted
+      # like the other service helpers above.
+      - ./manager/app/services/mcp_manager_client.py:/app/app/services/mcp_manager_client.py:ro
+      # M033 A2: shared library, bind-mounted like the service files above
+      # (agent-manager's build context is agents/, so core/common isn't COPY-able;
+      # bind-mount matches its established shared-code pattern). PYTHONPATH=/app/common
+      # (set above) makes `from razzfazz_common.X import Y` resolve.
+      - ../../core/common/razzfazz_common:/app/common/razzfazz_common:ro
+
+  # ==========================================
+  # Coding Tools Image Builder (M020 S07)
+  # ==========================================
+  # Build-only one-shot. The agent-manager catalog references
+  # `razzfazz-coding-tools:latest` for per-user coding-tools instances; this
+  # service exists so `docker compose --profile agents up -d` builds the
+  # image up-front (compose builds images for services in the active profile
+  # before starting them). The container itself does nothing — exits 0
+  # immediately, like dify-init-permissions. Without this, the first per-user
+  # coding-tools provisioning would fail because the image doesn't exist.
+  coding-tools-image:
+    build:
+      context: ./coding-tools
+      dockerfile: Dockerfile
+      args:
+        # Pinned npm deps; override via .env to re-pin without editing Dockerfile.
+        # coding-tools is the SUPERSEDED bundle (catalog enabled=False; replaced
+        # by the per-type split below). Its Dockerfile still installs the OLD
+        # deprecated `gsd-pi` npm package, which has no 1.5.0 — so pin this legacy
+        # builder to a LITERAL 3.0.0 (its last published version) rather than the
+        # shared ${GSD_PI_VERSION} default, which now tracks the maintained
+        # @opengsd/gsd-pi package used by the split builders.
+        GSD_PI_VERSION: 3.0.0
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.4}
+    image: razzfazz-coding-tools:latest
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["agents"]
+    container_name: coding-tools-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+  # ==========================================
+  # Coding-Agent Split Image Builders (#36)
+  # ==========================================
+  # Four per-TYPE coding-agent images (opencode / gsd-pi / codex / user-defined)
+  # replacing the single bundled coding-tools. All built from the ONE shared
+  # Dockerfile in ./coding-agent-web via per-kind build args (AGENT_KIND +
+  # per-agent npm install pins). Each is a build-only one-shot like
+  # coding-tools-image: the container exits 0, the side effect is the image the
+  # agent-manager catalog references for per-user provisioning.
+  coding-agent-opencode-image:
+    build:
+      context: ./coding-agent-web
+      dockerfile: Dockerfile
+      args:
+        AGENT_KIND: opencode
+        AGENT_LABEL: opencode
+        AGENT_LAUNCH_CMD: opencode
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.4}
+        # #212 — extra system (apt) libs baked into the sandbox at BUILD time (the
+        # running sandbox is non-root / read-only / no-sudo, so apt can't run at
+        # runtime). Fallback default = the Playwright/Chromium runtime lib set
+        # (bookworm names) so browser automation works out of the box even on a box
+        # whose .env predates this key. Set USER_DEFINED_APT_PACKAGES in .env to add
+        # more (keep the existing libs in the value), then rebuild via
+        # `rzfz post-install --refresh` and re-provision from My Agents.
+        USER_DEFINED_APT_PACKAGES: "${USER_DEFINED_APT_PACKAGES:-libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 libx11-6 libxcb1 libxext6 libxi6 fonts-liberation}"
+    image: razzfazz-coding-agent-opencode:latest
+    pull_policy: never
+    profiles: ["agents"]
+    container_name: coding-agent-opencode-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+  # #36 FEATURE 2 (PR #84): the coding-agent-gsd-pi-image builder was REMOVED.
+  # gsd-pi is retired as a dedicated agent (catalog enabled=False) and is now a
+  # User Defined Agent install suggestion (`npm install -g @opengsd/gsd-pi`
+  # inside a user-defined terminal, which the entrypoint's writable-prefix flow
+  # supports). So no per-type gsd-pi image is built. The shared Dockerfile still
+  # installs @opengsd/gsd-pi ONLY when GSD_PI_VERSION is passed (opencode/codex/
+  # user-defined builders don't pass it), so the gsd binary is no longer baked
+  # into any image — the user installs it themselves in the User Defined Agent.
+
+  coding-agent-codex-image:
+    build:
+      context: ./coding-agent-web
+      dockerfile: Dockerfile
+      args:
+        AGENT_KIND: codex
+        AGENT_LABEL: Codex
+        AGENT_LAUNCH_CMD: codex
+        # Apache-2.0 — the binary is shipped in the image (LICENSE + OpenAI
+        # NOTICE in ./coding-agent-web/licenses).
+        CODEX_VERSION: ${CODEX_VERSION:-0.144.6}
+        # #212 — extra apt libs baked at build time; default = Playwright/Chromium
+        # lib set (bookworm). See the opencode builder above for the full note.
+        USER_DEFINED_APT_PACKAGES: "${USER_DEFINED_APT_PACKAGES:-libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 libx11-6 libxcb1 libxext6 libxi6 fonts-liberation}"
+    image: razzfazz-coding-agent-codex:latest
+    pull_policy: never
+    profiles: ["agents"]
+    container_name: coding-agent-codex-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+  coding-agent-user-defined-image:
+    build:
+      context: ./coding-agent-web
+      dockerfile: Dockerfile
+      args:
+        AGENT_KIND: user-defined
+        AGENT_LABEL: User Defined Agent
+        AGENT_LAUNCH_CMD: bash
+        # No agent pre-installed — bare persistent terminal.
+        # #212 — extra apt libs baked at build time; default = Playwright/Chromium
+        # lib set (bookworm). See the opencode builder above for the full note.
+        USER_DEFINED_APT_PACKAGES: "${USER_DEFINED_APT_PACKAGES:-libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 libx11-6 libxcb1 libxext6 libxi6 fonts-liberation}"
+    image: razzfazz-coding-agent-user-defined:latest
+    pull_policy: never
+    profiles: ["agents"]
+    container_name: coding-agent-user-defined-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+  # ==========================================
+  # Hermes Agent Image Builder (rc6.7 #56)
+  # ==========================================
+  # Build-only one-shot. The agent-manager catalog references
+  # `razzfazz-stack-hermes-agent:<HERMES_AGENT_VERSION>` for per-user hermes
+  # instances. Source is cloned from the public NousResearch/hermes-agent
+  # repo at the pinned tag (the upstream GHCR image is private — HTTP 403 —
+  # and the SEQIS fleet doesn't carry GHCR credentials). Same pattern as
+  # coding-tools-image: container exits 0 immediately, the side effect is
+  # the locally-built image.
+  hermes-agent-image:
+    build:
+      context: ./hermes-agent
+      dockerfile: Dockerfile
+      args:
+        HERMES_AGENT_VERSION: ${HERMES_AGENT_VERSION:-v2026.7.1}
+        # #212 — extra apt libs baked at build time. NOTE the TRIXIE names: hermes'
+        # base is debian:13.x, where the t64 transition renamed libcups2→libcups2t64,
+        # libasound2→libasound2t64, libatk1.0-0→libatk1.0-0t64, libatk-bridge2.0-0→
+        # libatk-bridge2.0-0t64, libatspi2.0-0→libatspi2.0-0t64 (bookworm uses the
+        # un-suffixed names). This is the per-distro fallback default; a value set in
+        # .env (bookworm names) also resolves here via trixie transitional packages.
+        # See the opencode builder above for the full note.
+        USER_DEFINED_APT_PACKAGES: "${USER_DEFINED_APT_PACKAGES:-libnss3 libnspr4 libdbus-1-3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libatspi2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 libxshmfence1 libx11-6 libxcb1 libxext6 libxi6 fonts-liberation}"
+    image: razzfazz-stack-hermes-agent:${HERMES_AGENT_VERSION:-v2026.7.1}
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["agents"]
+    container_name: hermes-agent-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+  # #36 Option B (PR #84): the hermes-workspace-image builder was REMOVED.
+  # Since hermes v0.16 the FIRST-PARTY built-in dashboard is a full admin
+  # surface, so the separate third-party outsourc-e/hermes-workspace Next.js
+  # companion (the "agent not connected" bug source) is redundant. hermes is a
+  # SINGLE container now — the catalog serves the built-in dashboard on 9119.
+  # HERMES_WORKSPACE_VERSION is likewise retired from .env.example.
+
+  # ==========================================
+  # Moltis Image Builder (rc6.7 #56)
+  # ==========================================
+  # Cloned from moltis-org/moltis at the pinned dated tag (upstream GHCR
+  # org returns 404 for anonymous pulls — no public package published).
+  # Build is heavy: Rust nightly release of a workspace with llama-cpp-sys,
+  # plus WASM components and a Vite/Tailwind web pipeline. Expect 10-30 min
+  # on first build; subsequent rebuilds are mostly cached on cargo target/.
+  moltis-image:
+    build:
+      context: ./moltis
+      dockerfile: Dockerfile
+      args:
+        MOLTIS_VERSION: ${MOLTIS_VERSION:-20260719.01}
+        # #212 — extra apt libs baked at build time; default = Playwright/Chromium
+        # lib set (bookworm). See the opencode builder above for the full note.
+        # (moltis already installs the full `chromium` package, so this is usually
+        # a no-op here, but keeps the knob consistent across all agent images.)
+        USER_DEFINED_APT_PACKAGES: "${USER_DEFINED_APT_PACKAGES:-libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 libx11-6 libxcb1 libxext6 libxi6 fonts-liberation}"
+    image: razzfazz-stack-moltis:${MOLTIS_VERSION:-20260719.01}
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["agents"]
+    container_name: moltis-image-builder
+    restart: "no"
+    # This service only exists to BUILD razzfazz-stack-moltis on `compose build`.
+    # Unlike the coding-agent builders (whose entrypoint.sh ignores argv), the
+    # moltis image's ENTRYPOINT is the moltis binary itself — a clap CLI that
+    # rejects an unknown `true` subcommand (exit 2, after MOLTIS_VERSION bump).
+    # Use the valid clap no-op `--version` (prints + exits 0) instead.
+    command: ["--version"]
+    labels:
+      razzfazz.init: "true"
+
+  # #36: build the catalog-named paperclip image on `docker compose build`.
+  # The agent-manager catalog offers `paperclip` with image
+  # `razzfazz-stack-paperclip:latest`, but NOTHING built that image name on a
+  # clean box — modules/apps/paperclip/compose.yml has no `image:` field (so a
+  # `compose build` there would produce `<project>-paperclip`, not the catalog
+  # name), and this agents compose built hermes/moltis/coding-tools but never
+  # paperclip. Result: provisioning paperclip hit ImageNotFound → the
+  # `_friendly_launch_error` "isn't available on this box yet" dead-end. This
+  # build-only helper (same pattern as moltis-image above; `command: true`,
+  # exits immediately) tags the image so `docker compose build` + the
+  # post-install agent-image prepull make paperclip provisionable out of the box.
+  paperclip-image:
+    build:
+      context: ../apps/paperclip
+      dockerfile: Dockerfile
+      args:
+        PAPERCLIP_TAG: ${PAPERCLIP_VERSION:-v2026.707.0}
+    image: razzfazz-stack-paperclip:latest
+    pull_policy: never
+    profiles: ["agents"]
+    container_name: paperclip-image-builder
+    restart: "no"
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+networks:
+  agent-network:
+    name: agent-network
+    driver: bridge
+  # #36 security-review — shared egress-controlled net (declared in
+  # core/compose.yml). Compose merges the identical `name:`-keyed declaration.
+  coding-agents:
+    name: coding-agents
+    driver: bridge

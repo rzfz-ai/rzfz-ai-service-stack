@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{# M026 S07 #2: per-page styles moved to static/help-overrides.css. #}
+
+{% block content %}
+<div class="viewer-back">
+    <a href="{{ url_for('index') }}">← Back to Help Center</a>
+</div>
+
+<div class="panel">
+    <div class="doc-content">
+        {{ content | safe }}
+    </div>
+</div>
+
+<script>
+// Add a Copy button to every code block — but NOT to mermaid diagram blocks
+// (those are <pre class="mermaid"> placeholders rendered into SVG below).
+document.querySelectorAll('.doc-content pre:not(.mermaid)').forEach(function(pre) {
+    var btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', function() {
+        var code = pre.querySelector('code');
+        var text = (code || pre).textContent;
+        navigator.clipboard.writeText(text).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+        });
+    });
+    pre.appendChild(btn);
+});
+</script>
+
+{# 2026.07 docs rework: render ```mermaid fenced blocks. The mermaid bundle is
+   VENDORED (static/vendor/mermaid.min.js) so the box stays air-gappable — no
+   CDN. render_own_doc emits each diagram as <pre class="mermaid">…</pre>. Only
+   load + init the library when at least one such block is present. #}
+{% if '<pre class="mermaid">' in content %}
+<script src="{{ url_for('static', filename='vendor/mermaid.min.js') }}"></script>
+<script>
+(function () {
+    if (!window.mermaid) { return; }
+    // startOnLoad=false → we call run() explicitly after DOMContentLoaded so it
+    // only touches our .mermaid blocks. securityLevel 'strict' (default) keeps
+    // any HTML in labels escaped. fontFamily matches the page for consistency.
+    window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'default',
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+    });
+    function runMermaid() {
+        try {
+            window.mermaid.run({ querySelector: '.doc-content pre.mermaid' });
+        } catch (e) { /* leave the source visible if a diagram fails to parse */ }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', runMermaid);
+    } else {
+        runMermaid();
+    }
+})();
+</script>
+{% endif %}
+{% endblock %}

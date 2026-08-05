@@ -1,0 +1,18 @@
+razzfazz-gpustack — build-recipe NOTICE (third-party upstream)
+============================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: GPUStack v0.7.1  —  Apache-2.0
+              https://github.com/gpustack/gpustack
+  Built from: llama.cpp (pinned)  —  MIT
+              https://github.com/ggml-org/llama.cpp
+  Built from: gguf-parser (pinned)  —  MIT
+              https://github.com/gpustack/gguf-parser-go
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

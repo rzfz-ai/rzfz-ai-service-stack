@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block page_title %}Sideload Model{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Sideload a Model</h1>
+    <p class="page-subtitle">Install a GGUF you obtained yourself — upload it, or point at a file/folder already on the box. It is registered with GPUStack from the local file, never downloaded. Works online, proxied and fully offline.</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{% if not llm_enabled %}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    No LLM runtime profile is enabled (<code>llm</code> / <code>llm-legacy</code> / <code>llm-cpu</code>). The GGUF can still be staged into the volume, but GPUStack must be running for registration to succeed.
+</div>
+{% endif %}
+
+<form method="POST" action="{{ url_for('settings.sideload_model_save') }}" class="settings-form" enctype="multipart/form-data">
+    <div class="detail-section" style="margin-bottom:1.5rem">
+        <div class="detail-section-title">Model source</div>
+
+        <div class="form-group">
+            <label class="form-label">
+                <input type="radio" name="source_type" value="upload" checked onchange="toggleSideloadSource()"> Upload a file
+            </label>
+            <label class="form-label" style="margin-left:1.5rem">
+                <input type="radio" name="source_type" value="local_path" onchange="toggleSideloadSource()"> Path already on the box
+            </label>
+        </div>
+
+        <div class="form-group" id="sideload-upload-group">
+            <label class="form-label">GGUF file (<code>.gguf</code>, or a <code>.zip</code> containing exactly one)</label>
+            <input type="file" name="model_file" accept=".gguf,.zip" class="apply-input">
+            <p style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:0.35rem">
+                The file is validated (GGUF magic) before anything is written. Very large uploads may exceed the portal's request timeout — for those, stage the file on the box and use the "Path already on the box" option.
+            </p>
+        </div>
+
+        <div class="form-group" id="sideload-path-group" style="display:none">
+            <label class="form-label">Local path (a <code>.gguf</code> file, or a directory containing one)</label>
+            <input type="text" name="local_path" class="apply-input" placeholder="{{ stack_root }}/sideload/my-model.gguf">
+            <p style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:0.35rem">
+                The path must be readable by the <code>razzfazz-config</code> container — stage the file under the stack directory (<code>{{ stack_root }}</code>), or a directory bind-mounted into razzfazz-config (e.g. a mounted USB).
+            </p>
+        </div>
+    </div>
+
+    <div class="detail-section" style="margin-bottom:1.5rem">
+        <div class="detail-section-title">Registration</div>
+        <div class="form-group">
+            <label class="form-label">Model name</label>
+            <input type="text" name="name" class="apply-input" placeholder="(defaults to the file name)">
+            <p style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:0.35rem">
+                The name GPUStack exposes this model as (e.g. on <code>/v1-openai/models</code>).
+            </p>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Category</label>
+            <select name="category" class="apply-input">
+                {% for c in categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+            </select>
+        </div>
+    </div>
+
+    <div class="apply-actions" style="padding-top:0.5rem">
+        <button type="submit" class="btn btn-primary">Sideload &amp; Register</button>
+    </div>
+</form>
+
+<p style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:1rem">
+    Registered models land in <code>{{ local_models_dir }}</code> inside the gpustack volume and count toward <code>rzfz verify-models</code>. Registration uses <code>restart_on_error: false</code>.
+</p>
+
+<script>
+function toggleSideloadSource() {
+    var v = document.querySelector('input[name="source_type"]:checked').value;
+    document.getElementById('sideload-upload-group').style.display = (v === 'upload') ? '' : 'none';
+    document.getElementById('sideload-path-group').style.display = (v === 'local_path') ? '' : 'none';
+}
+</script>
+{% endblock %}

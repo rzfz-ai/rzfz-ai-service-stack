@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block page_title %}Domain & TLS{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Domain & TLS</h1>
+    <p class="page-subtitle">Configure domain name and TLS certificate settings</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+<form method="POST" enctype="multipart/form-data" class="settings-form">
+    <div class="detail-section">
+        <div class="detail-section-title">Domain</div>
+        <div class="form-group">
+            <label class="form-label">Main domain</label>
+            <input type="text" name="domain" value="{{ config.domain }}" class="apply-input" placeholder="example.com" required>
+            <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem">
+                Changing the domain updates all service URLs (chat.&lt;domain&gt;, dify.&lt;domain&gt;, etc.) and restarts Caddy. Existing TLS certificates for the old domain will be invalidated.
+            </p>
+        </div>
+    </div>
+
+    <div class="detail-section">
+        <div class="detail-section-title">TLS Mode</div>
+        <div class="form-group">
+            <label><input type="radio" name="tls_mode" value="letsencrypt" {% if config.tls_mode == 'letsencrypt' %}checked{% endif %} onchange="toggleTlsSections()"> Let's Encrypt (automatic certificates)</label>
+        </div>
+        <div class="form-group">
+            <label><input type="radio" name="tls_mode" value="selfsigned" {% if config.tls_mode == 'selfsigned' %}checked{% endif %} onchange="toggleTlsSections()"> Self-signed (internal/dev)</label>
+        </div>
+        <div class="form-group">
+            <label><input type="radio" name="tls_mode" value="certificate" {% if config.tls_mode == 'certificate' %}checked{% endif %} onchange="toggleTlsSections()"> Custom certificate (upload wildcard cert)</label>
+        </div>
+    </div>
+
+    <!-- Let's Encrypt options -->
+    <div id="section-letsencrypt" class="detail-section" style="{% if config.tls_mode != 'letsencrypt' %}display:none{% endif %}">
+        <div class="detail-section-title">Let's Encrypt</div>
+        <div class="form-group">
+            <label class="form-label">Admin email (for certificate notifications)</label>
+            <input type="email" name="letsencrypt_email" value="{{ config.letsencrypt_email }}" class="apply-input" placeholder="admin@example.com">
+        </div>
+    </div>
+
+    <!-- Custom certificate upload -->
+    <div id="section-certificate" class="detail-section" style="{% if config.tls_mode != 'certificate' %}display:none{% endif %}">
+        <div class="detail-section-title">Custom Certificate</div>
+        {% if config.cert_status %}
+        <div style="margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:0.8125rem">
+            Current certificate: <strong>{{ config.cert_status.issuer or 'Unknown issuer' }}</strong><br>
+            Expires: {{ config.cert_status.expiry or 'Unknown' }}
+            {% if config.cert_status.days_remaining is not none %}
+            ({{ config.cert_status.days_remaining }} days remaining)
+            {% endif %}
+        </div>
+        {% endif %}
+        <div class="form-group">
+            <label class="form-label">Certificate file (PEM)</label>
+            <input type="file" name="cert_file" accept=".pem,.crt,.cer" class="apply-input">
+            <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem">Wildcard certificate for *.{{ config.domain }} (full chain including intermediates)</p>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Private key file (PEM)</label>
+            <input type="file" name="key_file" accept=".pem,.key" class="apply-input">
+        </div>
+    </div>
+
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn btn-primary">Save & Apply</button>
+    </div>
+</form>
+
+<script>
+function toggleTlsSections() {
+    const mode = document.querySelector('input[name="tls_mode"]:checked').value;
+    document.getElementById('section-letsencrypt').style.display = mode === 'letsencrypt' ? '' : 'none';
+    document.getElementById('section-certificate').style.display = mode === 'certificate' ? '' : 'none';
+}
+</script>
+{% endblock %}
