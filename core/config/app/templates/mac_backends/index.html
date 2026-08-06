@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block page_title %}Mac LLM backends{% endblock %}
+
+{% block page_content %}
+<div class="page-header">
+    <h1>Mac LLM backends</h1>
+    <p class="page-subtitle">
+        Manage the Macs running Ollama that the <code>llm-mac-gateway</code> fronts as a
+        second OpenAI endpoint — GPUStack is untouched (#168).
+    </p>
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{% if not enabled %}
+<div class="panel">
+    <h2 style="margin-top:0;font-size:1.1rem">Module not enabled</h2>
+    <p style="font-size:0.9rem;color:var(--color-text-secondary)">
+        The <strong>mac-llm</strong> module is off. Enable it first, then declare your Macs here.
+        Boxes without Macs are unaffected.
+    </p>
+    <a href="{{ url_for('modules.detail', profile_id='mac-llm') }}" class="btn btn-primary btn-sm">
+        Go to the mac-llm module &rarr;
+    </a>
+</div>
+{% else %}
+
+{% if gateway_key_set is not none and not gateway_key_set %}
+<div class="panel" style="margin-bottom:1rem;border-left:3px solid var(--color-warn, #b8860b)">
+    <strong>MAC_GATEWAY_MASTER_KEY is empty.</strong>
+    <span style="font-size:0.875rem;color:var(--color-text-muted)">
+        The gateway needs it to authenticate stack components. Set it in
+        <code>rzfz setup --regenerate-secrets</code> (or the Secrets page) before use.
+    </span>
+</div>
+{% endif %}
+
+<!-- Configured Macs ------------------------------------------------------- -->
+{% if macs %}
+{% for row in macs %}
+{% set mac = row.mac %}
+<div class="panel" style="margin-bottom:1rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">
+        <h2 style="margin:0;font-size:1.1rem">
+            <span class="status-dot status-{{ 'green' if row.reachable else 'red' }}"></span>
+            <code>{{ mac.ip }}:{{ mac.port }}</code>
+            {% if row.reachable %}
+            <span class="badge badge-production">reachable</span>
+            {% if row.version %}<span style="font-size:0.75rem;color:var(--color-text-muted)">Ollama {{ row.version }}</span>{% endif %}
+            {% else %}
+            <span class="badge badge-experimental">unreachable</span>
+            {% endif %}
+        </h2>
+        <form method="POST" action="{{ url_for('mac_backends.remove') }}"
+              onsubmit="return confirm('Remove Mac backend {{ mac.ip }} (all its model aliases) and reload the gateway?')">
+            <input type="hidden" name="ip" value="{{ mac.ip }}">
+            <button type="submit" class="btn btn-sm btn-secondary">Remove Mac</button>
+        </form>
+    </div>
+
+    <!-- model aliases (from config.yaml) -->
+    <table class="container-table" style="margin-top:0.75rem">
+        <thead><tr><th>Alias (shown in Open WebUI)</th><th>Ollama tag</th><th>Model management</th></tr></thead>
+        <tbody>
+        {% for m in row.models %}
+            <tr>
+                <td><code>{{ m.alias }}</code></td>
+                <td><code>{{ m.ollama_tag }}</code></td>
+                <td>
+                    <form method="POST" action="{{ url_for('mac_backends.preload_model', mac=mac.ip) }}" style="display:inline">
+                        <input type="hidden" name="model" value="{{ m.ollama_tag }}">
+                        <button type="submit" class="btn btn-sm btn-secondary" title="Load resident (keep_alive:-1) to kill cold-start">Preload</button>
+                    </form>
+                    <form method="POST" action="{{ url_for('mac_backends.pull_model', mac=mac.ip) }}" style="display:inline">
+                        <input type="hidden" name="model" value="{{ m.ollama_tag }}">
+                        <button type="submit" class="btn btn-sm btn-secondary" title="Re-pull / update this tag on the Mac">Pull</button>
+                    </form>
+                    <form method="POST" action="{{ url_for('mac_backends.delete_model', mac=mac.ip) }}" style="display:inline"
+                          onsubmit="return confirm('Delete {{ m.ollama_tag }} from {{ mac.ip }}? This removes it from the Mac disk.')">
+                        <input type="hidden" name="model" value="{{ m.ollama_tag }}">
+                        <button type="submit" class="btn btn-sm btn-secondary">Delete from Mac</button>
+                    </form>
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="3" style="font-size:0.8125rem;color:var(--color-text-muted)">No models mapped yet — add one below.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- add a model alias to this Mac + pull an arbitrary tag -->
+    <div class="detail-section" style="margin-top:0.75rem">
+        <div class="detail-section-title">Add a model alias to this Mac</div>
+        <form method="POST" action="{{ url_for('mac_backends.add') }}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
+            <input type="hidden" name="ip" value="{{ mac.ip }}">
+            <input type="hidden" name="port" value="{{ mac.port }}">
+            <div class="form-group" style="margin:0">
+                <label class="form-label">Alias</label>
+                <input type="text" name="alias" class="apply-input" placeholder="mac-qwen3-coder" required>
+            </div>
+            <div class="form-group" style="margin:0">
+                <label class="form-label">Ollama tag</label>
+                <input type="text" name="ollama_tag" class="apply-input" placeholder="qwen3-coder:30b" required>
+            </div>
+            <button type="submit" class="btn btn-sm btn-primary">Add alias</button>
+        </form>
+        <div style="margin-top:0.5rem;font-size:0.8125rem">
+            <a href="{{ url_for('mac_backends.list_models', mac=mac.ip) }}?format=json" target="_blank">
+                View live models on this Mac (/api/tags + /api/ps) &rarr;
+            </a>
+        </div>
+    </div>
+
+    <!-- Tier-2 SSH host management seam (P3 — designed-for, not built) -->
+    <div style="margin-top:0.5rem;font-size:0.75rem;color:var(--color-text-muted)">
+        Host management (SSH: upgrade / restart / logs) is not enabled — planned as a per-Mac opt-in (P3).
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="panel" style="margin-bottom:1rem">
+    <p style="font-size:0.9rem;color:var(--color-text-secondary);margin:0">
+        No Macs configured yet. Add one below — the gateway reloads automatically.
+    </p>
+</div>
+{% endif %}
+
+<!-- Add a Mac ------------------------------------------------------------- -->
+<div class="panel">
+    <h2 style="margin-top:0;font-size:1.1rem">Add a Mac</h2>
+    <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-top:0">
+        The Mac must run Ollama on the LAN (<code>OLLAMA_HOST=0.0.0.0</code>). Same alias on two Macs
+        = one load-balance group. Firewall each Mac to accept <code>:11434</code> only from this box.
+    </p>
+    <form method="POST" action="{{ url_for('mac_backends.add') }}"
+          style="display:flex;gap:0.75rem;flex-wrap:wrap;align-items:flex-end">
+        <div class="form-group" style="margin:0">
+            <label class="form-label">Mac IP / hostname</label>
+            <input type="text" name="ip" class="apply-input" placeholder="192.0.2.194" required>
+        </div>
+        <div class="form-group" style="margin:0">
+            <label class="form-label">Port</label>
+            <input type="text" name="port" class="apply-input" style="width:6rem" value="11434">
+        </div>
+        <div class="form-group" style="margin:0">
+            <label class="form-label">Model alias</label>
+            <input type="text" name="alias" class="apply-input" placeholder="mac-qwen3-coder" required>
+        </div>
+        <div class="form-group" style="margin:0">
+            <label class="form-label">Ollama tag</label>
+            <input type="text" name="ollama_tag" class="apply-input" placeholder="qwen3-coder:30b" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm">Add Mac &amp; reload gateway</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,111 @@
+<!--
+    Release Notes + What's New modals.
+
+    MUST live at body-root (included from base.html) — NOT inside nav.html.
+    The sidebar's ancestor creates a containing block for position:fixed
+    descendants, so an overlay rendered inside .sidebar has inset:0
+    resolve to the sidebar column instead of the viewport, and the dialog
+    ends up glued to the left of the nav. Keeping the markup here makes
+    the overlay sit under <body> directly and fill the full viewport.
+-->
+
+<!-- Release Notes Popup -->
+<div id="release-notes-overlay" class="apply-overlay hidden" onclick="this.classList.add('hidden')">
+    <div class="apply-dialog whats-new-dialog" onclick="event.stopPropagation()">
+        <div class="apply-header">
+            <h2>Release Notes — {{ stack_version }}</h2>
+            <button class="apply-close" onclick="document.getElementById('release-notes-overlay').classList.add('hidden')">&times;</button>
+        </div>
+        <div id="release-notes-content" class="whats-new-body" hx-get="/api/release-notes" hx-trigger="none" hx-swap="innerHTML">
+            <p style="color:var(--color-text-muted)">Loading...</p>
+        </div>
+    </div>
+</div>
+
+<!-- What's New Popup (shown once per version, with previous releases below) -->
+<div id="whats-new-overlay" class="apply-overlay hidden" onclick="dismissWhatsNew()">
+    <div class="apply-dialog whats-new-dialog" onclick="event.stopPropagation()">
+        <div class="apply-header">
+            <h2>What's New — {{ stack_version }}</h2>
+            <button class="apply-close" onclick="dismissWhatsNew()">&times;</button>
+        </div>
+        <div id="whats-new-content" class="whats-new-body">
+            <p style="color:var(--color-text-muted)">Loading...</p>
+        </div>
+        <div class="whats-new-actions">
+            <a href="#" onclick="showReleaseNotes();dismissWhatsNew();return false" class="btn btn-secondary">Full Release Notes</a>
+            <button class="btn btn-primary" onclick="dismissWhatsNew()">Got it</button>
+        </div>
+    </div>
+</div>
+
+<script>
+function showReleaseNotes() {
+    var overlay = document.getElementById('release-notes-overlay');
+    overlay.classList.remove('hidden');
+    // Direct htmx.ajax call — the older trigger/setAttribute/process dance
+    // was unreliable (the dashboard's 15s partial refresh sometimes wiped
+    // HTMX's tracking of the content div between the open and the load,
+    // leaving the dialog stuck on "Loading…"). htmx.ajax is unconditional.
+    htmx.ajax('GET', '/api/release-notes', {target: '#release-notes-content', swap: 'innerHTML'});
+}
+
+function dismissWhatsNew() {
+    document.getElementById('whats-new-overlay').classList.add('hidden');
+    localStorage.setItem('razzfazz_seen_version', '{{ stack_version }}');
+}
+
+// Show What's New on first visit with a new version. Loads the full
+// history endpoint (current release + previous, scrollable accordions)
+// Loads the cycle-level highlights for the *current* tag — the
+// consolidated cycle doc (releases/<MAJOR.MM>/WHATS_NEW.md) is what
+// operators care about. Pre-rc6.9 the popup loaded the full per-rc
+// history, which made GA tags scroll through ten collapsed RC blobs
+// for no operator value. The "Full Release Notes" link in the dialog
+// footer still gets to the full RELEASE_NOTES.md if they want it.
+document.addEventListener('DOMContentLoaded', function() {
+    var seen = localStorage.getItem('razzfazz_seen_version');
+    if (seen !== '{{ stack_version }}') {
+        fetch('/api/whats-new')
+            .then(function(r) { return r.text(); })
+            .then(function(html) {
+                if (!html || html.length < 20) {
+                    // No content — silently mark seen.
+                    localStorage.setItem('razzfazz_seen_version', '{{ stack_version }}');
+                    return;
+                }
+                document.getElementById('whats-new-content').innerHTML = html;
+                document.getElementById('whats-new-overlay').classList.remove('hidden');
+            })
+            .catch(function() {
+                localStorage.setItem('razzfazz_seen_version', '{{ stack_version }}');
+            });
+    }
+});
+
+// #216 follow-up: the modal body IS a scroll container, but with no background
+// scroll-lock the mouse wheel scrolled the dashboard behind the modal instead
+// (verified on prod: body clientHeight < scrollHeight, yet the page scrolled).
+// Lock <body> scroll whenever any .apply-overlay is open; restore when all close.
+(function(){
+    function anyOpen(){
+        return Array.prototype.some.call(document.querySelectorAll('.apply-overlay'),
+            function(e){ return !e.classList.contains('hidden'); });
+    }
+    // Lock the <html> element (the page's scroll container) — locking only <body>
+    // is insufficient here (the document keeps scrolling). Lock both to be safe.
+    function sync(){
+        var lock = anyOpen() ? 'hidden' : '';
+        document.documentElement.style.overflow = lock;
+        document.body.style.overflow = lock;
+    }
+    function wire(){
+        document.querySelectorAll('.apply-overlay').forEach(function(e){
+            new MutationObserver(sync).observe(e, {attributes:true, attributeFilter:['class']});
+        });
+        sync();
+    }
+    if (document.readyState !== 'loading') wire();
+    else document.addEventListener('DOMContentLoaded', wire);
+})();
+</script>

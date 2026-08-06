@@ -1,0 +1,838 @@
+/* rzfz.ai Configuration — Base Styles (T01 scaffold, enhanced in T07)
+ *
+ * M026 S07 #5: deduplicated against razzfazz-base.css; container-specific
+ * chrome stays local. The shared baseline (`/static/razzfazz-common/
+ * razzfazz-base.css`) is loaded BEFORE this file by base.html and exposes
+ * a `razz-*` prefixed token + utility set (--razz-red, .razz-card, .razz-button,
+ * etc.). This file continues to own:
+ *   - the management-portal layout chrome (.layout, .sidebar, .nav-*, .content)
+ *   - module browser primitives (.module-card, .module-grid, .module-*)
+ *   - apply / what's-new dialog (.apply-*, .whats-new-*)
+ *   - module detail page (.detail-*, .container-table)
+ *   - memory bar + terminal output (.memory-*, .terminal-*)
+ *   - the local .btn / .card / .badge / .panel / .flash classes referenced
+ *     directly by templates (NOT renamed to .razz-* in S07; would be a
+ *     much bigger refactor)
+ *   - the local --color-* CSS custom properties (different naming scheme
+ *     from the shared --razz-* tokens; both coexist intentionally)
+ *
+ * Selector overlap with razzfazz-base.css: none (shared uses .razz-*
+ * exclusively; local classes are unprefixed). The shared link is loaded
+ * mostly so future templates / partials in this container can opt into
+ * the shared utilities incrementally without a second CSS round-trip.
+ */
+
+:root {
+    --color-brand: #CD1719;
+    --color-brand-hover: #b01416;
+    --color-bg-dark: #1a1a1a;
+    --color-bg-sidebar: rgba(255, 255, 255, 0.90);
+    --color-bg-content: transparent;
+    --color-bg-card: rgba(255, 255, 255, 0.92);
+    --color-text-primary: #1a1a1a;
+    --color-text-secondary: #555;
+    --color-text-light: #333;
+    --color-text-muted: #777;
+    --color-border: rgba(0, 0, 0, 0.1);
+    --color-border-dark: rgba(0, 0, 0, 0.15);
+    --sidebar-width: 240px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: url('/branding/media/razzfazz.png') no-repeat center center fixed;
+    background-size: cover;
+    background-color: #f0f0f0;
+    color: var(--color-text-primary);
+    font-size: 0.875rem;
+    line-height: 1.5;
+}
+
+/* Layout — fixed sidebar + offset content (no grid, sidebar is position:fixed) */
+.layout {
+    min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+    background: var(--color-bg-sidebar);
+    backdrop-filter: blur(8px);
+    color: var(--color-text-light);
+    overflow-y: auto;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--sidebar-width);
+    height: 100vh;
+    padding: 1rem 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--color-border);
+}
+
+.nav-brand {
+    padding: 0.75rem 1rem;
+    background: transparent;
+    margin-bottom: 0.75rem;
+}
+
+.brand-logo {
+    height: 28px;
+    width: auto;
+    display: block;
+    margin-bottom: 0.25rem;
+}
+
+.brand-sub {
+    display: block;
+    font-size: 0.6875rem;
+    color: #2c2c2c;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+}
+
+.nav-section {
+    margin-bottom: 0.25rem;
+}
+
+.nav-category {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.5rem 1rem 0.25rem;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 1rem;
+    color: var(--color-text-light);
+    text-decoration: none;
+    font-size: 0.8125rem;
+    transition: background 0.1s;
+}
+
+.nav-item:hover { background: rgba(0,0,0,0.05); }
+.nav-item.active { background: var(--color-brand); color: #fff; }
+.nav-item.disabled { opacity: 0.4; pointer-events: none; }
+
+.nav-icon { font-size: 0.75rem; }
+.nav-count {
+    margin-left: auto;
+    font-size: 0.6875rem;
+    background: rgba(0,0,0,0.06);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 3px;
+    color: var(--color-text-muted);
+}
+.nav-item.active .nav-count { background: rgba(255,255,255,0.2); color: #fff; }
+.nav-section-bottom { margin-top: auto; border-top: 1px solid var(--color-border); padding-top: 0.5rem; }
+
+/* Content area */
+.content {
+    margin-left: var(--sidebar-width);
+    padding: 2rem;
+    min-height: 100vh;
+}
+
+.page-header {
+    margin-bottom: 1.5rem;
+}
+
+.page-header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.page-subtitle {
+    font-size: 0.875rem;
+    color: var(--color-text-secondary);
+    margin-top: 0.25rem;
+}
+
+/* Cards */
+.card {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.card-header {
+    padding: 0.75rem 1rem;
+    font-weight: 600;
+    font-size: 0.8125rem;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+}
+
+.card-body {
+    padding: 1rem;
+}
+
+/* Panel — used for content blocks that aren't full cards but still need
+   readable opaque background over the razzfazz brand image. Same look as
+   .card but no hover/header semantics. */
+.panel {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+/* Filter bar */
+.filter-bar {
+    margin-bottom: 1rem;
+}
+
+.filter-form {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.filter-search {
+    flex: 1;
+    min-width: 200px;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    background: var(--color-bg-card);
+}
+
+.filter-select {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    background: var(--color-bg-card);
+}
+
+.filter-btn {
+    padding: 0.5rem 1rem;
+    background: var(--color-brand);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    cursor: pointer;
+}
+
+.filter-btn:hover { background: var(--color-brand-hover); }
+
+/* Module grid */
+.module-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.75rem;
+}
+
+.module-card {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: transform 0.15s, box-shadow 0.15s;
+    transition: box-shadow 0.15s;
+}
+
+a.module-card { text-decoration: none; color: inherit; display: block; }
+.module-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.module-card.module-disabled { opacity: 0.6; }
+
+.module-icon { width: 40px; height: 40px; border-radius: 6px; flex-shrink: 0; }
+.module-icon-lg { width: 48px; height: 48px; border-radius: 8px; flex-shrink: 0; }
+
+.module-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.module-name {
+    font-weight: 600;
+    font-size: 0.9375rem;
+    color: var(--color-text-primary);
+}
+
+.module-description {
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+    margin-bottom: 0.75rem;
+    line-height: 1.4;
+}
+
+.module-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+}
+
+.module-containers {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+.module-ram {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+/* Status dots */
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.status-green { background: #22c55e; }
+.status-yellow { background: #eab308; }
+.status-gray { background: #888; }
+.status-red { background: #ef4444; }
+
+/* Badges */
+.badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+}
+
+.badge-production { background: #dcfce7; color: #166534; }
+.badge-stable { background: #dbeafe; color: #1e40af; }
+.badge-experimental { background: #fef3c7; color: #92400e; }
+.badge-origin { background: #f3f4f6; color: #374151; }
+.origin-flag { font-size: 1rem; line-height: 1; }
+.badge-risk-safe { background: #dcfce7; color: #166534; }
+.badge-risk-caution { background: #fef3c7; color: #92400e; }
+.badge-risk-danger { background: #fee2e2; color: #991b1b; }
+
+/* Buttons */
+.btn {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--color-brand); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--color-brand-hover); }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-secondary:hover { background: #d1d5db; }
+.btn-sm { padding: 0.25rem 0.625rem; font-size: 0.75rem; }
+
+/* Toggle button */
+.toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    background: var(--color-bg-card);
+    transition: all 0.15s;
+}
+.toggle-btn:hover { border-color: var(--color-brand); }
+.toggle-btn.enabled { background: #dcfce7; border-color: #22c55e; color: #166534; }
+.toggle-btn.disabled-state { background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
+
+/* Apply dialog */
+.apply-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+.apply-overlay.hidden { display: none; }
+
+.apply-dialog {
+    background: var(--color-bg-card);
+    border-radius: 12px;
+    width: 100%;
+    /* Fix #37: widen the apply dialog so the streaming action log can show
+       long compose/git output without forcing mid-word wraps. Matches the
+       width used by .whats-new-dialog for visual consistency. */
+    max-width: min(1100px, 94vw);
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+/* Larger variant for Release Notes + What's New — these render rendered
+   markdown (headings, lists, paragraphs) and need breathing room. */
+.apply-dialog.whats-new-dialog {
+    max-width: min(1100px, 94vw);
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    /* The whats-new variant scrolls INSIDE its body (below), not as a
+       whole dialog. Without this it inherits `overflow-y:auto` from
+       `.apply-dialog` and becomes a SECOND scroll container competing
+       with `.whats-new-body`; on long release notes neither engaged and
+       the content clipped un-scrollably (#216). Pin the dialog, scroll
+       the body. */
+    overflow: hidden;
+}
+/* Header must not shrink — it's the fixed top of the flex column so the
+   body gets the remaining height to scroll within. */
+.whats-new-dialog .apply-header { flex: 0 0 auto; }
+.whats-new-dialog .whats-new-body {
+    padding: 1rem 1.5rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    /* Canonical flexbox scroll fix: a flex child won't shrink below its
+       content size (so overflow-y never engages) unless min-height is 0.
+       #216 — long release notes clipped instead of scrolling. */
+    min-height: 0;
+    /* Belt-and-suspenders bound so overflow-y always has a definite height to
+       scroll within, independent of the flex-column resolution. */
+    max-height: 78vh;
+    /* #216 follow-up: the body IS a scroll container (verified on prod:
+       clientHeight < scrollHeight), but the mouse wheel scrolled the PAGE behind
+       the modal, not the body — because the background was never scroll-locked
+       and the small in-body scroll range chained straight to the page.
+       overscroll-behavior:contain stops that scroll chaining; the JS in
+       release_notes_whats_new.html locks the background while any modal is open. */
+    overscroll-behavior: contain;
+}
+.whats-new-dialog .whats-new-body h1,
+.whats-new-dialog .whats-new-body h2 { margin-top: 0; }
+/* Fix #37: per-module headers in release notes are rendered as <h3>/<h4>
+   from `### Module Name` markdown. Without explicit spacing they sit
+   flush against the preceding paragraph and the section structure
+   disappears. Add a generous top margin so each module visually opens. */
+.whats-new-dialog .whats-new-body h3,
+.whats-new-dialog .whats-new-body h4 {
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+}
+.whats-new-dialog .whats-new-body ul,
+.whats-new-dialog .whats-new-body ol { padding-left: 1.25rem; }
+.whats-new-dialog .whats-new-actions {
+    padding: 0.75rem 1.5rem 1rem;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    border-top: 1px solid var(--color-border);
+}
+
+/* Accordion sections in /api/whats-new-history — current release open,
+   previous releases collapsed; user can click to expand. */
+.whats-new-release {
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    background: var(--color-bg-soft, rgba(0,0,0,0.02));
+}
+.whats-new-release > summary {
+    padding: 0.5rem 0.875rem;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    font-size: 0.9375rem;
+}
+.whats-new-release > summary::-webkit-details-marker { display: none; }
+.whats-new-release > summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 0.5rem;
+    transition: transform 0.15s;
+    font-size: 0.75rem;
+}
+.whats-new-release[open] > summary::before { transform: rotate(90deg); }
+.whats-new-release-body {
+    padding: 0.5rem 1rem 1rem;
+    border-top: 1px solid var(--color-border);
+}
+.whats-new-release-body > :first-child { margin-top: 0.5rem; }
+
+.apply-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--color-border);
+}
+.apply-header h2 { font-size: 1rem; font-weight: 600; margin: 0; }
+.apply-close {
+    background: none;
+    border: none;
+    font-size: 1.25rem;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    padding: 0.25rem;
+}
+
+.apply-phase { padding: 1.25rem; }
+.apply-phase.hidden { display: none; }
+
+.apply-section { margin-bottom: 1rem; }
+.apply-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin-bottom: 0.25rem;
+}
+.apply-value { font-size: 0.875rem; }
+
+.apply-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+.apply-input:focus { outline: none; border-color: var(--color-brand); }
+
+.apply-error {
+    background: #fee2e2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    margin-bottom: 1rem;
+}
+.apply-error.hidden { display: none; }
+
+.apply-conflict {
+    background: #fef3c7;
+    border: 1px solid #fde68a;
+    color: #92400e;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    margin-bottom: 1rem;
+}
+.apply-conflict.hidden { display: none; }
+
+.apply-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    padding-top: 0.5rem;
+}
+
+/* Memory bar */
+.memory-bar-container { margin-top: 0.375rem; }
+.memory-bar {
+    position: relative;
+    height: 12px;
+    background: #e5e7eb;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.memory-bar-fill {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    background: #3b82f6;
+    border-radius: 6px 0 0 6px;
+    transition: width 0.3s;
+}
+.memory-bar-delta {
+    position: absolute;
+    top: 0; bottom: 0;
+    border-radius: 0;
+    transition: all 0.3s;
+}
+.memory-level-ok { background: #22c55e; }
+.memory-level-warning { background: #eab308; }
+.memory-level-critical { background: #f97316; }
+.memory-level-blocked { background: #ef4444; }
+
+.memory-bar-text {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    margin-top: 0.25rem;
+}
+.memory-warning {
+    font-size: 0.8125rem;
+    padding: 0.375rem 0.5rem;
+    border-radius: 4px;
+    margin-top: 0.375rem;
+}
+.memory-warning.hidden { display: none; }
+.memory-warning.memory-level-warning { background: #fef3c7; color: #92400e; }
+.memory-warning.memory-level-critical { background: #ffedd5; color: #9a3412; }
+.memory-warning.memory-level-blocked { background: #fee2e2; color: #991b1b; }
+
+/* Terminal output */
+.terminal-output {
+    background: #1a1a1a;
+    color: #22c55e;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    padding: 0.75rem;
+    border-radius: 6px;
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: 0.75rem;
+}
+/* Fix #37: overflow-wrap:anywhere lets the browser wrap long URLs/paths
+   only when there's no whitespace to break at, instead of word-break:break-all
+   which forces wraps mid-word even when whitespace was available. */
+.terminal-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.apply-result {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    font-size: 0.875rem;
+}
+.apply-result.hidden { display: none; }
+.result-success { color: #22c55e; font-size: 1.125rem; font-weight: bold; }
+.result-failure { color: #ef4444; font-size: 1.125rem; font-weight: bold; }
+.apply-duration { color: var(--color-text-muted); font-size: 0.75rem; }
+
+/* Module detail page */
+.detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.5rem;
+}
+.detail-title-group { flex: 1; }
+.detail-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.detail-meta {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.375rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.detail-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+@media (max-width: 768px) { .detail-grid { grid-template-columns: 1fr; } }
+
+.detail-section {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem;
+}
+.detail-section.full-width { grid-column: 1 / -1; }
+
+.detail-section-title {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin-bottom: 0.625rem;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.375rem 0;
+    font-size: 0.8125rem;
+}
+.detail-row + .detail-row { border-top: 1px solid #f3f4f6; }
+.detail-row-label { color: var(--color-text-secondary); }
+.detail-row-value { font-weight: 500; }
+
+.detail-url-link {
+    color: var(--color-brand);
+    text-decoration: none;
+    font-weight: 500;
+}
+.detail-url-link:hover { text-decoration: underline; }
+
+/* Container table */
+.container-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+}
+.container-table th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+}
+.container-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #f3f4f6;
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: var(--color-text-muted);
+}
+
+/* Flash messages */
+.flash-messages { margin-bottom: 1rem; }
+.flash {
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    margin-bottom: 0.5rem;
+}
+.flash-success { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.flash-error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+
+/* Form styles */
+.settings-form { max-width: 600px; }
+.form-group { margin-bottom: 0.75rem; }
+.form-label {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+/* Doc content */
+.doc-content { font-size: 0.9375rem; line-height: 1.7; color: var(--color-text-primary); }
+.doc-content h1 { font-size: 1.5rem; margin: 1.5rem 0 0.75rem; }
+.doc-content h2 { font-size: 1.25rem; margin: 1.25rem 0 0.5rem; }
+.doc-content h3 { font-size: 1.0625rem; margin: 1rem 0 0.5rem; }
+.doc-content code { background: #f3f4f6; padding: 0.125rem 0.375rem; border-radius: 3px; font-size: 0.8125rem; }
+.doc-content pre { background: #1a1a1a; color: #e0e0e0; padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 1rem 0; }
+.doc-content pre code { background: transparent; padding: 0; }
+.doc-content table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+.doc-content th, .doc-content td { border: 1px solid var(--color-border); padding: 0.5rem 0.75rem; text-align: left; }
+.doc-content th { background: #f9fafb; font-weight: 600; }
+
+/* Update-available badge */
+.badge-update { background: #dbeafe; color: #1e40af; }
+
+/* Agent settings tabs */
+.agent-tab {
+    padding: 0.5rem 1rem;
+    border: none;
+    background: none;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+}
+.agent-tab:hover { color: var(--color-text-primary); }
+.agent-tab.active { color: var(--color-brand); border-bottom-color: var(--color-brand); }
+
+/* M029-S04 — LLM runtime stable/experimental panel */
+.runtime-choice {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+}
+.runtime-choice-card {
+    border: 1px solid var(--color-border, #d4d4d8);
+    border-radius: 6px;
+    padding: 1rem;
+    /* Match the .module-card treatment so this page reads consistently
+       with the All Modules grid: active = opaque white, inactive = dim. */
+    background: var(--color-bg-card, #ffffff);
+    backdrop-filter: blur(6px);
+}
+.runtime-choice-card:not(.runtime-choice-active) { opacity: 0.6; }
+.runtime-choice-card h3 { margin-top: 0; margin-bottom: 0.5rem; }
+.runtime-choice-card p { margin-bottom: 0.75rem; font-size: 0.9rem; }
+.runtime-choice-card.runtime-choice-active {
+    border-color: var(--color-brand, #CD1719);
+    box-shadow: 0 0 0 1px var(--color-brand, #CD1719);
+}
+.badge-stable {
+    background: #16a34a; color: white;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.badge-experimental {
+    background: #d97706; color: white;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.badge-warn {
+    background: #ca8a04; color: white;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.modal-dialog {
+    border: 1px solid var(--color-border, #d4d4d8);
+    border-radius: 6px;
+    padding: 1.25rem;
+    min-width: 360px;
+    margin: auto;
+}
+.modal-dialog::backdrop { background: rgba(0,0,0,0.4); }
+.dialog-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
+.log-output {
+    background: #1a1a1a; color: #e4e4e7;
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.85rem;
+    max-height: 320px; overflow: auto;
+    white-space: pre-wrap;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .sidebar { position: static; width: 100%; height: auto; flex-direction: row; flex-wrap: wrap; }
+    .content { margin-left: 0; }
+}

@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block page_title %}Network Policy{% endblock %}
+
+{% macro net_badge(posture) -%}
+{%- if posture == 'DIRECT' -%}<span class="badge badge-production">internet: DIRECT</span>
+{%- elif posture == 'PROXY' -%}<span class="badge badge-stable">internet: via SSRF proxy</span>
+{%- else -%}<span class="badge badge-warn">internet: NONE</span>{%- endif -%}
+{%- endmacro %}
+
+{% block page_content %}
+<div class="page-header">
+  <h1>Network Policy</h1>
+  <p class="page-subtitle">The ACTUAL per-container network policy of this box — introspected live from docker.</p>
+</div>
+
+<div class="panel" style="margin-bottom:1rem">
+  <p style="margin:0;font-size:0.85rem;color:var(--color-text-muted)">
+    <strong>What this shows:</strong> network-level reachability — two containers on a shared docker
+    network can reach each other by name (not observed traffic). The <strong>internet</strong> column
+    is the egress <em>posture</em>, derived from each container's networks + proxy env:
+    <strong>DIRECT</strong> = attached to a WAN-capable docker network (usually the shared
+    <code>default</code> bridge) — it <em>can</em> egress, not that it observably does;
+    <strong>via SSRF proxy</strong> = routed through caddy:8195;
+    <strong>NONE</strong> = only on internal networks, no direct path out.
+    Box mode: <span class="badge">{{ model.box_mode }}</span>{% if model.box_mode == 'offline' %} —
+    egress is suppressed at the app layer, not firewalled.{% endif %}
+    <br><em>A stock stack puts most services on the flat <code>default</code> bridge with no
+    per-service egress filtering, so most read DIRECT by design. The summary below collapses that
+    majority and leads with the exceptions. Editing this policy and the <code>userdefined</code>
+    mode arrive in a later release.</em>
+    &nbsp;·&nbsp; <a href="{{ url_for('offline.index') }}">Offline / Network status →</a>
+  </p>
+</div>
+
+<!-- Summary + notable exceptions (lead with what deviates from the flat majority) -->
+<div class="panel" style="margin-bottom:1rem">
+  {% set s = model.summary %}
+  <p style="margin:0 0 0.6rem;font-size:0.9rem">
+    <strong>{{ s.direct_default }}</strong> of <strong>{{ s.total }}</strong> containers reach the
+    internet directly via the shared <code>default</code> bridge <em>and nothing else</em> (no
+    per-service egress filtering)
+    &nbsp;·&nbsp; <strong>{{ s.proxy_routed }}</strong> route via the SSRF proxy
+    &nbsp;·&nbsp; <strong>{{ s.internal_only }}</strong> network-isolated
+    &nbsp;·&nbsp; <strong>{{ s.segmented }}</strong> on segmented networks.
+  </p>
+  {% set notables = model.containers | selectattr('notable') | list %}
+  {% if notables %}
+  <div style="font-size:0.85rem">
+    <strong>Notable services</strong> ({{ notables | length }} deviate from the default-bridge majority):
+    <table class="np-table" style="width:100%;font-size:0.82rem;margin-top:0.3rem">
+      <thead><tr><th>container</th><th>internet</th><th>why it stands out</th></tr></thead>
+      <tbody>
+      {% for c in notables %}
+      <tr>
+        <td><code>{{ c.name }}</code> <span style="color:var(--color-text-muted)">({{ c.module }})</span></td>
+        <td>{{ net_badge(c.internet) }}</td>
+        <td style="color:var(--color-text-muted)">{{ c.notable_reasons | join('; ') }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p style="margin:0;font-size:0.85rem;color:var(--color-text-muted)">No services deviate from the
+    default-bridge majority — this stack is fully flat.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <div class="tabs" style="margin-bottom:1rem">
+    <button class="tab-btn active" data-view="services">Per-service</button>
+    <button class="tab-btn" data-view="networks">By network</button>
+    <button class="tab-btn" data-view="matrix">Matrix</button>
+    <label style="float:right;font-size:0.8rem;margin-left:0.6rem" title="Show only services that deviate from the default-bridge majority">
+      <input type="checkbox" id="np-only-notable" onchange="npApplyFilter()"> only notable</label>
+    <input id="np-filter" type="text" placeholder="filter…" style="float:right"
+           oninput="npApplyFilter()">
+  </div>
+
+  <!-- Per-service (grouped by module) -->
+  <div class="np-view" id="view-services">
+    {% set grouped = {} %}
+    {% for c in model.containers %}{% set _ = grouped.setdefault(c.module, []).append(c) %}{% endfor %}
+    {% for module, ctrs in grouped.items() %}
+    <h3 style="margin:0.8rem 0 0.3rem">{{ module }}</h3>
+    <table class="np-table" style="width:100%;font-size:0.85rem">
+      <thead><tr><th>container</th><th>internet</th><th>why</th><th>reaches (internal)</th></tr></thead>
+      <tbody>
+      {% for c in ctrs %}
+      <tr class="np-row" data-name="{{ c.name }}" data-notable="{{ 1 if c.notable else 0 }}">
+        <td>{% if c.notable %}<span class="np-star" title="notable — {{ c.notable_reasons | join('; ') }}">★</span> {% endif %}<code>{{ c.name }}</code></td>
+        <td>{{ net_badge(c.internet) }}</td>
+        <td style="color:var(--color-text-muted)">{{ c.internet_why }}</td>
+        <td>{{ c.internal_reach_count }} peers
+          ({{ c.internal_reach[:6] | map(attribute='peer') | join(', ') }}{% if c.internal_reach_count > 6 %}, …{% endif %})</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endfor %}
+  </div>
+
+  <!-- By network -->
+  <div class="np-view" id="view-networks" style="display:none">
+    {% for n in model.networks %}
+    <div style="margin-bottom:0.8rem">
+      <strong><code>{{ n.short_name }}</code></strong>
+      {% if n.internal %}<span class="badge badge-warn">INTERNAL — no WAN</span>
+      {% else %}<span class="badge badge-production">WAN-capable</span>{% endif %}
+      <span style="color:var(--color-text-muted)">{{ n.driver }} · {{ n.members|length }} members · {{ n.meaning }}</span>
+      <div style="font-size:0.8rem;margin-top:0.2rem">{{ n.members | join(', ') }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Matrix -->
+  <div class="np-view" id="view-matrix" style="display:none;overflow-x:auto">
+    <table class="np-table np-matrix" style="font-size:0.7rem;white-space:nowrap">
+      <thead><tr><th class="np-corner">container \ reaches</th>
+        {% for c in model.containers %}<th class="np-col"><span>{{ c.name }}</span></th>{% endfor %}
+        <th class="np-col"><span>internet</span></th></tr></thead>
+      <tbody>
+      {% for row in model.containers %}
+      {% set reach = row.internal_reach | map(attribute='peer') | list %}
+      <tr><td><code>{{ row.name }}</code></td>
+        {% for col in model.containers %}
+        <td style="text-align:center">{% if col.name in reach %}●{% elif col.name == row.name %}—{% endif %}</td>
+        {% endfor %}
+        <td>{{ row.internet }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<style>
+  .tab-btn { background:none; border:none; padding:0.3rem 0.6rem; cursor:pointer;
+             font:inherit; color:var(--color-text-muted); border-bottom:2px solid transparent; }
+  .tab-btn.active { color:var(--color-text); border-bottom-color:var(--color-accent, #4a90d9); font-weight:600; }
+  .np-star { color:#c8860a; }
+  /* Matrix column headers: full container name, rotated 90° so the
+     grid stays narrow and every label is fully readable (#217 — the
+     6-char truncation "agent-", "openwe", "cognee" was unreadable). */
+  .np-matrix th.np-col { vertical-align:bottom; padding:0; height:9.5em; font-weight:500; }
+  .np-matrix th.np-col > span {
+    display:inline-block; writing-mode:vertical-rl; transform:rotate(180deg);
+    white-space:nowrap; padding:0.4rem 0.15rem; line-height:1;
+    font-family:var(--font-mono, ui-monospace, monospace);
+  }
+  .np-matrix th.np-corner { vertical-align:bottom; text-align:left; white-space:nowrap; }
+  .np-matrix td, .np-matrix th { padding-left:0.2rem; padding-right:0.2rem; }
+  .np-matrix tbody td:first-child { white-space:nowrap; }
+</style>
+<script>
+document.querySelectorAll('.tab-btn').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.querySelectorAll('.np-view').forEach(v => v.style.display = 'none');
+  document.getElementById('view-' + b.dataset.view).style.display = '';
+});
+function npApplyFilter() {
+  const q = (document.getElementById('np-filter').value || '').toLowerCase();
+  const onlyNotable = document.getElementById('np-only-notable').checked;
+  document.querySelectorAll('.np-row').forEach(r => {
+    const matchText = r.dataset.name.toLowerCase().includes(q);
+    const matchNotable = !onlyNotable || r.dataset.notable === '1';
+    r.style.display = (matchText && matchNotable) ? '' : 'none';
+  });
+}
+</script>
+{% endblock %}

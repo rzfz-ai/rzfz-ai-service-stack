@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# rzfz — the unified CLI for the rzfz.ai service stack (#34)
+# ==============================================================================
+# One entry point replacing the ~16 razzfazz-*.sh scripts:
+#
+#   rzfz <command> [args...]        e.g.  rzfz upgrade --check
+#   rzfz help                       list commands
+#
+# PHASE 1 (2026.07 rework): each subcommand DELEGATES to the existing
+# razzfazz-*.sh so behaviour is identical and risk is minimal. Phase 2 moves the
+# logic into cli/ and turns razzfazz-*.sh into thin shims → rzfz. See
+# .gsd/reports/2026.07-rework-execution-plan.md.
+#
+# Testability: set RZFZ_DRY=1 to print the resolved target + args instead of
+# executing (used by tests/test-rzfz-cli.sh).
+# ==============================================================================
+set -euo pipefail
+
+RZFZ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# command -> target script (relative to RZFZ_ROOT). Phase 2 repoints these into cli/.
+declare -A RZFZ_CMD=(
+    [init]=cli/init.sh
+    [setup]=cli/setup.sh
+    [upgrade]=cli/upgrade.sh
+    [post-install]=cli/post-install.sh
+    [backup]=cli/backup.sh
+    [status]=cli/status.sh
+    [logs]=cli/logs.sh
+    [package]=cli/package.sh
+    [checksum]=cli/checksum.sh
+    [test]=cli/test.sh
+    [verify-images]=cli/verify-images.sh
+    [verify-models]=cli/verify-models.sh
+    [set-admin-password]=cli/set-admin-password.sh
+    [set-password]=cli/set-password.sh
+    [rotate-secret]=cli/rotate-secret.sh
+    [security-check]=cli/security-check.sh
+    [provision-sso-users]=cli/provision-sso-users.sh
+)
+declare -A RZFZ_DESC=(
+    [init]="First-time setup wizard (validate prereqs, generate secrets, start stack)"
+    [setup]="Post-install config: secrets, API keys, SMTP, TLS, checksums, factory reset"
+    [upgrade]="Upgrade the stack (git/offline package, .env migration, rebuild, verify)"
+    [post-install]="Provision models + configure services after install"
+    [backup]="Backup / restore / list Docker volumes"
+    [status]="Show stack + service status"
+    [logs]="Collect container logs + system info into an archive"
+    [package]="Build an offline upgrade package from a git tag (developer machine)"
+    [checksum]="SHA256 governance snapshots of compose/Dockerfiles/scripts/blueprints"
+    [test]="Run the test suites"
+    [verify-images]="Assert every expected image (all profiles) is present locally — offline-readiness gate"
+    [verify-models]="Assert every standard-model GGUF is present in the gpustack-data volume — offline model-readiness gate"
+    [set-admin-password]="Reset a per-app admin password"
+    [set-password]="Set a named user's password (by email) in one local-auth app — password on stdin (#54)"
+    [rotate-secret]="Rotate a stack secret"
+    [security-check]="Run the host/stack security self-check"
+    [provision-sso-users]="Provision Authentik-group members into Dify/Cognee (no-OIDC apps)"
+)
+
+# Dev-only subcommands (#26/#27): builder/QA tooling a CUSTOMER box must neither
+# advertise nor dispatch. `package` is the offline-package builder (its own help
+# says "developer machine"); `test` runs the internal test suites. They stay fully
+# runnable on a DEV checkout — only un-advertised on customer boxes.
+RZFZ_DEV_CMDS=(package test)
+
+# A box is DEV when RZFZ_DEV=1 is exported OR the internal .gsd/ tree is present.
+# .gsd/ never ships to the public Codeberg export (publish-public.sh HARD GATE 1),
+# so a customer install is never DEV and the dev commands are always hidden there.
+rzfz_is_dev() {
+    [[ "${RZFZ_DEV:-}" == "1" ]] && return 0
+    [[ -d "$RZFZ_ROOT/.gsd" ]] && return 0
+    return 1
+}
+
+# 0 (true) → this command is hidden/blocked on THIS box.
+rzfz_cmd_hidden() {
+    rzfz_is_dev && return 1          # dev box: nothing hidden
+    local c
+    for c in "${RZFZ_DEV_CMDS[@]}"; do [[ "$1" == "$c" ]] && return 0; done
+    return 1
+}
+
+rzfz_usage() {
+    cat <<EOF
+rzfz — the rzfz.ai service-stack CLI
+
+Usage:
+  rzfz <command> [args...]
+  rzfz help                 Show this help
+  rzfz <command> --help     Help for a command
+
+Commands:
+EOF
+    local c
+    for c in $(printf '%s\n' "${!RZFZ_CMD[@]}" | sort); do
+        rzfz_cmd_hidden "$c" && continue
+        printf '  %-20s %s\n' "$c" "${RZFZ_DESC[$c]:-}"
+    done
+}
+
+main() {
+    local cmd="${1:-help}"
+    case "$cmd" in
+        -h|--help|help|"") rzfz_usage; return 0 ;;
+        --list)
+            # Emit the whole (filtered) list in ONE write. A per-line echo loop
+            # SIGPIPEs when a consumer (`… | grep -q`) closes the pipe early —
+            # under the caller's `pipefail` that surfaces as a false "missing".
+            local c out=""
+            for c in $(printf '%s\n' "${!RZFZ_CMD[@]}" | sort); do
+                rzfz_cmd_hidden "$c" && continue
+                out+="$c"$'\n'
+            done
+            printf '%s' "$out"
+            return 0 ;;
+    esac
+    local script="${RZFZ_CMD[$cmd]:-}"
+    # A dev-only command on a customer box is treated exactly like an unknown one.
+    if [[ -z "$script" ]] || rzfz_cmd_hidden "$cmd"; then
+        echo "rzfz: unknown command '$cmd'" >&2
+        echo "Run 'rzfz help' for the list of commands." >&2
+        return 2
+    fi
+    shift
+    local target="$RZFZ_ROOT/$script"
+    if [[ "${RZFZ_DRY:-}" == "1" ]]; then
+        echo "would exec: $target $*"
+        return 0
+    fi
+    if [[ ! -x "$target" ]]; then
+        echo "rzfz: target for '$cmd' not found/executable: $target" >&2
+        return 1
+    fi
+    exec "$target" "$@"
+}
+
+main "$@"

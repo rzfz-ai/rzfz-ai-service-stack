@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block page_title %}Backup Settings{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Backup Settings</h1>
+    <p class="page-subtitle">Configure backup schedule, retention, and encryption</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+<form method="POST" class="settings-form">
+    <div class="detail-section">
+        <div class="detail-section-title">Schedule</div>
+        <div class="form-group">
+            <label class="form-label">Frequency</label>
+            <select name="frequency" class="filter-select">
+                <option value="hourly" {% if config.frequency == 'hourly' %}selected{% endif %}>Hourly</option>
+                <option value="daily" {% if config.frequency == 'daily' %}selected{% endif %}>Daily</option>
+                <option value="weekly_sunday" {% if config.frequency == 'weekly_sunday' %}selected{% endif %}>Weekly (Sunday)</option>
+                <option value="weekly_monday" {% if config.frequency == 'weekly_monday' %}selected{% endif %}>Weekly (Monday)</option>
+                <option value="monthly" {% if config.frequency == 'monthly' %}selected{% endif %}>Monthly (1st)</option>
+            </select>
+        </div>
+        <div style="display:flex;gap:0.5rem">
+            <div class="form-group" style="flex:1">
+                <label class="form-label">Hour (0-23)</label>
+                <input type="number" name="hour" value="{{ config.hour }}" min="0" max="23" class="apply-input">
+            </div>
+            <div class="form-group" style="flex:1">
+                <label class="form-label">Minute (0-59)</label>
+                <input type="number" name="minute" value="{{ config.minute }}" min="0" max="59" class="apply-input">
+            </div>
+        </div>
+    </div>
+    <div class="detail-section">
+        <div class="detail-section-title">Retention</div>
+        <div class="form-group">
+            <label class="form-label">Keep backups for (days)</label>
+            <input type="number" name="retention" value="{{ config.retention_days }}" min="1" max="365" class="apply-input" style="max-width:120px">
+        </div>
+    </div>
+    <div class="detail-section">
+        <div class="detail-section-title">Content</div>
+        <div class="form-group">
+            <label><input type="checkbox" name="include_models" value="on" {% if config.include_model_files %}checked{% endif %}> Include model files (gpustack-data, speaches-data — can be very large)</label>
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" name="exclude_dify_plugins" value="on" {% if config.exclude_dify_plugins %}checked{% endif %}> Exclude Dify plugin data (dify-plugin-daemon — re-downloadable, can be large)</label>
+        </div>
+    </div>
+    <div class="detail-section">
+        <div class="detail-section-title">Encryption</div>
+        <p style="font-size:0.8125rem;color:var(--color-text-secondary);margin-bottom:0.5rem">
+            .env files in backups are always encrypted. By default the admin password is used.
+            You can set a separate encryption password below.
+        </p>
+        <div class="form-group">
+            <label><input type="radio" name="encryption_action" value="keep" checked> Keep current setting</label>
+        </div>
+        <div class="form-group">
+            <label><input type="radio" name="encryption_action" value="set"> Set new encryption password</label>
+        </div>
+        <div class="form-group">
+            <label><input type="radio" name="encryption_action" value="clear"> Clear (use admin password)</label>
+        </div>
+        <div class="form-group">
+            <label class="form-label">New encryption password (only if "Set new" is selected)</label>
+            <input type="password" name="encryption_password" class="apply-input" placeholder="Leave empty to keep current">
+        </div>
+    </div>
+    <div class="apply-actions" style="padding-top:1rem">
+        <a href="{{ url_for('backup.index') }}" class="btn btn-secondary">Back</a>
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </div>
+</form>
+{% endblock %}

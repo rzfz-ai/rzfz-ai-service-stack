@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+
+{% block page_title %}{{ profile.name }}{% endblock %}
+
+{% block page_content %}
+<a href="{{ url_for('modules.overview') }}" class="btn btn-sm btn-secondary" style="margin-bottom:0.75rem">&larr; All Modules</a>
+<!-- Header -->
+<div class="detail-header">
+    <div class="detail-title-group">
+        <div class="detail-title">
+            {% if profile.app_icon %}
+            <img src="{{ url_for('static', filename='media/' + profile.app_icon) }}" alt="" class="module-icon-lg">
+            {% else %}
+            <span class="status-dot status-{{ health }}"></span>
+            {% endif %}
+            {{ profile.name }}
+            {% if profile.origin %}
+            <span class="origin-flag" title="{{ profile.origin }}">{{ profile.origin | flag }}</span>
+            {% endif %}
+        </div>
+        <div class="detail-meta">
+            <span class="badge badge-{{ profile.maturity }}">{{ profile.maturity }}</span>
+            {% if profile.license %}
+            <span class="badge badge-origin">{{ profile.license }}</span>
+            {% endif %}
+            {% if is_enabled %}
+            <span class="badge badge-production">Enabled</span>
+            {% else %}
+            <span class="badge badge-origin">Disabled</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="detail-actions">
+        {% if profile.urls %}
+            {% for url in profile.urls %}
+            <a href="https://{{ url.subdomain }}.{{ config.get('MAIN_DOMAIN', 'localhost') }}" target="_blank" class="btn btn-secondary btn-sm">Open {{ url.label }}</a>
+            {% endfor %}
+        {% endif %}
+        {% if profile.github %}
+        <a href="{{ profile.github }}" target="_blank" class="btn btn-secondary btn-sm">GitHub</a>
+        {% endif %}
+        {% if not is_core %}
+        <button class="toggle-btn {{ 'enabled' if is_enabled else 'disabled-state' }}"
+                data-toggle-profile="{{ profile_id }}"
+                data-enabled="{{ 'true' if is_enabled else 'false' }}">
+            {{ 'Disable' if is_enabled else 'Enable' }}
+        </button>
+        {% endif %}
+    </div>
+</div>
+
+{# rc6.9: cross-link the LLM Runtime toggle from any of the three LLM
+   profile detail pages. Operators landing on `LLM Inference` (or its
+   stable / cpu variants) often want to switch — the link saves them a
+   round-trip to All Modules. Mirrors the banner on overview.html. #}
+{% if profile_id in ('llm', 'llm-legacy', 'llm-cpu') %}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    <strong>LLM Runtime:</strong>
+    Switch between stable GPUStack v0.7.1 and experimental v2.1.x.
+    <a href="{{ url_for('modules.llm_runtime') }}" class="btn btn-sm btn-secondary" style="margin-left:0.5rem">
+        Manage LLM runtime &rarr;
+    </a>
+</div>
+{% endif %}
+
+{# #168 P2 (2026.08): when the Mac LLM gateway is enabled, cross-link the
+   management panel (add/remove Macs, live health, Tier-1 model mgmt). #}
+{% if profile_id == 'mac-llm' and is_enabled %}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    <strong>Mac LLM backends:</strong>
+    Add/remove Macs, watch live health, and manage models (pull / preload / delete).
+    <a href="{{ url_for('mac_backends.index') }}" class="btn btn-sm btn-secondary" style="margin-left:0.5rem">
+        Manage Mac backends &rarr;
+    </a>
+</div>
+{% endif %}
+
+<div class="detail-grid">
+    <!-- About -->
+    <div class="detail-section {% if not profile.long_description %}full-width{% endif %}">
+        <div class="detail-section-title">About</div>
+        {% if profile.long_description %}
+        <div style="font-size:0.875rem;color:var(--color-text-secondary);line-height:1.6;white-space:pre-line">{{ profile.long_description }}</div>
+        {% else %}
+        <p style="font-size:0.875rem;color:var(--color-text-secondary);line-height:1.5">{{ profile.description }}</p>
+        {% endif %}
+        {% if profile.ram_notes %}
+        <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-top:0.5rem;line-height:1.4;white-space:pre-line">{{ profile.ram_notes }}</p>
+        {% endif %}
+    </div>
+
+    <!-- Status -->
+    <div class="detail-section">
+        <div class="detail-section-title">Status</div>
+        <div class="detail-row">
+            <span class="detail-row-label">Health</span>
+            <span class="detail-row-value"><span class="status-dot status-{{ health }}"></span> {{ health | capitalize }}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-row-label">Containers</span>
+            <span class="detail-row-value">{{ profile.containers | length }}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-row-label">Memory (actual)</span>
+            <span class="detail-row-value">{{ actual_total_mb }} MB</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-row-label">Memory (estimated)</span>
+            <span class="detail-row-value">~{{ profile.ram_estimate_mb }} MB</span>
+        </div>
+        {% if profile.ram_dynamic %}
+        <div class="detail-row">
+            <span class="detail-row-label">Dynamic memory</span>
+            <span class="detail-row-value"><span class="badge badge-experimental">Yes</span></span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Dependencies & Impact -->
+    <div class="detail-section">
+        <div class="detail-section-title">Dependencies</div>
+        {% if profile.dependencies %}
+            {% if profile.dependencies.get('required') %}
+            <div class="detail-row"><span class="detail-row-label">Required</span><span class="detail-row-value">{{ profile.dependencies.required | join(', ') }}</span></div>
+            {% endif %}
+            {% if profile.dependencies.get('recommended') %}
+            <div class="detail-row"><span class="detail-row-label">Recommended</span><span class="detail-row-value">{{ profile.dependencies.recommended | join(', ') }}</span></div>
+            {% endif %}
+            {% if profile.dependencies.get('optional') %}
+            <div class="detail-row"><span class="detail-row-label">Optional</span><span class="detail-row-value">{{ profile.dependencies.optional | join(', ') }}</span></div>
+            {% endif %}
+        {% endif %}
+        {% if profile.mutual_exclusion %}
+        <div class="detail-row"><span class="detail-row-label">Conflicts with</span><span class="detail-row-value">{{ profile.mutual_exclusion | join(', ') }}</span></div>
+        {% endif %}
+        <div class="detail-section-title" style="margin-top:0.75rem">Toggle Impact</div>
+        <div class="detail-row"><span class="detail-row-label">Enable</span><span class="detail-row-value" style="font-size:0.8125rem">{{ profile.enable_impact }}</span></div>
+        <div class="detail-row"><span class="detail-row-label">Disable</span><span class="detail-row-value" style="font-size:0.8125rem">{{ profile.disable_impact }}</span></div>
+        <div class="detail-row"><span class="detail-row-label">Risk</span><span class="detail-row-value"><span class="badge badge-risk-{{ profile.risk_on_toggle }}">{{ profile.risk_on_toggle }}</span></span></div>
+    </div>
+
+    <!-- Stack Integration -->
+    {% if profile.networking or profile.storage or profile.authentik or profile.compose_file %}
+    <div class="detail-section">
+        <div class="detail-section-title">Stack Integration</div>
+        {% if profile.networking %}
+            {% if profile.networking.caddy_routes %}
+            <div style="font-size:0.6875rem;font-weight:600;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.25rem">Networking</div>
+            {% for route in profile.networking.caddy_routes %}
+            <div class="detail-row"><span class="detail-row-label">Caddy route</span><span class="detail-row-value">{{ route.subdomain }}.&lt;domain&gt; → {{ route.target }}</span></div>
+            {% endfor %}
+            {% for conn in profile.networking.get('internal_connections', []) %}
+            <div class="detail-row"><span class="detail-row-label">{{ conn.from }} → {{ conn.to }}</span><span class="detail-row-value" style="font-size:0.75rem;color:var(--color-text-muted)">{{ conn.purpose }}</span></div>
+            {% endfor %}
+            {% endif %}
+        {% endif %}
+        {% if profile.storage %}
+            <div style="font-size:0.6875rem;font-weight:600;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:0.5rem 0 0.25rem">Storage</div>
+            {% for vol in profile.storage.get('volumes', []) %}
+            <div class="detail-row"><span class="detail-row-label">{{ vol.name }}</span><span class="detail-row-value" style="font-size:0.75rem;color:var(--color-text-muted)">{{ vol.purpose }}</span></div>
+            {% endfor %}
+        {% endif %}
+        {% if profile.authentik %}
+            <div style="font-size:0.6875rem;font-weight:600;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:0.5rem 0 0.25rem">Authentication</div>
+            <div class="detail-row"><span class="detail-row-label">Authentik app</span><span class="detail-row-value">{{ profile.authentik.app_name }}</span></div>
+            <div class="detail-row"><span class="detail-row-label">User group</span><span class="detail-row-value">{{ profile.authentik.user_group }}</span></div>
+        {% endif %}
+        {% if profile.compose_file %}
+            <div style="font-size:0.6875rem;font-weight:600;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:0.5rem 0 0.25rem">Compose</div>
+            <div class="detail-row"><span class="detail-row-label">File</span><span class="detail-row-value"><code>{{ profile.compose_file }}</code></span></div>
+            {% if profile.compose_depends_on %}
+            <div class="detail-row"><span class="detail-row-label">Depends on</span><span class="detail-row-value">{{ profile.compose_depends_on | join(', ') }}</span></div>
+            {% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Environment Variables (collapsed) -->
+    {% if profile.env_vars %}
+    <div class="detail-section full-width">
+        <details>
+            <summary style="cursor:pointer;font-size:0.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--color-text-muted)">
+                Environment Variables ({{ profile.env_vars | length }} variables)
+            </summary>
+            <table class="container-table" style="margin-top:0.5rem">
+                <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+                <tbody>
+                    {% for var in profile.env_vars %}
+                    <tr>
+                        <td><code>{{ var.name }}</code>{% if var.secret %} <span class="badge badge-risk-caution">secret</span>{% endif %}</td>
+                        <td>{{ var.default or '—' }}</td>
+                        <td style="font-size:0.75rem;color:var(--color-text-muted)">{{ var.description }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </details>
+    </div>
+    {% endif %}
+
+    <!-- Containers table -->
+    <div class="detail-section full-width">
+        <div class="detail-section-title">Containers</div>
+        {% if containers %}
+        <table class="container-table">
+            <thead><tr><th>Name</th><th>Status</th><th>Image</th><th>Memory</th><th>CPU</th></tr></thead>
+            <tbody>
+                {% for c in containers %}
+                <tr>
+                    <td><code>{{ c.name }}</code></td>
+                    <td>
+                        <span class="status-dot status-{{ 'green' if c.status == 'running' else 'gray' }}"></span>
+                        {{ c.status }}
+                        {% if c.health and c.health != 'none' %}
+                        <span class="badge badge-origin">{{ c.health }}</span>
+                        {% endif %}
+                    </td>
+                    <td style="font-size:0.75rem;color:var(--color-text-muted)">{{ c.image }}</td>
+                    <td>{{ c.memory_mb }} MB</td>
+                    <td>{{ c.cpu_percent }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="font-size:0.8125rem;color:var(--color-text-muted)">No container data available.</p>
+        {% endif %}
+    </div>
+
+    <!-- Available Updates (M013) -->
+    {% if updates %}
+    <div class="detail-section full-width" style="border-color:#93c5fd">
+        <div class="detail-section-title" style="color:#1e40af">Available Updates</div>
+        <table class="container-table">
+            <thead><tr><th>Image</th><th>Current</th><th>Available</th><th></th></tr></thead>
+            <tbody>
+                {% for u in updates %}
+                <tr>
+                    <td><code>{{ u.image }}</code></td>
+                    <td>{{ u['from'] }}</td>
+                    <td><strong>{{ u.to }}</strong></td>
+                    <td><button class="btn btn-sm btn-primary" onclick="applyImageUpdate('{{ u.key }}', this)">Update</button></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- URLs -->
+    {% if profile.urls %}
+    <div class="detail-section">
+        <div class="detail-section-title">URLs</div>
+        {% for url in profile.urls %}
+        <div class="detail-row">
+            <span class="detail-row-label">{{ url.label }}</span>
+            <a href="https://{{ url.subdomain }}.{{ config.get('MAIN_DOMAIN', 'localhost') }}" target="_blank" class="detail-url-link">
+                {{ url.subdomain }}.{{ config.get('MAIN_DOMAIN', 'localhost') }}
+            </a>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Databases -->
+    {% if profile.databases %}
+    <div class="detail-section">
+        <div class="detail-section-title">Databases</div>
+        {% for db in profile.databases %}
+        <div class="detail-row">
+            <span class="detail-row-label">PostgreSQL</span>
+            <span class="detail-row-value"><code>{{ db }}</code></span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
