@@ -1,0 +1,39 @@
+version: 1
+metadata:
+  name: "Entra - SSO Source"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_sources_oauth.oauthsource
+    identifiers:
+      slug: entra
+    attrs:
+      name: Microsoft
+      provider_type: openidconnect
+      consumer_key: "${ENTRA_CLIENT_ID}"
+      consumer_secret: "${ENTRA_CLIENT_SECRET}"
+
+      # Single-tenant Entra OIDC endpoints
+      authorization_url: "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
+      access_token_url: "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token"
+      profile_url: "https://graph.microsoft.com/oidc/userinfo"
+      oidc_jwks_url: "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys"
+      oidc_jwks: {}
+
+      additional_scopes: "openid profile email"
+      icon: "entra_icon.svg"
+
+      # Flow links
+      authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
+      enrollment_flow: !Find [authentik_flows.flow, [slug, entra-domain-enrollment]]
+
+      # Configuration
+      user_matching_mode: email_link
+      group_matching_mode: identifier
+      user_path_template: "goauthentik.io/sources/%(slug)s"
+      enabled: true
+
+      # Property mappings from 10-property-mappings.yaml
+      user_property_mappings:
+        - !Find [authentik_sources_oauth.oauthsourcepropertymapping, [name, "Entra OAuth - Username"]]
+        - !Find [authentik_sources_oauth.oauthsourcepropertymapping, [name, "Entra OAuth - Name"]]

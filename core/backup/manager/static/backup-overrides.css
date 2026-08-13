@@ -1,0 +1,385 @@
+/* backup-overrides.css — razzfazz-backup-management container-local styles
+ *
+ * M026 S07 #3: shared baseline lives in
+ *   /static/razzfazz-common/razzfazz-base.css
+ * (served by razzfazz_common.flask_app.create_base_app). This file holds
+ * the styles that templates/index.html and templates/settings.html still
+ * rely on under unprefixed selectors (.panel, .header, .modal, ...).
+ *
+ * S06 explicitly left the following selectors out of razzfazz-base.css
+ * because they are visually distinct in this container:
+ *   .logs-container  — terminal-look log viewer (#0f0 on #111, monospace)
+ *   .filter-bar      — flex row of filter inputs above the backups table
+ *   .delete-icon     — row-trailing trash icon hover behaviour
+ *   .actions-grid    — 2-column responsive grid for create/restore panels
+ *   .modal           — slightly different chrome from other containers
+ *
+ * The remaining selectors (.header, .panel, .container, table, button,
+ * input, select, .form-group, .info-box, .warning-box, .current-schedule,
+ * .time-inputs, .button-secondary, .flash-message, .important-warning)
+ * are kept local for now — they predate the shared base and migrating
+ * them to .razz-* classes is a follow-up template rewrite, out of scope
+ * for this slice.
+ */
+
+
+/* ============================================================ */
+/* Local custom-property aliases                                 */
+/* ============================================================ */
+/*
+ * razzfazz-base.css already defines --razz-red and most other tokens.
+ * The two backup templates predate that and reference --razz-red plus
+ * --bg-dark / --text-light / --panel-bg. We re-declare them here so the
+ * existing template markup keeps working without a churny rename pass.
+ */
+:root {
+    --razz-red:   #CD1719;
+    --bg-dark:    #1a1a1a;
+    --text-light: #f5f5f5;
+    --panel-bg:   rgba(255, 255, 255, 0.95);
+}
+
+
+/* ============================================================ */
+/* Page chrome (body + header)                                   */
+/* ============================================================ */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background: url("/static/media/razzfazz.png") no-repeat center center fixed;
+    background-size: cover;
+    color: #333;
+}
+
+.header {
+    background-color: rgba(255, 255, 255, 0.9);
+    padding: 15px 20px;
+    display: flex;
+    align-items: center;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+.header img {
+    height: 48px;
+    margin-right: 15px;
+}
+.header h1 {
+    color: var(--razz-red);
+    font-size: 24px;
+    margin: 0;
+}
+.header nav { margin-left: auto; }
+.header nav a {
+    color: var(--razz-red);
+    text-decoration: none;
+    padding: 10px 15px;
+    font-weight: 600;
+}
+.header nav a:hover { text-decoration: underline; }
+
+
+/* ============================================================ */
+/* Layout                                                        */
+/* ============================================================ */
+.container {
+    max-width: 1200px;
+    margin: 20px auto;
+    padding: 20px;
+}
+
+/* settings.html scopes itself with <body class="settings-page"> so the
+ * narrower 800px reading width can be applied without colliding with
+ * index.html's 1200px backups overview. */
+body.settings-page .container {
+    max-width: 800px;
+    margin: 30px auto;
+}
+body.settings-page .panel {
+    padding: 25px;
+}
+
+
+/* ============================================================ */
+/* Panels                                                        */
+/* ============================================================ */
+.panel {
+    background: var(--panel-bg);
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+    margin-bottom: 20px;
+}
+.panel h2 {
+    color: var(--razz-red);
+    margin-top: 0;
+    border-bottom: 2px solid var(--razz-red);
+    padding-bottom: 10px;
+    margin-bottom: 20px;
+}
+
+
+/* ============================================================ */
+/* Tables                                                        */
+/* ============================================================ */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 10px;
+    table-layout: fixed;
+}
+th, td {
+    text-align: left;
+    padding: 12px;
+    border-bottom: 1px solid #ddd;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+th {
+    background-color: var(--razz-red);
+    color: white;
+    font-weight: 600;
+}
+tr:hover {
+    background-color: #f1f1f1;
+    cursor: pointer;
+}
+tr.selected {
+    background-color: #ffe6e6;
+    border-left: 4px solid var(--razz-red);
+}
+
+/* Trash-can icon at the end of each backup row — backup-only. */
+.delete-icon {
+    cursor: pointer;
+    font-size: 1.2em;
+    color: #666;
+    transition: color 0.2s;
+    float: right;
+    padding-right: 10px;
+}
+.delete-icon:hover {
+    color: var(--razz-red);
+}
+
+
+/* ============================================================ */
+/* Forms                                                         */
+/* ============================================================ */
+.form-group {
+    margin-bottom: 15px;
+}
+label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+}
+input, select {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+
+button {
+    background-color: var(--razz-red);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    transition: background 0.3s;
+}
+button:hover { opacity: 0.9; }
+button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+/* settings.html overrides — slightly bigger labels, heavier inputs,
+ * larger primary button + focus ring. Scoped to body.settings-page so
+ * index.html's lighter create/restore inputs are unaffected. */
+body.settings-page .form-group { margin-bottom: 20px; }
+body.settings-page .form-group label {
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #333;
+}
+body.settings-page .form-group .help-text {
+    font-size: 13px;
+    color: #666;
+    margin-top: 5px;
+}
+
+body.settings-page input,
+body.settings-page select {
+    padding: 12px;
+    border: 2px solid #ddd;
+    border-radius: 6px;
+    font-size: 16px;
+    transition: border-color 0.3s;
+}
+body.settings-page input:focus,
+body.settings-page select:focus {
+    border-color: var(--razz-red);
+    outline: none;
+}
+
+body.settings-page button {
+    padding: 12px 30px;
+    border-radius: 6px;
+}
+
+/* Time-of-day picker (hh : mm) on the settings page */
+.time-inputs {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+}
+.time-inputs select {
+    width: auto;
+    min-width: 80px;
+}
+.time-inputs span {
+    font-size: 20px;
+    font-weight: bold;
+    color: #666;
+}
+
+/* "Cancel" link styled to look like a secondary button */
+.button-secondary {
+    background-color: #666;
+    margin-left: 10px;
+}
+
+
+/* ============================================================ */
+/* Layouts — backup-only                                         */
+/* ============================================================ */
+.actions-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+@media (max-width: 768px) {
+    .actions-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+
+/* ============================================================ */
+/* Logs viewer — backup-only (terminal look)                     */
+/* ============================================================ */
+.logs-container {
+    background: #111;
+    color: #0f0;
+    font-family: monospace;
+    padding: 15px;
+    border-radius: 4px;
+    height: 300px;
+    overflow-y: scroll;
+    white-space: pre-wrap;   /* wrap long log lines */
+    word-wrap: break-word;   /* legacy support */
+}
+
+
+/* ============================================================ */
+/* Filter bar above the backups table — backup-only              */
+/* ============================================================ */
+.filter-bar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+}
+.filter-bar input {
+    flex: 1;
+    min-width: 150px;
+}
+
+
+/* ============================================================ */
+/* Modal / safety dialog — backup-only chrome                    */
+/* ============================================================ */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 100;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+}
+.modal-content {
+    background-color: #fff;
+    margin: 15% auto;
+    padding: 20px;
+    border: 1px solid #888;
+    width: 80%;
+    max-width: 500px;
+    border-radius: 8px;
+    text-align: center;
+}
+.important-warning {
+    color: var(--razz-red);
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+
+/* ============================================================ */
+/* Info / warning callouts (settings page)                       */
+/* ============================================================ */
+.info-box {
+    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+    border-left: 4px solid #2196f3;
+    padding: 15px 20px;
+    border-radius: 0 8px 8px 0;
+    margin-bottom: 25px;
+}
+.info-box h4 { color: #1565c0; margin: 0 0 8px 0; }
+.info-box p  { margin: 0; color: #1976d2; font-size: 14px; }
+
+.warning-box {
+    background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
+    border-left: 4px solid #ff9800;
+    padding: 15px 20px;
+    border-radius: 0 8px 8px 0;
+    margin-top: 25px;
+}
+.warning-box h4 { color: #e65100; margin: 0 0 8px 0; }
+.warning-box p  { margin: 0; color: #f57c00; font-size: 14px; }
+
+.current-schedule {
+    background: #f5f5f5;
+    padding: 15px;
+    border-radius: 6px;
+    margin-bottom: 25px;
+}
+.current-schedule strong { color: var(--razz-red); }
+.current-schedule code {
+    background: #e0e0e0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+
+/* ============================================================ */
+/* Flash messages (settings page)                                */
+/* ============================================================ */
+.flash-message {
+    padding: 15px 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+.flash-message.success {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}

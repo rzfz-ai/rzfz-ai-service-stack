@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block page_title %}Authentication{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Authentication</h1>
+    <p class="page-subtitle">Configure SSO providers and OIDC integrations</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+<form method="POST" class="settings-form" style="max-width:700px">
+
+    <!-- Google SSO -->
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">Google SSO</div>
+        <div class="form-group">
+            <label><input type="checkbox" name="ENABLE_GOOGLE_OAUTH" value="true" {% if config.google_enabled %}checked{% endif %}> Enable Google OAuth</label>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client ID</label>
+            <input type="text" name="GOOGLE_CLIENT_ID" value="{{ config.google_client_id }}" class="apply-input" placeholder="xxxx.apps.googleusercontent.com">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client Secret</label>
+            <input type="password" name="GOOGLE_CLIENT_SECRET" class="apply-input" placeholder="{{ 'Secret is set' if config.google_client_secret_set else 'Enter client secret' }}">
+        </div>
+    </div>
+
+    <!-- Microsoft Entra ID -->
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">Microsoft Entra ID <span class="badge badge-experimental">Experimental</span></div>
+        <div class="form-group">
+            <label><input type="checkbox" name="ENABLE_ENTRA_OAUTH" value="true" {% if config.entra_enabled %}checked{% endif %}> Enable Entra ID SSO</label>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Tenant ID</label>
+            <input type="text" name="ENTRA_TENANT_ID" value="{{ config.entra_tenant_id }}" class="apply-input" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client ID</label>
+            <input type="text" name="ENTRA_CLIENT_ID" value="{{ config.entra_client_id }}" class="apply-input">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client Secret</label>
+            <input type="password" name="ENTRA_CLIENT_SECRET" class="apply-input" placeholder="{{ 'Secret is set' if config.entra_client_secret_set else 'Enter client secret' }}">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Domain filter (restrict to this email domain)</label>
+            <input type="text" name="ENTRA_OAUTH_DOMAIN" value="{{ config.entra_domain }}" class="apply-input" placeholder="example.com">
+        </div>
+    </div>
+
+    <!-- Open WebUI OIDC -->
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">Open WebUI Native OIDC <span class="badge badge-experimental">Experimental</span></div>
+        <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:0.5rem">Direct OIDC login in Open WebUI (bypasses Authentik forward-auth for the chat UI).</p>
+        <div class="form-group">
+            <label><input type="checkbox" name="ENABLE_OPENWEBUI_OIDC" value="true" {% if config.openwebui_oidc_enabled %}checked{% endif %}> Enable</label>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client ID</label>
+            <input type="text" name="OPENWEBUI_OIDC_CLIENT_ID" value="{{ config.openwebui_oidc_client_id }}" class="apply-input">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client Secret</label>
+            <input type="password" name="OPENWEBUI_OIDC_CLIENT_SECRET" class="apply-input" placeholder="{{ 'Secret is set' if config.openwebui_oidc_secret_set else 'Enter secret' }}">
+        </div>
+    </div>
+
+    <!-- Gitea OIDC -->
+    <div class="detail-section" style="margin-bottom:1rem">
+        <div class="detail-section-title">Gitea Native OIDC <span class="badge badge-experimental">Experimental</span></div>
+        <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:0.5rem">Direct OIDC login in Gitea (bypasses Authentik forward-auth for Git).</p>
+        <div class="form-group">
+            <label><input type="checkbox" name="ENABLE_GITEA_AUTHENTIK_OIDC" value="true" {% if config.gitea_oidc_enabled %}checked{% endif %}> Enable</label>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client ID</label>
+            <input type="text" name="GITEA_OIDC_CLIENT_ID" value="{{ config.gitea_oidc_client_id }}" class="apply-input">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Client Secret</label>
+            <input type="password" name="GITEA_OIDC_CLIENT_SECRET" class="apply-input" placeholder="{{ 'Secret is set' if config.gitea_oidc_secret_set else 'Enter secret' }}">
+        </div>
+    </div>
+
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn btn-primary">Save & Apply</button>
+    </div>
+</form>
+{% endblock %}

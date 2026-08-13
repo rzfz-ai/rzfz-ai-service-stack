@@ -1,0 +1,112 @@
+# ==============================================================================
+# CRAWL4AI MODULE
+# ==============================================================================
+# Profile: crawl4ai
+# Description: RAG-friendly web crawler — Markdown extraction, structured scraping, browser automation
+# Status: experimental
+# Category: Search  (target dir: search/crawl4ai/)
+# Config: .env (global) + configs/config.yml (vendored)
+# Dependencies: none
+# Upstream: unclecode/crawl4ai (Apache-2.0)
+# Web UI: https://crawl4ai.<MAIN_DOMAIN>  (Authentik forward_auth)
+#   - /playground — interactive crawl playground
+#   - /dashboard  — monitoring + crawl history
+#   - /docs       — OpenAPI / Swagger
+# Security defaults baked in: 127.0.0.1 host bind | mem_limit 1g | no-new-privileges |
+#   shared-memory sized for Chromium | NO docker socket access. Per S01.2.
+# ==============================================================================
+
+services:
+  crawl4ai:
+    image: unclecode/crawl4ai:${CRAWL4AI_VERSION:-0.9.0}
+    profiles: ["crawl4ai"]
+    container_name: crawl4ai
+    restart: unless-stopped
+
+    # C2 render-crawl SSRF residual fix (PR #84 re-review): crawl4ai is NO LONGER
+    # on the `coding-agents` sandbox network. Its headless Chromium ignores
+    # HTTP(S)_PROXY env, and the crawl API lets the caller supply an arbitrary
+    # BrowserConfig, so a render-crawl of an internal host (authentik-server:9000,
+    # postgres, …) could not be robustly fenced while a sandboxed agent could
+    # reach crawl4ai directly. Removing crawl4ai from `coding-agents` eliminates
+    # the confused-deputy path entirely — agents keep direct public-web egress on
+    # coding-agents, and crawl4ai stays available to Dify/OpenWebUI via Caddy.
+    networks:
+      - default
+
+    # --- A. Host port binding (S01.2 §A) — loopback ---
+    ports:
+      - "127.0.0.1:${CRAWL4AI_PORT:-8201}:11235"
+
+    # --- D. Resource limits (S01.2 §D) ---
+    mem_limit: 1g
+    # Chromium needs ample shared memory; default /dev/shm of 64m starves it
+    # and crawls fail intermittently. 1 GB matches upstream guidance.
+    shm_size: 1g
+
+    # --- E. Container privileges (S01.2 §E) ---
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # SECURITY: SYS_ADMIN required by Chromium's sandbox; alternative
+    # (--no-sandbox) increases blast radius of a renderer escape, which is
+    # worse for a crawler executing arbitrary HTML/JS. SYS_ADMIN scoped to
+    # the container only — no host effects under no-new-privileges.
+    cap_add:
+      - SYS_ADMIN
+
+    # --- I. Logging (S01.2 §I) ---
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    env_file:
+      - ../../../.env
+
+    environment:
+      # OPENAI_API_KEY / model creds optional — crawl4ai can call LiteLLM
+      # via Dify's gateway when LLM-extraction features are enabled.
+      CRAWL4AI_BASE_DIRECTORY: /app/.cache
+      # C2 (PR #84 review) — SSRF egress fence, defence-in-depth. The PRIMARY
+      # confused-deputy fix is that crawl4ai is no longer on `coding-agents` (see
+      # networks: above), so a sandboxed agent can't reach it at all. These proxy
+      # vars additionally route crawl4ai's own NON-browser outbound HTTP(S)
+      # (LLM-extraction API calls etc.) through the stack SSRF proxy (caddy:8195,
+      # RFC1918/loopback/link-local deny) so a Dify/OpenWebUI-driven crawl can't
+      # be steered at internal services either. (crawl4ai's headless Chromium
+      # ignores these env vars — but with crawl4ai off `coding-agents` the
+      # sandbox render-crawl vector is closed regardless; a Dify/OWUI render-
+      # crawl of an internal host is the only residual and those callers are
+      # themselves Authentik-gated.) NO_PROXY keeps gpustack (reached by name on
+      # `default` for LLM extraction) and its own health direct.
+      HTTP_PROXY: http://caddy:8195
+      HTTPS_PROXY: http://caddy:8195
+      http_proxy: http://caddy:8195
+      https_proxy: http://caddy:8195
+      NO_PROXY: localhost,127.0.0.1,gpustack,crawl4ai
+      no_proxy: localhost,127.0.0.1,gpustack,crawl4ai
+
+    # --- C. Filesystem mounts (S01.2 §C) — :ro for configs, named volume for state ---
+    volumes:
+      - crawl4ai-cache:/app/.cache
+      - ./configs/config.yml:/app/config.yml:ro
+
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+
+    # --- H. Healthcheck (S01.2 §H) ---
+    # ga.1 (Issue H): Playwright/Chromium cold start can exceed a 60s grace →
+    # container flagged unhealthy → Caddy 502. Widen the start_period and add a
+    # couple of retries so the browser has time to warm up on a fresh box.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:11235/monitor/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+volumes:
+  crawl4ai-cache:

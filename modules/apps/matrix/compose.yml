@@ -1,0 +1,78 @@
+# ==============================================================================
+# MATRIX MODULE (Synapse Homeserver + Element Web Browser Client)
+# ==============================================================================
+# Profile: matrix
+# Description: Self-hosted Matrix homeserver (Synapse) with Element Web
+#              browser client. Authentik OIDC single sign-on. Moltis bot
+#              account is created post-install.
+# Status: Experimental — Matrix federation disabled by default
+# Config: .env
+# Dependencies: postgres (synapse_db with C locale, created by init-db.sh)
+# Upstream: Synapse https://github.com/element-hq/synapse (AGPL-3.0)
+#           Element Web https://github.com/element-hq/element-web (Apache-2.0)
+# IMPORTANT: SYNAPSE_SERVER_NAME is permanent — Matrix IDs: @user:MAIN_DOMAIN
+# ==============================================================================
+services:
+  synapse:
+    image: matrixdotorg/synapse:v1.158.0
+    profiles: ["matrix"]
+    container_name: synapse
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8008:8008"
+    environment:
+      - SYNAPSE_CONFIG_PATH=/synapse-config/homeserver.yaml.rendered
+      - SSL_CERT_FILE=/synapse-config/caddy-local-ca.crt
+    # Synapse reaches Authentik OIDC and its own public matrix domain
+    # via Caddy. Both ${AUTHENTIK_DOMAIN} and ${MATRIX_DOMAIN} are
+    # registered as Docker network aliases on the caddy container
+    # (see core/compose.yml), so the embedded DNS resolves them
+    # dynamically — no static `extra_hosts` / CADDY_IP plumbing.
+    volumes:
+      - synapse-data:/data
+      # Bind-mount the module's own (tracked) synapse config dir. Paths in an
+      # included compose file resolve relative to THIS file's directory
+      # (modules/apps/matrix/) — same convention as vaultwarden's ../../certs
+      # (PR #95). init.sh renders homeserver.yaml.rendered + caddy-local-ca.crt
+      # into ./synapse; log.config is tracked. Must NOT point at a top-level
+      # matrix/ dir — that is untracked and absent on a fresh clone (#26).
+      - ./synapse:/synapse-config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      authentik-server:
+        condition: service_healthy
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8008/_matrix/client/versions || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  element-web:
+    image: vectorim/element-web:v1.12.25
+    profiles: ["matrix"]
+    container_name: element-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8009:80"
+    volumes:
+      # Relative to this compose file's dir (modules/apps/matrix/); init.sh
+      # renders config.json from config.json.tpl here. Not a top-level path (#26).
+      - ./element-web/config.json:/app/config.json:ro
+    healthcheck:
+      # #273: clear proxy env so the loopback probe never routes through a
+      # corporate Docker-daemon proxy (→ 504 → false unhealthy). See
+      # reference_wget_healthcheck_daemon_proxy.
+      test: ["CMD-SHELL", "http_proxy= https_proxy= wget -qO- http://localhost/ >/dev/null 2>&1 && echo ok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  synapse-data:

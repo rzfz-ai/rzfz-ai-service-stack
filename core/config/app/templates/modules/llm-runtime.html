@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block page_title %}LLM Runtime{% endblock %}
+
+{% block page_content %}
+<a href="{{ url_for('modules.overview') }}" class="btn btn-sm btn-secondary" style="margin-bottom:0.75rem">&larr; All Modules</a>
+
+<div class="page-header">
+    <h1>LLM Runtime</h1>
+    <p class="page-subtitle">
+        Choose between the STABLE GPUStack v0.7.1 path (default for AMD &amp; CPU) and
+        the EXPERIMENTAL v2.1.x path. M029-S04.
+    </p>
+</div>
+
+<div class="info-card" style="margin-bottom:1rem">
+    <div class="info-card-header">
+        <h2>Current state</h2>
+    </div>
+    <div class="info-card-body">
+        <table class="kv-table">
+            <tr>
+                <th>Hardware</th>
+                <td><code>{{ state.hardware }}</code></td>
+            </tr>
+            <tr>
+                <th>Active profile</th>
+                <td>
+                    {% if state.current_profile %}
+                        <code>{{ state.current_profile }}</code>
+                    {% else %}
+                        <em>none</em>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Runtime</th>
+                <td>
+                    {% if state.current_runtime == 'stable' %}
+                        <span class="badge badge-stable">STABLE (v0.7.1)</span>
+                    {% elif state.current_runtime == 'experimental' %}
+                        <span class="badge badge-experimental">EXPERIMENTAL (v2.1.x)</span>
+                    {% else %}
+                        <span class="badge badge-warn">unknown</span>
+                    {% endif %}
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+{% if not state.can_toggle %}
+<div class="alert alert-warning">
+    <strong>Toggle unavailable.</strong> {{ state.toggle_blocked_reason }}
+</div>
+{% else %}
+
+<div class="info-card">
+    <div class="info-card-header">
+        <h2>Switch runtime</h2>
+    </div>
+    <div class="info-card-body">
+        <div class="runtime-choice">
+            <div class="runtime-choice-card {% if state.current_runtime == 'stable' %}runtime-choice-active{% endif %}">
+                <h3>STABLE — v0.7.1</h3>
+                <p>
+                    Profile: <code>{{ state.stable_profile }}</code><br>
+                    GPUStack v0.7.1 + custom Vulkan build (AMD) or v0.7.1-cpu (CPU).
+                    Validated leak-free under stop/start cycles
+                    (<a href="/help/start-portal#m029" class="text-link">M029-S01</a>).
+                </p>
+                {% if state.current_runtime != 'stable' %}
+                <button class="btn btn-primary" onclick="toggleRuntime('stable')">
+                    Switch to STABLE
+                </button>
+                {% else %}
+                <span class="badge badge-stable">Currently active</span>
+                {% endif %}
+            </div>
+            <div class="runtime-choice-card {% if state.current_runtime == 'experimental' %}runtime-choice-active{% endif %}">
+                <h3>EXPERIMENTAL — v2.1.x</h3>
+                <p>
+                    Profile: <code>{{ state.experimental_profile }}</code><br>
+                    GPUStack v2.1.x + custom backends (kyuz0 ROCm runner / llama.cpp:server / vLLM).
+                    Known issues: stop/start memory leak (rc6.7 #48 / upstream
+                    PR #5255).
+                </p>
+                {% if state.current_runtime != 'experimental' %}
+                <button class="btn btn-warning" onclick="toggleRuntime('experimental')">
+                    Switch to EXPERIMENTAL
+                </button>
+                {% else %}
+                <span class="badge badge-experimental">Currently active</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<dialog id="runtime-toggle-dialog" class="modal-dialog">
+    <form method="dialog" onsubmit="return submitRuntimeToggle(event)">
+        <h2>Confirm runtime switch</h2>
+        <p>You're about to flip the LLM runtime to <strong id="runtime-target-label"></strong>.</p>
+        <p>This stops the running gpustack + model-sync containers and starts
+            the target runtime. Models loaded in the previous runtime's database
+            do <em>not</em> auto-migrate — re-deployment may be required.</p>
+        <p>
+            <label for="runtime-toggle-pw">Admin password</label>
+            <input type="password" id="runtime-toggle-pw" required>
+        </p>
+        <div class="dialog-actions">
+            <button type="button" onclick="document.getElementById('runtime-toggle-dialog').close()">Cancel</button>
+            <button type="submit" class="btn btn-primary">Switch runtime</button>
+        </div>
+    </form>
+</dialog>
+
+<div id="runtime-toggle-progress" style="display:none">
+    <h3>Switching runtime…</h3>
+    <pre id="runtime-toggle-log" class="log-output"></pre>
+</div>
+
+<script>
+let _llmTargetRuntime = null;
+
+function toggleRuntime(target) {
+    _llmTargetRuntime = target;
+    document.getElementById('runtime-target-label').textContent = target.toUpperCase();
+    document.getElementById('runtime-toggle-pw').value = '';
+    document.getElementById('runtime-toggle-dialog').showModal();
+}
+
+async function submitRuntimeToggle(event) {
+    event.preventDefault();
+    const pw = document.getElementById('runtime-toggle-pw').value;
+    document.getElementById('runtime-toggle-dialog').close();
+
+    document.getElementById('runtime-toggle-progress').style.display = 'block';
+    const logEl = document.getElementById('runtime-toggle-log');
+    logEl.textContent = 'Submitting…\n';
+
+    const resp = await fetch('/api/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            action: 'llm_runtime_toggle',
+            target_runtime: _llmTargetRuntime,
+            password: pw,
+        }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+        logEl.textContent += '\nERROR: ' + (body.error || resp.statusText) + '\n';
+        return false;
+    }
+    const actionId = body.action_id;
+    logEl.textContent += `Action ${actionId} started. Streaming progress…\n\n`;
+
+    const evt = new EventSource('/api/apply/' + actionId + '/stream');
+    evt.onmessage = (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            if (d.type === 'line') logEl.textContent += d.text + '\n';
+            if (d.type === 'done') {
+                evt.close();
+                logEl.textContent += '\n' + (d.success ? '✓ Done. Refreshing…' : '✗ Failed: ' + (d.error || 'unknown')) + '\n';
+                if (d.success) setTimeout(() => location.reload(), 1500);
+            }
+        } catch (err) { /* ignore parse errors on heartbeats */ }
+        logEl.scrollTop = logEl.scrollHeight;
+    };
+    evt.onerror = () => evt.close();
+    return false;
+}
+</script>
+
+{% endif %}
+{% endblock %}

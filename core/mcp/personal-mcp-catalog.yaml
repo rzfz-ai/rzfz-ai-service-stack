@@ -1,0 +1,99 @@
+version: 1
+integrations:
+- id: github
+  display_name: GitHub
+  description: GitHub repos, issues, PRs via your own OAuth authorization.
+  cred_model: oauth:github
+  tenancy: per-user
+  image: razzfazz-mcp-proxy:latest
+  transport: streamable-http
+  container_port: 8080
+  mcp_path: /mcp
+  consumers:
+  - hermes
+  - opencode
+  scopes:
+  - repo
+  - read:user
+  env_map:
+    MCP_TARGET_KIND: github
+    GITHUB_TOKEN: '{{oauth_access_token}}'
+- id: google
+  display_name: Google Workspace
+  description: Google Calendar / Drive via your own OAuth authorization.
+  cred_model: oauth:google
+  tenancy: per-user
+  image: razzfazz-mcp-proxy:latest
+  transport: streamable-http
+  container_port: 8080
+  mcp_path: /mcp
+  consumers:
+  - hermes
+  - moltis
+  scopes:
+  - https://www.googleapis.com/auth/calendar.readonly
+  - https://www.googleapis.com/auth/drive.readonly
+  env_map:
+    MCP_TARGET_KIND: google
+    GOOGLE_ACCESS_TOKEN: '{{oauth_access_token}}'
+- id: cognee-personal
+  display_name: Cognee — Personal Memory (private)
+  description: 'Your OWN private GraphRAG long-term memory — remember / recall / cognify. Truly isolated
+    per user: only you can read or write it. Requires the Cognee backend to run with access control enabled
+    (enforced — provisioning is refused otherwise, never faked).'
+  cred_model: none
+  tenancy: per-user
+  isolation_backend: cognee
+  requires_backend_access_control: true
+  cognee_autoprovision: personal
+  image: razzfazz-mcp-cognee-authshim:latest
+  transport: streamable-http
+  container_port: 8000
+  mcp_path: /mcp
+  consumers:
+  - hermes
+  - moltis
+  - opencode
+  - codex
+  - claude
+  mem_limit: 512m
+  rewrite_upstream_host: true
+  reach_backend: cognee
+  env_map:
+    TRANSPORT_MODE: http
+    API_URL: http://cognee:8000
+    API_TOKEN: '{{cognee_user_api_key}}'
+    LLM_API_KEY: '{{cognee_user_api_key}}'
+    COGNEE_DEFAULT_DATASET: '{{user_slug}}'
+    MCP_ALLOWED_HOSTS: '*'
+- id: cognee-company
+  display_name: Cognee — Company Brain (shared)
+  description: Shared, curated organisation memory. READABLE by entitled users; WRITE is reserved for
+    admins/power users (curated). Query the company knowledge base from your agents alongside your private
+    memory.
+  cred_model: none
+  tenancy: shared
+  multi_tenancy_attested: true
+  isolation_backend: cognee
+  cognee_autoprovision: company
+  min_write_tier: power
+  image: razzfazz-mcp-cognee-authshim:latest
+  transport: streamable-http
+  container_port: 8000
+  mcp_path: /mcp
+  consumers:
+  - hermes
+  - moltis
+  - opencode
+  - codex
+  - claude
+  mem_limit: 512m
+  rewrite_upstream_host: true
+  reach_backend: cognee
+  env_map:
+    TRANSPORT_MODE: http
+    API_URL: http://cognee:8000
+    API_TOKEN: '{{cognee_user_api_key}}'
+    LLM_API_KEY: '{{cognee_user_api_key}}'
+    COGNEE_DEFAULT_DATASET: '{{cognee_company_dataset}}'
+    MCP_ALLOWED_HOSTS: '*'
