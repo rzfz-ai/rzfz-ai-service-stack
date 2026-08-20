@@ -1,0 +1,14 @@
+razzfazz-backup-service — build-recipe NOTICE (third-party upstream)
+==================================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: offen/docker-volume-backup (see .env)  —  MPL-2.0
+              https://github.com/offen/docker-volume-backup
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

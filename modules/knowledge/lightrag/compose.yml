@@ -1,0 +1,104 @@
+# ==============================================================================
+# LIGHTRAG MODULE (Graph-based RAG Knowledge Base) [EXPERIMENTAL]
+# ==============================================================================
+# Profile: lightrag
+# Description: Document ingestion, knowledge graph extraction, and
+#              retrieval-augmented generation via REST API and WebUI.
+# Status: Experimental — not included in any init package preset.
+#         Must be enabled manually via setup UI or COMPOSE_PROFILES.
+# Config: .env (global)
+# Dependencies: postgres (pgvector for vector storage, NetworkX for graph)
+# ==============================================================================
+services:
+  # ==========================================
+  # LightRAG: RAG Server with WebUI
+  # ==========================================
+  lightrag:
+    image: ghcr.io/hkuds/lightrag:${LIGHTRAG_VERSION:-v1.5.5}
+    profiles: ["lightrag"]
+    container_name: lightrag
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${LIGHTRAG_PORT:-9621}:9621"
+    environment:
+      # PostgreSQL connection (shared instance, dedicated database)
+      # POSTGRES_USER and POSTGRES_PASSWORD flow from .env via variable substitution
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-docker}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_DATABASE=${LIGHTRAG_DB:-lightrag_db}
+
+      # Storage backends — PostgreSQL for KV, doc status, vectors; NetworkX for graph
+      - LIGHTRAG_KV_STORAGE=PGKVStorage
+      - LIGHTRAG_DOC_STATUS_STORAGE=PGDocStatusStorage
+      - LIGHTRAG_VECTOR_STORAGE=PGVectorStorage
+      - LIGHTRAG_GRAPH_STORAGE=NetworkXStorage
+
+      # LLM configuration (via GPUStack OpenAI-compatible API)
+      - LLM_BINDING=openai
+      - LLM_BINDING_HOST=http://gpustack:9090/v1-openai
+      - LLM_BINDING_API_KEY=${GPUSTACK_API_KEY:-}
+      - LLM_MODEL=${LIGHTRAG_LLM_MODEL:-}
+      # #170: GPUStack/llama-box honours qwen3 thinking-disable ONLY via
+      # chat_template_kwargs; the bare extra_body.enable_thinking is ignored
+      # (model keeps reasoning → extraction times out).
+      - 'OPENAI_LLM_EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}'
+
+      # Embedding configuration (via GPUStack OpenAI-compatible API)
+      - EMBEDDING_BINDING=openai
+      - EMBEDDING_BINDING_HOST=http://gpustack:9090/v1-openai
+      - EMBEDDING_BINDING_API_KEY=${GPUSTACK_API_KEY:-}
+      - EMBEDDING_MODEL=${LIGHTRAG_EMBEDDING_MODEL:-}
+      # EMBEDDING_DIM MUST match the embedding model's ACTUAL native output dim,
+      # since the GPUStack/llama-box endpoint IGNORES the OpenAI `dimensions`
+      # param (measured on 0.91: requesting 768/2560/4096 all return 4096).
+      # qwen3-embedding (Qwen3-Embedding-8B GGUF via the v0.7.1 llama-box runner)
+      # emits 4096-dim vectors. The old 768 was nomic-embed-text's dim and left
+      # stale after the embed-model switch → LightRAG built *_768d pgvector
+      # tables while real vectors were 4096-dim → every insert failed on a
+      # dimension mismatch. Default matches qwen3-embedding (the standard model).
+      - EMBEDDING_DIM=${LIGHTRAG_EMBEDDING_DIM:-4096}
+      # SEND_DIM=false: the endpoint ignores `dimensions`, so sending it is
+      # misleading (it can never truncate the 4096-dim output). Kept overridable
+      # for future models/runners that DO honour the param.
+      - EMBEDDING_SEND_DIM=${LIGHTRAG_EMBEDDING_SEND_DIM:-false}
+      - POSTGRES_VECTOR_INDEX_TYPE=${LIGHTRAG_VECTOR_INDEX_TYPE:-HNSW}
+
+      # Reranking configuration (via GPUStack, uses cohere-compatible endpoint)
+      - RERANK_BINDING=${LIGHTRAG_RERANK_BINDING:-null}
+      - RERANK_MODEL=${LIGHTRAG_RERANK_MODEL:-}
+      - RERANK_BINDING_HOST=http://gpustack:9090/v1-openai/rerank
+      - RERANK_BINDING_API_KEY=${GPUSTACK_API_KEY:-}
+
+      # Authentication (LightRAG's built-in JWT auth)
+      - AUTH_ACCOUNTS=${LIGHTRAG_AUTH_ACCOUNTS:-}
+      - TOKEN_SECRET=${LIGHTRAG_TOKEN_SECRET:-}
+      - LIGHTRAG_API_KEY=${LIGHTRAG_API_KEY:-}
+
+      # Server settings
+      - HOST=0.0.0.0
+      - PORT=9621
+      - MAX_ASYNC=1
+      - MAX_PARALLEL_INSERT=${LIGHTRAG_MAX_PARALLEL_INSERT:-1}
+      - ENABLE_LLM_CACHE_FOR_EXTRACT=true
+      - SUMMARY_LANGUAGE=English
+      - EMBEDDING_TIMEOUT=${LIGHTRAG_EMBEDDING_TIMEOUT:-120}
+      - LLM_TIMEOUT=${LIGHTRAG_LLM_TIMEOUT:-300}
+    volumes:
+      - lightrag-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9621/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  lightrag-data:

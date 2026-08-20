@@ -1,0 +1,8 @@
+version: 1
+metadata:
+  name: "Base - Application Access Policies"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # Policies are now applied via python script in init-authentik.sh
+  # because Blueprint PolicyBinding serializer has issues with direct object targets.

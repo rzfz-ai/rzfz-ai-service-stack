@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audit Log - Agent Manager</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+<div class="container">
+    <header>
+        <a href="{{ url_for('admin.index') }}">&larr; Admin</a>
+        <h1>Audit Log</h1>
+    </header>
+
+    <table class="admin-table">
+        <thead>
+            <tr><th>Time</th><th>User</th><th>Action</th><th>Agent Type</th><th>Details</th></tr>
+        </thead>
+        <tbody>
+            {% for e in entries %}
+            <tr>
+                <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') if e.timestamp else '-' }}</td>
+                <td>{{ e.user_id }}</td>
+                <td>{{ e.action }}</td>
+                <td>{{ e.agent_type or '-' }}</td>
+                <td><code>{{ e.details }}</code></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+</body>
+</html>

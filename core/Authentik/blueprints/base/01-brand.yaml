@@ -1,0 +1,243 @@
+version: 1
+metadata:
+  name: "Base - Branding"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      branding_title: "razzfazz.ai - local matters"
+      branding_logo: "razzfazz-ai-logo.png"
+      branding_favicon: "razzfazz-ai-favicon.png"
+      # #526 deliberately still the PNG. Everything else moved to razzfazz.webp
+      # (5.6 MB -> 170 KB), but this is an Authentik SETTING naming a media file
+      # rather than a CSS url, and whether Authentik accepts a .webp there is not
+      # something static analysis can answer. 0.236 delivers Friday, so the one
+      # line I cannot verify is not going into that build. Flip it once someone
+      # has watched an Authentik login render with it.
+      branding_default_flow_background: "razzfazz.png"
+      branding_custom_css: |
+        :root {
+            /* --- GLOBAL BRANDING: RED REPLACES BLUE --- */
+            --pf-global--primary-color--100: #CD1719 !important;
+            --pf-global--primary-color--200: #a31214 !important;
+            --pf-global--active-color--100: #CD1719 !important;
+            --pf-global--link--Color: #CD1719 !important;
+            --pf-global--link--Color--hover: #a31214 !important;
+            
+            /* Sidebar & Tab Active Borders */
+            --pf-c-nav__item--m-current--BorderLeftColor: #CD1719 !important;
+            --pf-c-tabs__item--m-current--BorderBottomColor: #CD1719 !important;
+            
+            /* --- INPUT FOCUS (Keep Grey, not Red/Blue) --- */
+            --pf-c-form-control--focus--BorderBottomColor: #666666 !important;
+            --pf-global--TextShadow: none !important;
+        }
+
+        /* ============================================================
+           1. USER INTERFACE TRANSPARENCY (Dashboard / Apps)
+           ============================================================
+           Target specific User Interface containers only */
+        ak-interface-user .pf-c-page, 
+        ak-interface-user .pf-c-page__main {
+            background: transparent !important;
+            background-color: transparent !important;
+        }
+
+        /* Sidebar & Header - Glass Effect */
+        ak-interface-user .pf-c-page__sidebar, 
+        ak-interface-user .pf-c-masthead {
+            background-color: rgba(255, 255, 255, 0.90) !important;
+            backdrop-filter: blur(5px);
+            border-color: #cccccc !important;
+        }
+
+        /* App Cards - Glass Effect (Scoped specifically to the App Library) */
+        .ak-library-application .pf-c-card {
+            background-color: rgba(255, 255, 255, 0.9) !important;
+            border: none !important;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1) !important;
+        }
+        .ak-library-application .pf-c-card:hover {
+            background-color: #ffffff !important;
+            border: 2px solid #CD1719 !important;
+            transform: translateY(-2px);
+        }
+
+        /* Fix "Chat" Link Color (Force Black) */
+        .ak-library-application .pf-c-card__title a {
+            color: #000000 !important;
+            font-weight: 700 !important;
+            text-decoration: none !important;
+        }
+
+        /* ============================================================
+           2. LOGIN SCREEN FIXES (Scoped Strictly)
+           ============================================================
+           THE FIX: We removed the comma before .pf-c-card and scoped it to .pf-c-login */
+        .pf-c-login__main, 
+        .pf-c-login .pf-c-card { 
+            background-color: rgba(255, 255, 255, 0.85) !important;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.4);
+        }
+
+        /* INPUTS: Remove Blue/Red Focus, keep Grey */
+        input.pf-c-form-control {
+            background-color: #ffffff !important;
+            color: #000000 !important;
+            border: 1px solid #cccccc !important;
+        }
+        input.pf-c-form-control:focus, 
+        .pf-c-form-control:focus {
+            border-color: #666666 !important;
+            border-bottom-color: #666666 !important;
+            box-shadow: none !important;
+        }
+      default: true
+      flow_authentication: !Find [authentik_flows.flow, [slug, "default-authentication-flow"]]
+
+      flow_invalidation: !Find [authentik_flows.flow, [slug, "default-invalidation-flow"]]
+      flow_user_settings: !Find [authentik_flows.flow, [slug, "default-user-settings-flow"]]
+      attributes:
+        settings:
+          theme:
+            base: light
+            background: "background: url('/branding/media/razzfazz.webp') no-repeat center center fixed; background-size: cover;"
+            branding_custom_css: |
+                :root {
+                    /* --- GLOBAL BRANDING: RED REPLACES BLUE --- */
+                    --pf-global--primary-color--100: #CD1719 !important;
+                    --pf-global--primary-color--200: #a31214 !important;
+                    --pf-global--active-color--100: #CD1719 !important;
+                    --pf-global--link--Color: #CD1719 !important;
+                    --pf-global--link--Color--hover: #a31214 !important;
+                    
+                    /* Sidebar & Tab Active Borders */
+                    --pf-c-nav__item--m-current--BorderLeftColor: #CD1719 !important;
+                    --pf-c-tabs__item--m-current--BorderBottomColor: #CD1719 !important;
+                    
+                    /* --- INPUT FOCUS (Keep Grey, not Red/Blue) --- */
+                    --pf-c-form-control--focus--BorderBottomColor: #666666 !important;
+                    --pf-global--TextShadow: none !important;
+                }
+
+                /* ============================================================
+                   1. USER INTERFACE TRANSPARENCY (Dashboard / Apps)
+                   ============================================================
+                   Target specific User Interface containers only */
+                ak-interface-user .pf-c-page, 
+                ak-interface-user .pf-c-page__main {
+                    background: transparent !important;
+                    background-color: transparent !important;
+                }
+
+                /* Sidebar & Header - Glass Effect */
+                ak-interface-user .pf-c-page__sidebar, 
+                ak-interface-user .pf-c-masthead {
+                    background-color: rgba(255, 255, 255, 0.90) !important;
+                    backdrop-filter: blur(5px);
+                    border-color: #cccccc !important;
+                }
+
+                /* App Cards - Glass Effect (Scoped specifically to the App Library) */
+                .ak-library-application .pf-c-card {
+                    background-color: rgba(255, 255, 255, 0.9) !important;
+                    border: none !important;
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.1) !important;
+                }
+                .ak-library-application .pf-c-card:hover {
+                    background-color: #ffffff !important;
+                    border: 2px solid #CD1719 !important;
+                    transform: translateY(-2px);
+                }
+
+                /* Fix "Chat" Link Color (Force Black) */
+                .ak-library-application .pf-c-card__title a {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                    text-decoration: none !important;
+                }
+
+                /* ============================================================
+                   2. LOGIN SCREEN FIXES (Scoped Strictly)
+                   ============================================================
+                   THE FIX: We removed the comma before .pf-c-card and scoped it to .pf-c-login */
+                .pf-c-login__main, 
+                .pf-c-login .pf-c-card { 
+                    background-color: rgba(255, 255, 255, 0.85) !important;
+                    backdrop-filter: blur(10px);
+                    border: 1px solid rgba(255,255,255,0.4);
+                }
+
+                /* INPUTS: Remove Blue/Red Focus, keep Grey */
+                input.pf-c-form-control {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border: 1px solid #cccccc !important;
+                }
+                input.pf-c-form-control:focus, 
+                .pf-c-form-control:focus {
+                    border-color: #666666 !important;
+                    border-bottom-color: #666666 !important;
+                    box-shadow: none !important;
+                    outline: none !important;
+                }
+
+                /* Red Primary Button */
+                .pf-c-button.pf-m-primary {
+                    background-color: #CD1719 !important;
+                    border-color: #CD1719 !important;
+                    color: #ffffff !important;
+                }
+
+  # =======================================================================
+  # FLOW LAYOUTS (Enforced sidebar_left) & TITLES
+  # =======================================================================
+  
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "default-authentication-flow"
+    attrs:
+      layout: sidebar_left
+      title: "Welcome to razzfazz.ai!"
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "default-invalidation-flow"
+    attrs:
+      layout: sidebar_left
+      title: "Welcome to razzfazz.ai!"
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "default-user-settings-flow"
+    attrs:
+      layout: sidebar_left
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "default-password-change"
+    attrs:
+      layout: sidebar_left
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "initial-setup"
+    attrs:
+      layout: sidebar_left
+      title: "Welcome to razzfazz.ai!"
+      
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "default-provider-authorization-implicit-consent"
+    attrs:
+      layout: sidebar_left
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: "default-source-enrollment"
+    attrs:
+        title: "Welcome to razzfazz.ai! Please select a username."

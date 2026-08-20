@@ -1,0 +1,103 @@
+<div class="nav-brand">
+    <img src="{{ url_for('static', filename='media/razzfazz-ai-logo.png') }}" alt="rzfz.ai" class="brand-logo">
+    <span class="brand-sub">Management</span>
+</div>
+
+<!-- Version info -->
+<div style="padding:0 1rem 0.5rem;font-size:0.6875rem;color:var(--color-text-muted);border-bottom:1px solid var(--color-border);margin-bottom:0.5rem">
+    <div style="font-weight:600;color:var(--color-text-secondary)">{{ stack_version }}</div>
+    <div style="display:flex;gap:0.75rem;margin-top:0.25rem">
+        <a href="#" onclick="showReleaseNotes();return false" style="color:var(--color-brand);text-decoration:none">Release Notes</a>
+        <a href="/api/docs/getting-started" target="_blank" style="color:var(--color-brand);text-decoration:none">Getting Started</a>
+    </div>
+</div>
+
+<div class="nav-section">
+    <div class="nav-category">OVERVIEW</div>
+    <a href="{{ url_for('dashboard.index') }}" class="nav-item {% if request.path == '/' %}active{% endif %}">
+        Dashboard
+    </a>
+</div>
+
+<div class="nav-section">
+    <div class="nav-category">MODULES</div>
+    <a href="{{ url_for('modules.overview') }}" class="nav-item {% if request.path == '/modules/' and not request.args.get('status') %}active{% endif %}">
+        All <span class="nav-count">{{ nav_module_counts.total }}</span>
+    </a>
+    <a href="{{ url_for('modules.overview', status='running') }}" class="nav-item {% if request.args.get('status') == 'running' %}active{% endif %}">
+        Running <span class="nav-count">{{ nav_module_counts.running }}</span>
+    </a>
+    <a href="{{ url_for('modules.overview', status='enabled') }}" class="nav-item {% if request.args.get('status') == 'enabled' %}active{% endif %}">
+        Enabled <span class="nav-count">{{ nav_module_counts.enabled }}</span>
+    </a>
+    <a href="{{ url_for('modules.overview', status='disabled') }}" class="nav-item {% if request.args.get('status') == 'disabled' %}active{% endif %}">
+        Disabled <span class="nav-count">{{ nav_module_counts.disabled }}</span>
+    </a>
+</div>
+
+<div class="nav-section">
+    <div class="nav-category">SETTINGS</div>
+    <a href="{{ url_for('settings.domain') }}" class="nav-item {% if '/settings/domain' in request.path %}active{% endif %}">Domain &amp; TLS</a>
+    <a href="{{ url_for('settings.auth') }}" class="nav-item {% if '/settings/auth' in request.path %}active{% endif %}">Authentication</a>
+    <a href="{{ url_for('settings.smtp') }}" class="nav-item {% if '/settings/smtp' in request.path %}active{% endif %}">Email (SMTP)</a>
+    <a href="{{ url_for('settings.gpustack') }}" class="nav-item {% if '/settings/gpustack' in request.path %}active{% endif %}">GPUStack</a>
+    {% if 'llm' in enabled_profiles or 'llm-legacy' in enabled_profiles or 'llm-cpu' in enabled_profiles %}
+    <a href="{{ url_for('settings.sideload_model') }}" class="nav-item {% if '/settings/sideload-model' in request.path %}active{% endif %}">Sideload Model</a>
+    {% endif %}
+    {% if 'mac-llm' in enabled_profiles %}
+    <a href="{{ url_for('mac_backends.index') }}" class="nav-item {% if request.path.startswith('/mac-backends') %}active{% endif %}">Mac LLM backends</a>
+    {% endif %}
+    <a href="{{ url_for('settings.secrets_page') }}" class="nav-item {% if '/settings/secrets' in request.path %}active{% endif %}">Secrets</a>
+    {% if 'cognee' in enabled_profiles or 'lightrag' in enabled_profiles %}
+    <a href="{{ url_for('settings.rag_models') }}" class="nav-item {% if '/settings/rag-models' in request.path %}active{% endif %}">RAG Models</a>
+    {% endif %}
+    {% if 'agents' in enabled_profiles %}
+    <a href="{{ url_for('settings.agents') }}" class="nav-item {% if '/settings/agents' in request.path %}active{% endif %}">Personal Agents</a>
+    {% endif %}
+    {% if 'mcp' in enabled_profiles %}
+    <a href="{{ url_for('settings.mcp_integrations') }}" class="nav-item {% if '/settings/mcp-integrations' in request.path %}active{% endif %}">MCP Integrations</a>
+    {% endif %}
+</div>
+
+<div class="nav-section">
+    <div class="nav-category">OPERATIONS</div>
+    <a href="{{ url_for('backup.index') }}" class="nav-item {% if '/backup' in request.path %}active{% endif %}">Backup</a>
+    <a href="{{ url_for('governance.index') }}" class="nav-item {% if '/governance' in request.path %}active{% endif %}">Governance</a>
+    <a href="{{ url_for('logs.index') }}" class="nav-item {% if request.path.startswith('/logs') %}active{% endif %}">Log Snapshots</a>
+    <a href="{{ url_for('offline.index') }}" class="nav-item {% if request.path.startswith('/offline') %}active{% endif %}">Offline / Network</a>
+    <a href="{{ url_for('network_policy.index') }}" class="nav-item {% if request.path.startswith('/network-policy') %}active{% endif %}">Network Policy</a>
+    {# #185: discoverable deep-link to the portal shortcuts admin. The admin CRUD
+       lives in the Start Portal (it owns the shortcuts table); the Config UI only
+       links out, so it takes on no Postgres dependency. Opens in a new tab. #}
+    {% if main_domain %}
+    <a href="https://start.{{ main_domain }}/admin/shortcuts" target="_blank" rel="noopener" class="nav-item">Shortcuts &#8599;</a>
+    {% endif %}
+</div>
+
+{% if security_doc_available %}
+<div class="nav-section">
+    <div class="nav-category">SECURITY</div>
+    <a href="{{ url_for('security.index') }}" class="nav-item {% if request.path.startswith('/security') %}active{% endif %}">Security Documentation</a>
+</div>
+{% endif %}
+
+<div class="nav-section">
+    <div class="nav-category">DOCUMENTATION</div>
+    <a href="{{ url_for('docs.index') }}" class="nav-item {% if '/docs' in request.path %}active{% endif %}">Stack Guides</a>
+    <a href="{{ url_for('licenses.index') }}" class="nav-item {% if '/licenses' in request.path %}active{% endif %}">Licenses</a>
+</div>
+
+<div class="nav-section">
+    <div class="nav-category">SYSTEM</div>
+    <a href="{{ url_for('settings.factory_reset') }}" class="nav-item {% if '/factory-reset' in request.path %}active{% endif %}">Factory Reset</a>
+    <a href="{{ url_for('auth.logout') }}" class="nav-item">Sign out</a>
+</div>
+
+<!--
+    The Release Notes + What's New overlays used to live here. They were
+    rendering inside .sidebar which creates a containing block for
+    position:fixed descendants, so inset:0 resolved to the nav column
+    instead of the viewport. Markup moved to
+    components/release_notes_whats_new.html and included from base.html at
+    body-root so the overlay fills the full viewport.
+-->

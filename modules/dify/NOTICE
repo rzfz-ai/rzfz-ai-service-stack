@@ -1,0 +1,20 @@
+razzfazz-dify-web — build-recipe NOTICE (third-party upstream)
+============================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: Dify (web) 1.16.0  —  Apache-2.0 (+ Dify additional conditions)
+              https://github.com/langgenius/dify
+
+Apache-2.0 WITH additional Dify conditions: single-tenant use only; the Dify
+LOGO and copyright in the web image/console must NOT be removed or modified.
+We keep the branding. The web source is cloned at the pinned DIFY_VERSION at
+build time (see Dockerfile) and only the razzfazz patches/wiring are
+vendored.
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

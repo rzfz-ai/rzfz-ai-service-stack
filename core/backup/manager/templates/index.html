@@ -1,0 +1,365 @@
+{# M026 S09 #3: extends shared razz_base.html.
+
+   Decision: direct-extends (option b), not a local base.html. The two
+   pages in this container (index, settings) share only the
+   backup-overrides.css <link> and a structurally similar `.header`
+   block — but the header's nav links differ, body class differs,
+   and JS is entirely different. A local base.html would carry one
+   stylesheet link and nothing else. Not worth the indirection.
+
+   Conservative migration: inline <style> block was already removed in
+   S07 #3; this slice only swaps the standalone <html> shell for
+   `{% extends "razz_base.html" %}` + block overrides. CSRF helpers and
+   the F-049/F-050 delete-nonce JS are preserved verbatim.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai Backup & Restore Management{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='backup-overrides.css') }}">
+{% endblock %}
+
+{% block header %}
+<div class="header">
+    <img src="{{ url_for('static', filename='media/razzfazz-ai_backup_icon.png') }}" alt="Backup Icon">
+    <h1>rzfz.ai Backup & Restore Management</h1>
+    <nav style="margin-left: auto;">
+        <a href="{{ url_for('settings') }}" style="color: var(--razz-red); text-decoration: none; padding: 10px 15px; font-weight: 600;">⚙️ Settings</a>
+    </nav>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+
+    <!-- Schedule Info -->
+    <div class="panel" style="background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <strong style="color: #2e7d32;">🕐 Automatic Backup Schedule:</strong>
+                <span style="margin-left: 10px;">{{ backup_config.cron_expression }}</span>
+                {% if backup_config.parsed %}
+                <small style="color: #666;">(
+                    {% if backup_config.parsed.frequency == 'daily' %}Daily at {{ backup_config.parsed.hour }}:{{ backup_config.parsed.minute }}
+                    {% elif backup_config.parsed.frequency == 'weekly_sunday' %}Weekly on Sunday at {{ backup_config.parsed.hour }}:{{ backup_config.parsed.minute }}
+                    {% elif backup_config.parsed.frequency == 'weekly_monday' %}Weekly on Monday at {{ backup_config.parsed.hour }}:{{ backup_config.parsed.minute }}
+                    {% elif backup_config.parsed.frequency == 'monthly' %}Monthly on 1st at {{ backup_config.parsed.hour }}:{{ backup_config.parsed.minute }}
+                    {% else %}Custom schedule
+                    {% endif %}
+                )</small>
+                {% endif %}
+            </div>
+            <a href="{{ url_for('settings') }}" style="color: #2e7d32; text-decoration: none; font-weight: 600;">Configure →</a>
+        </div>
+        <div style="margin-top: 8px; font-size: 13px; color: #555;">
+            🔒 .env Encryption: <strong style="color: #2e7d32;">Active</strong>
+            (using {% if backup_config.encryption_password_set %}custom password{% else %}admin password{% endif %})
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="panel">
+        <h2>Backups Overview</h2>
+        <div class="filter-bar">
+            <input type="text" id="filterName" placeholder="Filter by Name..." onkeyup="filterTable()">
+            <input type="text" id="filterDate" placeholder="Date (YYYY-MM-DD)..." onkeyup="filterTable()">
+            <input type="text" id="filterTime" placeholder="Time (HH:MM)..." onkeyup="filterTable()">
+            <input type="text" id="filterType" placeholder="Type..." onkeyup="filterTable()">
+            <button onclick="window.location.reload()">Refresh</button>
+        </div>
+
+        <table id="backupsTable">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Content</th>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Size</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {# rc6.7 #28: display_name strips the `.gpg` suffix so the
+                   table cell shows the canonical archive name on
+                   encrypted-backup boxes. The on-disk filename (b.name) is
+                   still passed through to selectBackup/confirmDelete so
+                   restore + delete continue to find the file. #}
+                {% for b in backups %}
+                <tr onclick="selectBackup('{{ b.name }}', '{{ b.type }}')">
+                    <td title="{{ b.name }}">{{ b.display_name | default(b.name) }}{% if b.encrypted %} 🔒{% endif %}</td>
+                    <td>{{ b.type }}</td>
+                    <td>{{ b.content }}</td>
+                    <td>{{ b.date }}</td>
+                    <td>{{ b.time }}</td>
+                    <td>{{ b.size }}</td>
+                    <td style="text-align: center;">
+                        <span class="delete-icon" onclick="confirmDelete(event, '{{ b.name }}')" title="Delete Backup">🗑️</span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="actions-grid">
+        <!-- Create Backup -->
+        <div class="panel">
+            <h2>Create Backup</h2>
+            <form id="createForm" onsubmit="submitBackup(event)">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label>Backup Type</label>
+                    <select name="type" id="backupType" onchange="togglePartialInput()">
+                        <option value="full">Full Backup</option>
+                        <option value="partial">Partial Backup</option>
+                    </select>
+                </div>
+
+                <div class="form-group" id="targetInputGroup" style="display:none;">
+                    <label>Volume / Target Name</label>
+                    <input type="text" name="target" placeholder="e.g. postgres-data">
+                </div>
+
+                <button type="submit">Create Backup</button>
+            </form>
+        </div>
+
+        <!-- Restore Backup -->
+        <div class="panel">
+            <h2>Restore Backup</h2>
+            <form id="restoreForm" onsubmit="submitRestore(event)">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label>Selected Backup File</label>
+                    <input type="text" id="restoreFile" name="file" readonly placeholder="Select from table above">
+                </div>
+
+                <input type="hidden" id="restoreType" name="restore_type">
+
+                <div class="form-group" id="restoreTargetGroup" style="display:none;">
+                    <label>Target Volume</label>
+                    <input type="text" id="restoreTarget" name="restore_target">
+                </div>
+
+                <div class="form-group">
+                    <button type="button" id="restoreBtn" onclick="initiateRestore()" disabled>Restore Backup</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Logs -->
+    <div class="panel">
+        <h2>Operation Logs</h2>
+        <div class="logs-container" id="logBox">
+            Loading logs...
+        </div>
+    </div>
+
+</div>
+
+<!-- Safety Modal -->
+<div id="safetyModal" class="modal">
+    <div class="modal-content">
+        <h2 style="color:var(--razz-red)">WARNING: DATA LOSS IMMINENT</h2>
+        <p>You are about to perform a <strong>FULL RESTORE</strong>.</p>
+        <p class="important-warning">This will overwritten ALL existing data.</p>
+        <p>Please type <strong>"I am totally sure"</strong> to proceed.</p>
+        <input type="text" id="confirmText" style="margin: 20px 0; width: 100%;">
+        <div>
+            <button onclick="confirmRestore()" style="background:var(--razz-red)">Confirm Restore</button>
+            <button onclick="closeModal()" style="background:#666; margin-left:10px;">Cancel</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Filtering
+    function filterTable() {
+        let nameFilter = document.getElementById("filterName").value.toLowerCase();
+        let dateFilter = document.getElementById("filterDate").value.toLowerCase();
+        let timeFilter = document.getElementById("filterTime").value.toLowerCase();
+        let typeFilter = document.getElementById("filterType").value.toLowerCase();
+
+        let rows = document.querySelectorAll("#backupsTable tbody tr");
+
+        rows.forEach(row => {
+            let name = row.cells[0].innerText.toLowerCase();
+            let type = row.cells[1].innerText.toLowerCase();
+            let content = row.cells[2].innerText.toLowerCase();
+            let date = row.cells[3].innerText.toLowerCase();
+            let time = row.cells[4].innerText.toLowerCase();
+
+            let matchesName = name.includes(nameFilter);
+            let matchesDate = date.includes(dateFilter);
+            let matchesTime = time.includes(timeFilter);
+            let matchesType = type.includes(typeFilter);
+
+            if (matchesName && matchesDate && matchesTime && matchesType) {
+                row.style.display = "";
+            } else {
+                row.style.display = "none";
+            }
+        });
+    }
+
+    // Selection
+    function selectBackup(filename, type) {
+        document.getElementById("restoreFile").value = filename;
+        document.getElementById("restoreType").value = type.toLowerCase();
+
+        // Visual Selection
+        document.querySelectorAll("tr").forEach(r => r.classList.remove("selected"));
+        event.currentTarget.classList.add("selected");
+
+        // Handle Partial Logic for Restore
+        if (type.toLowerCase() === 'partial') {
+            document.getElementById("restoreTargetGroup").style.display = "block";
+
+            // Try to auto-guess target from filename: partial-{target}-DATE
+            const regex = /^partial-(.+)-(\d{4}-\d{2}-\d{2}-\d{4})/;
+            const match = filename.match(regex);
+            if (match && match[1]) {
+                document.getElementById("restoreTarget").value = match[1];
+            } else {
+                document.getElementById("restoreTarget").value = "";
+            }
+
+        } else {
+            document.getElementById("restoreTargetGroup").style.display = "none";
+        }
+
+        document.getElementById("restoreBtn").disabled = false;
+    }
+
+    // Create Form Toggle
+    function togglePartialInput() {
+        let type = document.getElementById("backupType").value;
+        document.getElementById("targetInputGroup").style.display = (type === 'partial') ? 'block' : 'none';
+    }
+
+    // Restore Logic
+    function initiateRestore() {
+        let type = document.getElementById("restoreType").value;
+        if (type === 'full') {
+            document.getElementById("safetyModal").style.display = "block";
+        } else {
+            triggerRestoreSubmit();
+        }
+    }
+
+    function closeModal() {
+        document.getElementById("safetyModal").style.display = "none";
+        document.getElementById("confirmText").value = "";
+    }
+
+    function confirmDelete(event, filename) {
+        event.stopPropagation();
+        if (!confirm("Are you really sure you want to delete backup file '" + filename + "'? This cannot be undone.")) {
+            return;
+        }
+
+        // F-050: Two-step nonce-based delete confirmation
+        // Step 1: Request a delete nonce
+        let formData1 = new FormData();
+        formData1.append("file", filename);
+        formData1.append("_csrf_token", "{{ csrf_token() }}");
+
+        fetch('/delete_backup', { method: 'POST', body: formData1 })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'confirm' && data.delete_nonce) {
+                    // Step 2: Confirm with nonce
+                    let formData2 = new FormData();
+                    formData2.append("file", filename);
+                    formData2.append("delete_nonce", data.delete_nonce);
+                    formData2.append("_csrf_token", "{{ csrf_token() }}");
+
+                    return fetch('/delete_backup', { method: 'POST', body: formData2 });
+                } else {
+                    alert(data.message || "Unexpected response.");
+                    throw new Error("Nonce not received");
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert(data.message);
+                if (data.status === 'started' || data.status === 'success') {
+                    setTimeout(() => window.location.reload(), 1000);
+                }
+            })
+            .catch(err => { if (err.message !== "Nonce not received") alert("Error: " + err); });
+    }
+
+    function confirmRestore() {
+        let text = document.getElementById("confirmText").value;
+        if (text === "I am totally sure") {
+            closeModal();
+            triggerRestoreSubmit(text);
+        } else {
+            alert("Confirmation phrase incorrect.");
+        }
+    }
+
+    function triggerRestoreSubmit(confirmationPhrase = "") {
+        let formData = new FormData(document.getElementById("restoreForm"));
+        if (confirmationPhrase) {
+            formData.append("confirmation", confirmationPhrase);
+        }
+
+        fetch("/restore", {
+            method: "POST",
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            alert(data.message);
+            pollLogs();
+        })
+        .catch(err => alert("Error starting restore: " + err));
+    }
+
+    function submitRestore(e) {
+        e.preventDefault(); // Default submit prevented, handled by button / initiateRestore
+    }
+
+    // Create Backup Submit
+    function submitBackup(e) {
+        e.preventDefault();
+        let formData = new FormData(e.target);
+
+        fetch("/backup", {
+            method: "POST",
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            // alert(data.message); // Silent start preferred by user via "shows logs after finishing" -> wait, user said "does not do anything immediately".
+            // My fix makes it do something immediately (respond & log).
+            pollLogs();
+        })
+        .catch(err => alert("Error: " + err));
+    }
+
+    // Logs Polling
+    function pollLogs() {
+        fetch("/logs")
+            .then(res => res.text())
+            .then(text => {
+                let box = document.getElementById("logBox");
+                box.innerText = text;
+                box.scrollTop = box.scrollHeight;
+            });
+    }
+
+    // Auto-poll logs every 2 seconds
+    setInterval(pollLogs, 2000);
+    pollLogs(); // Initial load
+
+</script>
+{% endblock %}

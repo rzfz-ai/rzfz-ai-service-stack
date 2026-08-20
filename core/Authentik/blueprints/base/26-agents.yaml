@@ -1,0 +1,62 @@
+---
+# Blueprint: Agent Manager (per-user agent instances)
+# Profile: agents
+version: 1
+metadata:
+  name: "26 — Agent Manager"
+
+entries:
+  # ==========================================
+  # Provider: Forward Auth for Agent Manager
+  # ==========================================
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: "Caddy Forward Auth Provider for Agents"
+    attrs:
+      external_host: "https://${AGENTS_DOMAIN}"
+      mode: forward_single
+      intercept_header_auth: true
+      access_token_validity: "hours=24"
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: Proxy outpost"]]
+
+  # ==========================================
+  # Application: Agent Manager
+  # ==========================================
+  - model: authentik_core.application
+    identifiers:
+      slug: agents
+    attrs:
+      name: AI Agents
+      group: "2 AI Assistants"
+      provider: !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Agents"]]
+      meta_launch_url: "blank://blank"
+      meta_description: "Launch and manage personal AI agent instances"
+      meta_publisher: "razzfazz.ai"
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_home_icon.png"
+      open_in_new_tab: true
+      policy_engine_mode: any
+
+  # ==========================================
+  # Per-instance forward-auth: registered dynamically, NOT here.
+  # ==========================================
+  # PR #84 C1 wiring: the per-instance coding-agent terminals live at
+  # {type}-{token}.${AGENTS_DOMAIN} (opencode-<token>.agents.<domain>, …). Each
+  # such subdomain needs its OWN Authentik forward-auth provider so the embedded
+  # outpost authenticates it. A single domain-level (mode=forward_domain)
+  # provider was tried first but LOOPS on the post-login callback (the
+  # domain-cookie handshake doesn't complete cleanly on the instance subdomain
+  # → ~8 redirects → HTTP 400). We therefore register a per-instance
+  # `forward_single` provider + application at PROVISION time (the well-tested
+  # mode every other app uses) and deregister it at stop/delete — done by
+  # agent-manager's AuthentikClient (app/services/authentik_client.py) via the
+  # Authentik REST API with AUTHENTIK_BOOTSTRAP_TOKEN, exactly as it registers
+  # the per-instance Caddy route. The provider's application is bound to the
+  # OWNING user's group-equivalent gate so Authentik authenticates + authorizes;
+  # per-instance OWNERSHIP is still independently enforced by the C1 anchors
+  # (Caddy↔manager proof header, manager owner-check, container source-IP) that
+  # run AFTER auth. Nothing to declare in this static blueprint.

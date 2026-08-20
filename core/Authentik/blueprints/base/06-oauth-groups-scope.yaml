@@ -1,0 +1,33 @@
+version: 1
+metadata:
+  name: "Base - OAuth groups scope mapping (True SSO #33)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2 scope mapping: `groups`
+  # ==========================================
+  # True SSO group->role mapping (#33). Emits the authenticated user's Authentik
+  # group NAMES as a `groups` claim so downstream OIDC apps (Open WebUI, Gitea,
+  # Synapse, Vaultwarden) can map an Authentik group -> an in-app role.
+  #
+  # This is intentionally explicit rather than relying on Authentik's default
+  # `profile` scope (whose internals — whether it carries `groups` — drift across
+  # Authentik releases). The apps that consume roles request this `groups` scope
+  # and read the `groups` claim.
+  #
+  # The admin group is NOT hardcoded here — the claim carries ALL of the user's
+  # group names; each app decides which group name is its admin role via its own
+  # config (SSO_ADMIN_GROUP -> Open WebUI OAUTH_ADMIN_ROLES / Gitea --admin-group).
+  # ==========================================
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers:
+      name: "razzfazz.ai OAuth Mapping: groups"
+    attrs:
+      name: "razzfazz.ai OAuth Mapping: groups"
+      scope_name: "groups"
+      description: "razzfazz.ai True SSO (#33): user's Authentik group names for in-app role mapping"
+      expression: |
+        return {
+            "groups": [group.name for group in request.user.ak_groups.all()],
+        }

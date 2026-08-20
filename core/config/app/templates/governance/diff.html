@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block page_title %}Diff #{{ data.set_a.set_id }} vs #{{ data.set_b.set_id }}{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Checksum Diff</h1>
+    <p class="page-subtitle">#{{ data.set_a.set_id }} ({{ data.set_a.timestamp }}) vs #{{ data.set_b.set_id }} ({{ data.set_b.timestamp }})</p>
+</div>
+<a href="{{ url_for('governance.index', tab='checksums') }}" class="btn btn-secondary btn-sm" style="margin-bottom:1rem">Back to history</a>
+
+<div class="card" style="margin-bottom:1rem;border-left:4px solid {% if data.overall_changed %}#eab308{% else %}#22c55e{% endif %}">
+    <div class="card-body" style="font-size:0.8125rem">
+        {% if data.overall_changed %}
+        <strong>{{ data.total_changes }} file{{ 's' if data.total_changes != 1 else '' }} changed</strong>
+        {% else %}
+        <strong style="color:#166534">No changes — snapshots are identical</strong>
+        {% endif %}
+    </div>
+</div>
+
+{% if data.changes %}
+<div class="detail-section full-width">
+    <table class="container-table">
+        <thead><tr><th>File</th><th>Status</th><th>SHA256 (before)</th><th>SHA256 (after)</th></tr></thead>
+        <tbody>
+            {% for c in data.changes %}
+            <tr>
+                <td><code style="font-size:0.75rem">{{ c.filepath }}</code></td>
+                <td>
+                    {% if c.status == 'changed' %}<span class="badge badge-experimental">changed</span>
+                    {% elif c.status == 'added' %}<span class="badge badge-production">added</span>
+                    {% elif c.status == 'removed' %}<span class="badge badge-risk-danger">removed</span>{% endif %}
+                </td>
+                <td style="font-size:0.6875rem"><code>{{ (c.hash_a or '—')[:16] }}{% if c.hash_a and c.hash_a|length > 16 %}...{% endif %}</code></td>
+                <td style="font-size:0.6875rem"><code>{{ (c.hash_b or '—')[:16] }}{% if c.hash_b and c.hash_b|length > 16 %}...{% endif %}</code></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,60 @@
+# ==============================================================================
+# SEARCH MODULE (SearXNG)
+# ==============================================================================
+# Profile: searxng
+# Privacy-respecting metasearch engine.
+# ==============================================================================
+services:
+  searxng:
+    image: searxng/searxng:${SEARXNG_VERSION:-2026.7.19-6da6eee26}
+    profiles: ["searxng"]
+    container_name: searxng
+    restart: unless-stopped
+    # #36 security-review — also join the egress-controlled `coding-agents`
+    # net so sandboxed coding agents can reach searxng by name. `default` is
+    # listed explicitly because adding a networks: key otherwise drops the
+    # service off the implicit default network.
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8088}:8080"
+    environment:
+      # C2 (PR #84 adversarial review) — SSRF confused-deputy mitigation.
+      # searxng is dual-homed (default + coding-agents). Its arbitrary-URL
+      # surface is small (it fetches configured upstream search engines, not
+      # caller-supplied URLs), but for defence-in-depth route its outbound
+      # HTTP(S) through the stack SSRF forward proxy (caddy:8195) whose ACL
+      # denies RFC1918 + loopback + link-local, so it can never be used as a
+      # bridge to postgres / valkey / authentik / razzfazz-config / backup.
+      # Public search engines still work. NO_PROXY exempts loopback + valkey
+      # (searxng's optional result cache lives on coding-agents/default by name).
+      HTTP_PROXY: http://caddy:8195
+      HTTPS_PROXY: http://caddy:8195
+      http_proxy: http://caddy:8195
+      https_proxy: http://caddy:8195
+      NO_PROXY: localhost,127.0.0.1,searxng
+      no_proxy: localhost,127.0.0.1,searxng
+    volumes:
+      # Da das File jetzt im selben Ordner wie die compose.yaml liegt:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+      # Optional: Persistente Daten (Logs etc)
+      # - searxng-data:/etc/searxng:rw 
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+networks:
+  # #36 security-review — shared egress-controlled net (declared in
+  # core/compose.yml). Compose merges the identical `name:`-keyed declaration.
+  coding-agents:
+    name: coding-agents
+    driver: bridge

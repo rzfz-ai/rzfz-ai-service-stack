@@ -1,0 +1,73 @@
+version: 1
+metadata:
+  name: "Module - Vaultwarden"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2/OIDC Provider for Vaultwarden
+  # ==========================================
+  # Vaultwarden handles OIDC natively (SSO_ENABLED=true).
+  # Authentik acts as the OIDC identity provider.
+  # Redirect URI: https://vault.{domain}/identity/connect/oidc-signin
+  # ==========================================
+  - model: authentik_providers_oauth2.oauth2provider
+    identifiers:
+      name: "Vaultwarden OIDC Provider"
+    attrs:
+      client_id: vaultwarden_oidc_client
+      client_secret: "${VAULTWARDEN_CLIENT_SECRET}"
+      client_type: confidential
+      # ga.10 (#OIDC-grant-types): Authentik 2026.5.x requires grant_types to be
+      # set explicitly. An empty list rejects EVERY authorize with
+      # "invalid_request / request is otherwise malformed" BEFORE the app policy
+      # check — silently breaking SSO login for this provider. Must be present.
+      grant_types:
+        - authorization_code
+        - refresh_token
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      redirect_uris:
+        - matching_mode: strict
+          url: "https://${VAULTWARDEN_DOMAIN}/identity/connect/oidc-signin"
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      access_code_validity: "minutes=1"
+      access_token_validity: "hours=1"
+      refresh_token_validity: "days=30"
+      include_claims_in_id_token: true
+      property_mappings:
+        # #211: the OIDC `email` scope is supplied SOLELY by our mapping below,
+        # which emits BOTH `email` and `email_verified: true`. We intentionally do
+        # NOT attach the built-in "OpenID 'email'" mapping here — it emits
+        # `email_verified: False`, and Authentik orders same-scope mappings only by
+        # scope_name (undefined DB tiebreak; the last-merged dict wins per key), so
+        # attaching both would make the verified flag NONDETERMINISTIC and could
+        # silently re-block Vaultwarden 1.36.x first login ("verify your email").
+        # Exactly one email-scope mapping = deterministic. See
+        # 07-oauth-email-verified-scope.yaml for the full rationale.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: email_verified"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'openid'"]]
+        # True SSO group->role mapping (#33): the `groups` claim is made available
+        # here for consistency. Vaultwarden SSO gates LOGIN only — it has no
+        # per-user "admin" role driven by an OIDC group (the /admin panel is
+        # guarded by a shared ADMIN_TOKEN, and organization roles require an
+        # in-vault invite). Documented limitation; nothing to consume the claim.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: groups"]]
+
+  # ==========================================
+  # Application: Password Manager (Vaultwarden)
+  # ==========================================
+  - model: authentik_core.application
+    identifiers:
+      slug: vaultwarden
+    attrs:
+      name: Password Manager
+      group: "1 Productivity"
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, "Vaultwarden OIDC Provider"]]
+      meta_launch_url: "blank://blank"
+      meta_description: "Self-hosted Bitwarden-compatible password manager"
+      meta_publisher: "Vaultwarden / dani-garcia"
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_vault_icon.png"
+      open_in_new_tab: true
+      policy_engine_mode: any

@@ -1,0 +1,6 @@
+# Build artifacts (created by pip install / setuptools)
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.pyc
