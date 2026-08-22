@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_content %}
+
+{# Entire dashboard live area — health banner, updates summary, 6-card
+   resource row, three-column grid (Container Memory by Profile / Backup
+   + Image Updates + LLM Models / Recent Activity), and the container
+   status matrix. Refreshed every 15s by HTMX (outerHTML swap on the
+   wrapper) so the page stays fresh without a full reload — modals,
+   scroll position, and form state are preserved. The fragment template
+   renders the same content on first page load via {% include %}. #}
+<div id="dashboard-live"
+     hx-get="{{ url_for('dashboard.live_fragment') }}"
+     hx-trigger="every 15s"
+     hx-swap="outerHTML">
+    {% include "dashboard/_live_fragment.html" %}
+</div>
+
+{# Action buttons stay outside the live fragment so they're stable. #}
+<div style="display:flex;gap:0.5rem;margin-top:1rem">
+    <a href="{{ url_for('modules.overview') }}" class="btn btn-secondary">All Modules</a>
+    <a href="{{ url_for('settings.domain') }}" class="btn btn-secondary">Settings</a>
+    <a href="{{ url_for('backup.index') }}" class="btn btn-secondary">Backup</a>
+    <a href="{{ url_for('governance.index') }}" class="btn btn-secondary">Audit Log</a>
+    <a href="{{ url_for('logs.index') }}" class="btn btn-secondary">Log Snapshots</a>
+</div>
+{% endblock %}

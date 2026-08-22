@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block page_title %}Personal Agents{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Personal Agents</h1>
+    <p class="page-subtitle">Configure per-user agent provisioning, resource limits, and quota tiers</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{# ================================================================== #}
+{# Section navigation tabs                                            #}
+{# ================================================================== #}
+<div class="agent-tabs" style="display:flex;gap:0.25rem;margin-bottom:1.25rem;border-bottom:1px solid var(--color-border);padding-bottom:0">
+    <button class="agent-tab active" data-tab="types" onclick="switchTab('types')">Agent Types</button>
+    <button class="agent-tab" data-tab="limits" onclick="switchTab('limits')">Global Limits</button>
+    <button class="agent-tab" data-tab="tiers" onclick="switchTab('tiers')">Quota Tiers</button>
+</div>
+
+{# ================================================================== #}
+{# TAB 1: Agent Types (S02)                                           #}
+{# ================================================================== #}
+<div id="tab-types" class="agent-tab-content">
+    {% if types_err %}
+    <div class="flash flash-error" style="margin-bottom:1rem">{{ types_err }}</div>
+    <p style="font-size:0.8125rem;color:var(--color-text-muted)">
+        Agent type configuration requires the Agent Manager to be running.
+        Enable the <strong>agents</strong> profile in Modules and ensure the
+        admin API is available.
+    </p>
+    {% else %}
+    <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:1rem">
+        Enable or disable agent types available for per-user provisioning.
+        Changes are applied to the Agent Manager immediately.
+    </p>
+    {% for agent in agent_types %}
+    <div class="detail-section" style="margin-bottom:0.75rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+            <div>
+                <strong style="font-size:0.9375rem">{{ agent.display_name }}</strong>
+                <span class="badge badge-{% if agent.tier == 'heavy' %}experimental{% else %}production{% endif %}" style="margin-left:0.5rem">{{ agent.tier }}</span>
+                {% if agent.requires_docker_socket %}
+                <span class="badge" style="background:#fee2e2;color:#991b1b;margin-left:0.25rem" title="Requires Docker socket access">Docker socket</span>
+                {% endif %}
+            </div>
+            <span class="badge {% if agent.enabled %}badge-production{% else %}badge-experimental{% endif %}">
+                {{ 'Enabled' if agent.enabled else 'Disabled' }}
+            </span>
+        </div>
+        <p style="font-size:0.8125rem;color:var(--color-text-secondary);margin-bottom:0.75rem">{{ agent.description }}</p>
+        <form method="POST" action="{{ url_for('settings.agents_type_save', type_id=agent.id) }}" class="settings-form" style="max-width:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.75rem">
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Image</label>
+                    <input type="text" value="{{ agent.image }}:{{ agent.version }}" class="apply-input" disabled style="background:var(--color-bg-card);opacity:0.7">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Memory limit</label>
+                    <select name="mem_limit" class="filter-select" style="width:100%">
+                        {% for opt in ['128m','256m','512m','1g','1536m','2g','4g'] %}
+                        <option value="{{ opt }}" {% if agent.mem_limit == opt %}selected{% endif %}>{{ opt }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Idle timeout (seconds)</label>
+                    <input type="number" name="idle_timeout" value="{{ agent.idle_timeout }}" min="300" max="86400" class="apply-input">
+                </div>
+                <div class="form-group" style="margin-bottom:0;display:flex;align-items:flex-end">
+                    <label style="font-size:0.8125rem;display:flex;align-items:center;gap:0.5rem;padding-bottom:0.5rem">
+                        <input type="hidden" name="enabled" value="false">
+                        <input type="checkbox" name="enabled" value="true" {% if agent.enabled %}checked{% endif %}>
+                        Enabled
+                    </label>
+                </div>
+            </div>
+            <div class="apply-actions" style="padding-top:0.75rem">
+                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+            </div>
+        </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
+
+{# ================================================================== #}
+{# TAB 2: Global Limits (S03)                                         #}
+{# ================================================================== #}
+<div id="tab-limits" class="agent-tab-content" style="display:none">
+    <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:1rem">
+        Global resource limits for the Personal Agent Manager. These settings
+        are stored in <code>.env</code> and apply to all users.
+    </p>
+    <form method="POST" action="{{ url_for('settings.agents_limits_save') }}" class="settings-form">
+        <div class="detail-section" style="margin-bottom:1rem">
+            <div class="detail-section-title">Instance Limits</div>
+            <div class="form-group">
+                <label class="form-label">Maximum concurrent instances (all users)</label>
+                <input type="number" name="max_instances" value="{{ config.max_instances }}" min="1" max="100" class="apply-input" style="max-width:120px">
+                <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem">
+                    Total number of agent containers that can run simultaneously across all users.
+                </p>
+            </div>
+        </div>
+
+        <div class="detail-section" style="margin-bottom:1rem">
+            <div class="detail-section-title">Idle Timeouts</div>
+            <div class="form-group">
+                <label class="form-label">Lightweight agents (Hermes, Moltis, Coding Tools)</label>
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                    <input type="number" name="idle_timeout_lightweight" value="{{ config.idle_timeout_lightweight }}" min="300" max="86400" class="apply-input" style="max-width:120px">
+                    <span style="font-size:0.8125rem;color:var(--color-text-muted)">seconds ({{ (config.idle_timeout_lightweight|int // 60) }} min)</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Heavy agents (OpenHands, Paperclip)</label>
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                    <input type="number" name="idle_timeout_heavy" value="{{ config.idle_timeout_heavy }}" min="300" max="86400" class="apply-input" style="max-width:120px">
+                    <span style="font-size:0.8125rem;color:var(--color-text-muted)">seconds ({{ (config.idle_timeout_heavy|int // 60) }} min)</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="detail-section" style="margin-bottom:1rem">
+            <div class="detail-section-title">Cleanup</div>
+            <div class="form-group">
+                <label class="form-label">Delete stale instance records after</label>
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                    <input type="number" name="cleanup_after_days" value="{{ config.cleanup_after_days }}" min="1" max="365" class="apply-input" style="max-width:120px">
+                    <span style="font-size:0.8125rem;color:var(--color-text-muted)">days</span>
+                </div>
+                <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem">
+                    Instances stopped longer than this are removed from the database. Container volumes are preserved.
+                </p>
+            </div>
+        </div>
+
+        <div class="apply-actions" style="padding-top:1rem">
+            <button type="submit" class="btn btn-primary">Save & Apply</button>
+        </div>
+    </form>
+
+    {# ============================================================== #}
+    {# #36 / PR #84 — Agents Memory Budget (DB-backed, LIVE)          #}
+    {# ============================================================== #}
+    <form method="POST" action="{{ url_for('settings.agents_memory_save') }}" class="settings-form" style="margin-top:1.5rem">
+        <div class="detail-section" style="margin-bottom:1rem">
+            <div class="detail-section-title">Memory Budget</div>
+            {% if mem_err %}
+            <div class="flash flash-error" style="margin-bottom:0.75rem">{{ mem_err }}</div>
+            {% endif %}
+            <p style="font-size:0.75rem;color:var(--color-text-muted);margin-bottom:0.75rem">
+                Total memory all agent containers combined may use on this box.
+                Applied <strong>live</strong> (stored in the Agent Manager, not
+                <code>.env</code>). A launch or memory increase that would exceed
+                this is refused. Bounded by this box's real memory:
+                <strong>{{ ((mem_config.mem_budget_host_max_mb|default(0)) / 1024)|round(1) }} GB</strong>
+                available for agents (host RAM minus a core-stack reserve).
+            </p>
+            <div class="form-group">
+                <label class="form-label">Global agents memory budget</label>
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                    <input type="number" name="global_mem_budget_gb"
+                           value="{{ ((mem_config.global_mem_budget_mb|default(0)) / 1024)|round(1) }}"
+                           min="0" step="0.5"
+                           max="{{ ((mem_config.mem_budget_host_max_mb|default(0)) / 1024)|round(1) }}"
+                           class="apply-input" style="max-width:120px">
+                    <span style="font-size:0.8125rem;color:var(--color-text-muted)">
+                        GB &middot; currently {{ ((mem_config.mem_in_use_mb|default(0)) / 1024)|round(1) }} GB in use
+                    </span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Per-user memory cap</label>
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                    <input type="number" name="per_user_mem_gb"
+                           value="{{ ((mem_config.per_user_mem_mb|default(0)) / 1024)|round(1) if mem_config.per_user_mem_mb else '' }}"
+                           min="0" step="0.5" class="apply-input" style="max-width:120px"
+                           placeholder="no cap">
+                    <span style="font-size:0.8125rem;color:var(--color-text-muted)">GB (max any one user's agents may total)</span>
+                </div>
+                <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem">
+                    Stops a single user from consuming the whole budget. Leave 0 / blank for no per-user cap.
+                </p>
+            </div>
+            <p style="font-size:0.75rem;color:var(--color-text-muted)">
+                Per-instance memory (what each user may pick per agent) is
+                tier-gated in the Quota Tiers below — only power/admin users can
+                raise it, up to {{ mem_config.per_instance_max_gb|default(16) }} GB.
+            </p>
+        </div>
+        <div class="apply-actions" style="padding-top:1rem">
+            <button type="submit" class="btn btn-primary">Save Memory Budget</button>
+        </div>
+    </form>
+</div>
+
+{# ================================================================== #}
+{# TAB 3: Quota Tiers (S04)                                           #}
+{# ================================================================== #}
+<div id="tab-tiers" class="agent-tab-content" style="display:none">
+    {% if tiers_err %}
+    <div class="flash flash-error" style="margin-bottom:1rem">{{ tiers_err }}</div>
+    <p style="font-size:0.8125rem;color:var(--color-text-muted)">
+        Quota tier configuration requires the Agent Manager to be running.
+    </p>
+    {% else %}
+    <p style="font-size:0.8125rem;color:var(--color-text-muted);margin-bottom:1rem">
+        Quota tiers control how many agent instances each user group can provision.
+        Tiers map to Authentik groups &mdash; assign users to the corresponding group
+        in Authentik to apply a tier.
+    </p>
+    {% for tier in quota_tiers %}
+    <div class="detail-section" style="margin-bottom:0.75rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+            <strong style="font-size:0.9375rem">{{ tier.display_name }}</strong>
+            <span style="font-size:0.75rem;color:var(--color-text-muted)">
+                Authentik group: <code>{{ tier.id }}</code> &middot; priority {{ tier.priority }}
+            </span>
+        </div>
+        <form method="POST" action="{{ url_for('settings.agents_tier_save', tier_id=tier.id) }}" class="settings-form" style="max-width:none">
+            <input type="hidden" name="display_name" value="{{ tier.display_name }}">
+            <input type="hidden" name="priority" value="{{ tier.priority }}">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.75rem">
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Max instances per type</label>
+                    <input type="number" name="max_per_type" value="{{ tier.max_per_type }}" min="0" max="10" class="apply-input">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Max heavy agents</label>
+                    <input type="number" name="max_heavy" value="{{ tier.max_heavy }}" min="0" max="10" class="apply-input">
+                    <p style="font-size:0.7rem;color:var(--color-text-muted);margin-top:0.15rem">OpenHands, Paperclip</p>
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Allowed types</label>
+                    <input type="text" name="allowed_types" value="{{ tier.allowed_types|join(', ') if tier.allowed_types else '' }}" class="apply-input" placeholder="all types (leave empty)">
+                    <p style="font-size:0.7rem;color:var(--color-text-muted);margin-top:0.15rem">Comma-separated IDs, or empty for all</p>
+                </div>
+            </div>
+            <div class="apply-actions" style="padding-top:0.75rem">
+                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+            </div>
+        </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
+
+<script>
+function switchTab(tab) {
+    document.querySelectorAll('.agent-tab-content').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.agent-tab').forEach(el => el.classList.remove('active'));
+    document.getElementById('tab-' + tab).style.display = '';
+    document.querySelector('[data-tab="' + tab + '"]').classList.add('active');
+}
+</script>
+{% endblock %}

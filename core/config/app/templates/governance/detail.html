@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block page_title %}Checksum #{{ data.set_id }}{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1>Checksum Snapshot #{{ data.set_id }}</h1>
+    <p class="page-subtitle">{{ data.timestamp }} — {{ data.comment }}</p>
+</div>
+<a href="{{ url_for('governance.index', tab='checksums') }}" class="btn btn-secondary btn-sm" style="margin-bottom:1rem">Back to history</a>
+
+<div class="detail-section" style="margin-bottom:1rem">
+    <div class="detail-row"><span class="detail-row-label">Source</span><span class="detail-row-value"><span class="badge badge-origin">{{ data.source }}</span></span></div>
+    <div class="detail-row"><span class="detail-row-label">Overall SHA256</span><span class="detail-row-value"><code style="font-size:0.75rem">{{ data.overall_sha256 }}</code></span></div>
+    <div class="detail-row"><span class="detail-row-label">Files</span><span class="detail-row-value">{{ data.file_count }}</span></div>
+</div>
+
+<div class="detail-section full-width">
+    <div class="detail-section-title">Files</div>
+    <table class="container-table">
+        <thead><tr><th>File</th><th>SHA256</th><th>Size</th></tr></thead>
+        <tbody>
+            {% for f in data.files %}
+            <tr>
+                <td><code style="font-size:0.75rem">{{ f.filepath }}</code></td>
+                <td style="font-size:0.6875rem"><code>{{ f.sha256[:16] }}{% if f.sha256 != 'MISSING' and f.sha256 != 'ERROR' %}...{% endif %}</code></td>
+                <td>{% if f.file_size %}{{ (f.file_size / 1024) | round(1) }} KB{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

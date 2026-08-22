@@ -1,0 +1,40 @@
+version: 1
+metadata:
+  name: "Base - Default Flow Customizations v2"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # 1. Customize the main Login Flow
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-authentication-flow
+    attrs:
+      name: "Welcome to razzfazz.ai!"
+      title: "Welcome to razzfazz.ai!"
+      compatibility_mode: true
+
+  # 2. Enforce the correct order for the default login flow's stages
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_identification.identificationstage, [name, default-authentication-identification]]
+    attrs:
+      order: 10
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+    attrs:
+      order: 20
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_authenticator_validate.authenticatorvalidatestage, [name, default-authentication-mfa-validation]]
+    attrs:
+      order: 30
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, default-authentication-login]]
+    attrs:
+      order: 100

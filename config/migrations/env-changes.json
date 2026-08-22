@@ -1,0 +1,4407 @@
+{
+  "versions": [
+    {
+      "version": "2026-03.GA",
+      "date": "2026-03-17",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026-04.M008",
+      "date": "2026-04-13",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CONFIG_DOMAIN",
+          "default": "config.${MAIN_DOMAIN}",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.02-rc1",
+      "date": "2026-02-14",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.03-rc1",
+      "date": "2026-03-11",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "BACKUP_INCLUDE_MODEL_FILES",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "BACKUP_EXCLUDE_REGEXP",
+          "default": "gpustack-data|speaches-data",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env.dify",
+          "key": "CODE_MAX_STRING_ARRAY_LENGTH",
+          "old_default": "30",
+          "new_default": "1000"
+        },
+        {
+          "action": "change_default",
+          "file": ".env.dify",
+          "key": "CODE_MAX_OBJECT_ARRAY_LENGTH",
+          "old_default": "30",
+          "new_default": "1000"
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "BACKUP_ENCRYPTION_PASSWORD",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [
+        "OpenWebUI 0.8.8: model table schema changed (access_control column removed). model_sync updated automatically.",
+        "PostgreSQL max_connections increased from 400 to 800. Requires restart of postgres container.",
+        "llama.cpp updated from b7966 to b8196 in Vulkan Dockerfile. Requires rebuild of gpustack-vulkan image."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-M010",
+      "date": "2026-04-13",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AUTHENTIK_DB_USER",
+          "default": "authentik_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AUTHENTIK_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENWEBUI_DB_USER",
+          "default": "openwebui_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENWEBUI_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_DB_USER",
+          "default": "gpustack_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_DB_USER",
+          "default": "dify_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_DB_USER",
+          "default": "dify_plugin_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_DB_USER",
+          "default": "gitea_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_DB_USER",
+          "default": "paperless_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_DB_USER",
+          "default": "infisical_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_DB_USER",
+          "default": "onyx_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "FALKORDB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SMTP_INTERNAL_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LICENSES_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SETUP_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HELP_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_ADMIN_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "KOMODO_INIT_ADMIN_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_ADMIN_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_ADMIN_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_SSO_ACCEPT_INVALID_CERTS",
+          "default": "false",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [
+        "Per-service database users require running core/init-db.sh to create new users and grant permissions. Existing installs using shared POSTGRES_USER will continue to work until the user runs init-db.sh."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-M011",
+      "date": "2026-04-13",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MANAGER_PORT",
+          "default": "5100",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MANAGER_DB",
+          "default": "agent_manager_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENTS_DOMAIN",
+          "default": "agents.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENTS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MAX_INSTANCES",
+          "default": "20",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_IDLE_TIMEOUT_LIGHTWEIGHT",
+          "default": "1800",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_IDLE_TIMEOUT_HEAVY",
+          "default": "7200",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_CLEANUP_AFTER_DAYS",
+          "default": "30",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-ga",
+      "date": "2026-04-06",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_ADMIN_EMAIL",
+          "default": "razzfazz-ai-admin@${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SMTP_RELAY_HOST",
+          "default": "smtp-relay.gmail.com",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_EMBEDDING_TOKENIZER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_EMBEDDING_DIM",
+          "default": "1024",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_EMBEDDING_TIMEOUT",
+          "default": "120",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_LLM_TIMEOUT",
+          "default": "300",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-ga.1",
+      "date": "2026-04-07",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-ga.3",
+      "date": "2026-04-11",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_VERSION",
+          "default": "v2026.403.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_PORT",
+          "default": "3100",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_DOMAIN",
+          "default": "paperclip.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_DB",
+          "default": "paperclip_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_BETTER_AUTH_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERCLIP_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_DB",
+          "default": "synapse_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MATRIX_DOMAIN",
+          "default": "matrix.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "ELEMENT_WEB_DOMAIN",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_SERVER_NAME",
+          "default": "${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_REPORT_STATS",
+          "default": "no",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_REGISTRATION_SHARED_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_MACAROON_SECRET_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_FORM_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SYNAPSE_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MATRIX_CLIENT_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ELEMENT_WEB_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_PORT",
+          "default": "13131",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_DOMAIN",
+          "default": "moltis.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_TLS__ENABLED",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_IDENTITY__NAME",
+          "default": "moltis",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_MATRIX_HOMESERVER",
+          "default": "http://synapse:8008",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_MATRIX_BOT_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_MATRIX_USER_ID",
+          "default": "@moltis:${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HERMES_PORT",
+          "default": "3101",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HERMES_DOMAIN",
+          "default": "hermes.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HERMES_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-ga.5",
+      "date": "2026-04-13",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_PORT",
+          "default": "8001",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_DOMAIN",
+          "default": "paperless.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_DB",
+          "default": "paperless_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_SECRET_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_OCR_LANGUAGE",
+          "default": "eng+deu",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_PORT",
+          "default": "8222",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_DOMAIN",
+          "default": "vault.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_DB",
+          "default": "vaultwarden_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_ADMIN_TOKEN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_PORT",
+          "default": "8888",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_DOMAIN",
+          "default": "infisical.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_DB",
+          "default": "infisical_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_ENCRYPTION_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_AUTH_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_DOMAIN",
+          "default": "onyx.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_DB",
+          "default": "onyx_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENHANDS_PORT",
+          "default": "3003",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENHANDS_DOMAIN",
+          "default": "openhands.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENHANDS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CODING_TOOLS_PORT",
+          "default": "3004",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CODING_TOOLS_DOMAIN",
+          "default": "coding.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CODING_TOOLS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": "",
+      "added": [
+        {
+          "key": "PAPERLESS_PORT",
+          "default": "8001",
+          "comment": ""
+        },
+        {
+          "key": "PAPERLESS_DOMAIN",
+          "default": "paperless.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "PAPERLESS_DB",
+          "default": "paperless_db",
+          "comment": ""
+        },
+        {
+          "key": "PAPERLESS_SECRET_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "PAPERLESS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "PAPERLESS_OCR_LANGUAGE",
+          "default": "eng+deu",
+          "comment": ""
+        },
+        {
+          "key": "VAULTWARDEN_PORT",
+          "default": "8222",
+          "comment": ""
+        },
+        {
+          "key": "VAULTWARDEN_DOMAIN",
+          "default": "vault.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "VAULTWARDEN_DB",
+          "default": "vaultwarden_db",
+          "comment": ""
+        },
+        {
+          "key": "VAULTWARDEN_ADMIN_TOKEN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "VAULTWARDEN_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "INFISICAL_PORT",
+          "default": "8888",
+          "comment": ""
+        },
+        {
+          "key": "INFISICAL_DOMAIN",
+          "default": "infisical.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "INFISICAL_DB",
+          "default": "infisical_db",
+          "comment": ""
+        },
+        {
+          "key": "INFISICAL_ENCRYPTION_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "INFISICAL_AUTH_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "INFISICAL_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "ONYX_DOMAIN",
+          "default": "onyx.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "ONYX_DB",
+          "default": "onyx_db",
+          "comment": ""
+        },
+        {
+          "key": "ONYX_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "ONYX_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "OPENHANDS_PORT",
+          "default": "3006",
+          "comment": ""
+        },
+        {
+          "key": "OPENHANDS_DOMAIN",
+          "default": "openhands.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "OPENHANDS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "CODING_TOOLS_PORT",
+          "default": "3004",
+          "comment": ""
+        },
+        {
+          "key": "CODING_TOOLS_DOMAIN",
+          "default": "coding.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "CODING_TOOLS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "GITEA_API_TOKEN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "key": "GIT_AUTHOR_NAME",
+          "default": "AI Agent",
+          "comment": ""
+        },
+        {
+          "key": "GIT_AUTHOR_EMAIL",
+          "default": "agent@${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "key": "GIT_COMMITTER_NAME",
+          "default": "AI Agent",
+          "comment": ""
+        },
+        {
+          "key": "GIT_COMMITTER_EMAIL",
+          "default": "agent@${MAIN_DOMAIN}",
+          "comment": ""
+        }
+      ]
+    },
+    {
+      "version": "2026.04-m004",
+      "date": "2026-04-10",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "TIKA_PORT",
+          "default": "9998",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DOCLING_PORT",
+          "default": "5001",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DOCLING_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PRESIDIO_ANALYZER_PORT",
+          "default": "5100",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PRESIDIO_ANONYMIZER_PORT",
+          "default": "5300",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PRESIDIO_IMAGE_REDACTOR_PORT",
+          "default": "5200",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "STIRLING_PDF_PORT",
+          "default": "8181",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "STIRLING_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-m006",
+      "date": "2026-04-12",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENABLE_ENTRA_OAUTH",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENTRA_CLIENT_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENTRA_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENTRA_TENANT_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENTRA_OAUTH_DOMAIN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENABLE_OPENWEBUI_OIDC",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENWEBUI_OIDC_CLIENT_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENWEBUI_OIDC_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENABLE_GITEA_AUTHENTIK_OIDC",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_OIDC_CLIENT_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_OIDC_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENABLE_OAUTH_SIGNUP",
+          "default": "false",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-rc1",
+      "date": "2026-04-01",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_VERSION",
+          "default": "latest",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_PORT",
+          "default": "9621",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_DB",
+          "default": "lightrag_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_DOMAIN",
+          "default": "rag.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_API_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_TOKEN_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_AUTH_ACCOUNTS",
+          "default": "admin:admin123",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_LLM_MODEL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_EMBEDDING_MODEL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_RERANK_BINDING",
+          "default": "null",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_RERANK_MODEL",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [
+        "PostgreSQL image changed from pgvector/pgvector:pg17 to custom build with Apache AGE extension. Requires image rebuild."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-rc1",
+      "date": "2026-03-31",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [
+        "PostgreSQL image reverted from custom Apache AGE build to standard pgvector/pgvector:pg17. LightRAG graph storage switched from PGGraphStorage (AGE) to NetworkXStorage (file-based). Existing AGE graph data in lightrag_db will no longer be used; re-indexing documents in LightRAG is required."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-rc2",
+      "date": "2026-03-31",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_PORT",
+          "default": "8000",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_DB",
+          "default": "cognee_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_DOMAIN",
+          "default": "cognee.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_LOG_LEVEL",
+          "default": "INFO",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_LLM_MODEL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_EMBEDDING_MODEL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_EMBEDDING_DIM",
+          "default": "768",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "FALKORDB_VERSION",
+          "default": "latest",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "FALKORDB_PORT",
+          "default": "6380",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.04-version-updates",
+      "date": "2026-04-10",
+      "description": "Container version updates: Authentik 2025.10.4, FerretDB 2.7.0, Dify sandbox 0.2.14",
+      "env_changes": [
+        {
+          "action": "update_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2025.10.3",
+          "new_default": "2025.10.4",
+          "comment": ""
+        },
+        {
+          "action": "update_default",
+          "file": ".env",
+          "key": "FERRETDB_VERSION",
+          "old_default": "2.5.0",
+          "new_default": "2.7.0",
+          "comment": ""
+        },
+        {
+          "action": "update_default",
+          "file": ".env",
+          "key": "KOMODO_DB_VERSION",
+          "old_default": "17-0.106.0-ferretdb-2.5.0",
+          "new_default": "17-0.107.0-ferretdb-2.7.0",
+          "comment": ""
+        },
+        {
+          "action": "update_default",
+          "file": ".env",
+          "key": "DIFY_SANDBOX_VERSION",
+          "old_default": "0.2.12",
+          "new_default": "0.2.14",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga",
+      "date": "2026-05-08",
+      "env_changes": [
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "GPUSTACK_OPENAI_API_KEY",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GOTENBERG_VERSION",
+          "old_default": "8.31.0",
+          "new_default": "8.32.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENWEBUI_VERSION",
+          "old_default": "0.9.2",
+          "new_default": "0.9.4",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.1",
+      "date": "2026-05-13",
+      "env_changes": [
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "CADDY_IP",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENABLE_VERSION_UPDATE_CHECK",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENWEBUI_VERSION",
+          "old_default": "0.9.4",
+          "new_default": "0.9.5",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.2",
+      "date": "2026-05-13",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env.dify",
+          "key": "RESET_PASSWORD_TOKEN_EXPIRY_MINUTES",
+          "old_default": "5",
+          "new_default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "LOGIN_LOCKOUT_DURATION",
+          "default": "1800",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.3",
+      "date": "2026-05-13",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "1.14.0",
+          "new_default": "1.14.1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LLM_ARGS",
+          "default": "{\"extra_body\":{\"enable_thinking\":false}}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "API_WEBSOCKET_WORKER_CLASS",
+          "default": "geventwebsocket.gunicorn.workers.GeventWebSocketWorker",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "API_WEBSOCKET_WORKER_CONNECTIONS",
+          "default": "1000",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "API_WEBSOCKET_GUNICORN_TIMEOUT",
+          "default": "360",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "MARKETPLACE_URL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "OPS_TRACE_RETRYABLE_DISPATCH_DELAY_SECONDS",
+          "default": "5",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "OPS_TRACE_RETRYABLE_DISPATCH_MAX_RETRIES",
+          "default": "60",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "PLUGIN_REMOTE_INSTALL_HOST",
+          "default": "localhost",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "PLUGIN_REMOTE_INSTALL_PORT",
+          "default": "5003",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "SENTRY_PROFILES_SAMPLE_RATE",
+          "default": "1.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "SENTRY_TRACES_SAMPLE_RATE",
+          "default": "1.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "SQLALCHEMY_POOL_RESET_ON_RETURN",
+          "default": "rollback",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GSD_PI_VERSION",
+          "old_default": "2.80.0",
+          "new_default": "2.82.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENCODE_VERSION",
+          "old_default": "1.14.42",
+          "new_default": "1.14.46",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.4",
+      "date": "2026-05-17",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2026.2.2",
+          "new_default": "2026.2.3",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SEARXNG_VERSION",
+          "old_default": "2026.5.9-0cba32c15",
+          "new_default": "2026.5.17-f26e45077",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "PAPERCLIP_VERSION",
+          "old_default": "v2026.428.0",
+          "new_default": "v2026.513.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENHANDS_VERSION",
+          "old_default": "1.6.0",
+          "new_default": "1.7.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENCODE_VERSION",
+          "old_default": "1.14.46",
+          "new_default": "1.15.3",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_REQUIRE_ADMIN_MFA",
+          "default": "true",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.5",
+      "date": "2026-05-25",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_MCP_API_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "1.14.1",
+          "new_default": "1.14.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "1.26.1",
+          "new_default": "1.26.2",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.6",
+      "date": "2026-05-29",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_DOC_TOOLS_SSRF_ALLOW",
+          "default": "disabled.invalid",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-ga.7",
+      "date": "2026-06-01",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc2",
+      "date": "2026-04-23",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ELEMENT_WEB_DOMAIN",
+          "default": "element.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AUTHENTIK_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AUTHENTIK_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "INFISICAL_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENWEBUI_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENWEBUI_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_DB_USER",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "PAPERLESS_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CONFIG_DOMAIN",
+          "default": "config.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HELP_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LICENSES_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SETUP_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_ADMIN_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_ADMIN_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SMTP_INTERNAL_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_SSO_ACCEPT_INVALID_CERTS",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "FALKORDB_PORT",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "FALKORDB_VERSION",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2025.10.3",
+          "new_default": "2026.2.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENWEBUI_VERSION",
+          "old_default": "main",
+          "new_default": "0.9.1",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "PIPELINES_VERSION",
+          "old_default": "main",
+          "new_default": "git-039f9c5",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "latest",
+          "new_default": "1.13.3",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_SANDBOX_VERSION",
+          "old_default": "latest",
+          "new_default": "0.2.14",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_VERSION",
+          "old_default": "latest",
+          "new_default": "0.5.8-local",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "latest",
+          "new_default": "1.26.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SEARXNG_VERSION",
+          "old_default": "latest",
+          "new_default": "2026.4.22-74f1ca203",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GOTENBERG_VERSION",
+          "old_default": "8",
+          "new_default": "8.31.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "KOMODO_VERSION",
+          "old_default": "latest",
+          "new_default": "2.1.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "FERRETDB_VERSION",
+          "old_default": "2.5.0",
+          "new_default": "2.7.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SPEACHES_VERSION",
+          "old_default": "latest-cpu",
+          "new_default": "0.8.3-cpu",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "LIGHTRAG_VERSION",
+          "old_default": "latest",
+          "new_default": "v1.4.15",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "VALKEY_VERSION",
+          "old_default": "latest",
+          "new_default": "9.0.3",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "BACKUP_VERSION",
+          "old_default": "latest",
+          "new_default": "v2",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_PORT",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_DOMAIN",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_PASSWORD",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_CLIENT_SECRET",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_TLS__ENABLED",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_IDENTITY__NAME",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_MATRIX_HOMESERVER",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_MATRIX_BOT_PASSWORD",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "MOLTIS_MATRIX_USER_ID",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "HERMES_PORT",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "HERMES_DOMAIN",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "HERMES_CLIENT_SECRET",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "CODING_TOOLS_PORT",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "CODING_TOOLS_DOMAIN",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "CODING_TOOLS_CLIENT_SECRET",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [
+        "Cognee profile: FalkorDB container removed; cognee container now uses embedded Kuzu graph. Existing cognee_db data is preserved, but cognee's on-volume graph file is regenerated on first start of cognee 1.0.1 (disabled profile so no live impact for most deployments).",
+        "Hermes container base image changed from node:20-bookworm-slim to node:22-trixie-slim to drop a large chunk of the bookworm CVE backlog; requires rebuild (razzfazz-upgrade.sh does this).",
+        "docker-socket-proxy allowlist expanded (POST, ALLOW_START, ALLOW_STOP, ALLOW_RESTARTS, EXEC) so razzfazz-config, razzfazz-backup-management, agent-manager, authentik-worker, and gpustack can talk through the proxy. Five containers migrated off raw /var/run/docker.sock.",
+        "Gitea DISABLE_REGISTRATION is now hardcoded true (previously gated on ENABLE_GOOGLE_OAUTH). Public signup is closed on all deployments; Authentik SSO is the only path in.",
+        "Caddy rebuilt with github.com/mholt/caddy-ratelimit; Authentik login flow and Gitea /user/login rate-limited to 10 req/min per IP."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc3",
+      "date": "2026-04-23",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2025.10.4",
+          "new_default": "2026.2.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_SANDBOX_VERSION",
+          "old_default": "0.2.12",
+          "new_default": "0.2.14",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_VERSION",
+          "old_default": "0.5.2-local",
+          "new_default": "0.5.8-local",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "KOMODO_DB_VERSION",
+          "old_default": "17-0.106.0-ferretdb-2.5.0",
+          "new_default": "17-0.107.0-ferretdb-2.7.0",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [
+        "Authentik major version jump 2025.10 → 2026.2. Upstream 0056_user_roles migration is buggy; razzfazz.ai ships a sanitized overlay that skips the RunPython body (per-user/per-group object-level permission backfill). Stacks relying on Django-level object permissions need manual backfill — see docs/authentik-upgrade.md. All razzfazz.ai group-based permissions survive untouched."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc4",
+      "date": "2026-04-24",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MANAGER_DB",
+          "default": "agent_manager_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MANAGER_PORT",
+          "default": "5100",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENTS_DOMAIN",
+          "default": "agents.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENTS_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MAX_INSTANCES",
+          "default": "20",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_IDLE_TIMEOUT_LIGHTWEIGHT",
+          "default": "1800",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_IDLE_TIMEOUT_HEAVY",
+          "default": "7200",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_CLEANUP_AFTER_DAYS",
+          "default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OBSERVABILITY_VERSION",
+          "default": "1.18.1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OBSERVABILITY_PORT",
+          "default": "8200",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OBSERVABILITY_DOMAIN",
+          "default": "observability.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OBSERVABILITY_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OBSERVABILITY_RETENTION_DAYS",
+          "default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CLICKHOUSE_VERSION",
+          "default": "24.8.4.13",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CLICKHOUSE_USER",
+          "default": "default",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CLICKHOUSE_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENLIT_OTLP_ENDPOINT",
+          "default": "http://openlit:4318/v1/traces",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OBSERVABILITY_PII_FILTER",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DIFY_APPS_JSON",
+          "default": "[]",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc5",
+      "date": "2026-04-27",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GPUSTACK_VERSION",
+          "old_default": "vulkan",
+          "new_default": "v2.1.2",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "GPUSTACK_EXPERIMENTAL_VERSION",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HARDWARE",
+          "default": "amd",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COMPOSE_FILE",
+          "default": "compose.yml:llm/compose.devices.amd.yml",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_RESERVED_RAM_GIB",
+          "default": "8",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_RESERVED_VRAM_GIB",
+          "default": "4",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "STACK_HOST_PATH",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "STACK_GIT_CREDENTIALS_PATH",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [
+        "COMPOSE_PROFILES `llm-box` / `llm-experimental` / `llm-cpu` are migrated to `llm` automatically by razzfazz-upgrade.sh Step 5b. Set HARDWARE accordingly. Rollback to the frozen 0.7.1 + Vulkan stack: replace `llm` with `llm-legacy` in COMPOSE_PROFILES."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc5.1",
+      "date": "2026-04-29",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENWEBUI_VERSION",
+          "old_default": "0.9.1",
+          "new_default": "0.9.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_SANDBOX_VERSION",
+          "old_default": "0.2.14",
+          "new_default": "0.2.15",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "1.26.0",
+          "new_default": "1.26.1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GPUSTACK_HOST_BIND",
+          "default": "127.0.0.1",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6",
+      "date": "2026-04-29",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENHANDS_VERSION",
+          "default": "1.6.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CRAWL4AI_VERSION",
+          "default": "0.8.6",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CRAWL4AI_PORT",
+          "default": "8201",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CRAWL4AI_DOMAIN",
+          "default": "crawl4ai.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CRAWL4AI_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "1.13.3",
+          "new_default": "1.14.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_VERSION",
+          "old_default": "0.5.8-local",
+          "new_default": "0.6.0-local",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SEARXNG_VERSION",
+          "old_default": "2026.4.22-74f1ca203",
+          "new_default": "2026.4.29-cba0cffa8",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "PAPERCLIP_VERSION",
+          "old_default": "v2026.403.0",
+          "new_default": "v2026.428.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "COOKIE_DOMAIN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "NEXT_PUBLIC_COOKIE_DOMAIN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ALLOW_INLINE_STYLES",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_ACCESS_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_ARCHIVE_BUCKET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_ENABLED",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_ENDPOINT",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_EXPORT_BUCKET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_REGION",
+          "default": "auto",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ARCHIVE_STORAGE_SECRET_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "BAIDU_VECTOR_DB_AUTO_BUILD_ROW_COUNT_INCREMENT",
+          "default": "500",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "BAIDU_VECTOR_DB_AUTO_BUILD_ROW_COUNT_INCREMENT_RATIO",
+          "default": "0.05",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "BAIDU_VECTOR_DB_REBUILD_INDEX_TIMEOUT_IN_SECONDS",
+          "default": "300",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "CELERY_TASK_ANNOTATIONS",
+          "default": "null",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "COMPOSE_WORKER_HEALTHCHECK_DISABLED",
+          "default": "true",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "COMPOSE_WORKER_HEALTHCHECK_INTERVAL",
+          "default": "30s",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "COMPOSE_WORKER_HEALTHCHECK_TIMEOUT",
+          "default": "30s",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "CREATORS_PLATFORM_API_URL",
+          "default": "https://creators.dify.ai",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "CREATORS_PLATFORM_FEATURES_ENABLED",
+          "default": "true",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "CREATORS_PLATFORM_OAUTH_CLIENT_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ENABLE_COLLABORATION_MODE",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ENABLE_WORKFLOW_RUN_CLEANUP_TASK",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "EVENT_BUS_REDIS_CHANNEL_TYPE",
+          "default": "pubsub",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "EVENT_BUS_REDIS_URL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "EVENT_BUS_REDIS_USE_CLUSTERS",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "EXPERIMENTAL_ENABLE_VINEXT",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_ACCESS_KEY_ID",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_ACCESS_KEY_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_BASE_QUANTIZATION_TYPE",
+          "default": "rabitq",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_DATABASE",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_DISTANCE_METHOD",
+          "default": "Cosine",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_EF_CONSTRUCTION",
+          "default": "400",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_HOST",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_MAX_DEGREE",
+          "default": "64",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_PORT",
+          "default": "80",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_SCHEMA",
+          "default": "public",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "HOLOGRES_TOKENIZER",
+          "default": "jieba",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "LOGSTORE_ENABLE_PUT_GRAPH_FIELD",
+          "default": "true",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "LOG_OUTPUT_FORMAT",
+          "default": "text",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "NEXT_PUBLIC_BATCH_CONCURRENCY",
+          "default": "5",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "NEXT_PUBLIC_SOCKET_URL",
+          "default": "ws://localhost",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "PLUGIN_MODEL_SCHEMA_CACHE_TTL",
+          "default": "3600",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_HEALTH_CHECK_INTERVAL",
+          "default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_KEY_PREFIX",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_MAX_CONNECTIONS",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_RETRY_BACKOFF_BASE",
+          "default": "1.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_RETRY_BACKOFF_CAP",
+          "default": "10.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_RETRY_RETRIES",
+          "default": "3",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_SOCKET_CONNECT_TIMEOUT",
+          "default": "5.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_SOCKET_TIMEOUT",
+          "default": "5.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "S3_ADDRESS_STYLE",
+          "default": "auto",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "SANDBOX_EXPIRED_RECORDS_CLEAN_TASK_LOCK_TTL",
+          "default": "90000",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "SMTP_LOCAL_HOSTNAME",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "TENCENT_COS_CUSTOM_DOMAIN",
+          "default": "your-custom-domain",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "UV_CACHE_DIR",
+          "default": "/tmp/.uv-cache",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "WORKFLOW_LOG_CLEANUP_SPECIFIC_WORKFLOW_IDS",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GSD_PI_VERSION",
+          "default": "2.78.1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OPENCODE_VERSION",
+          "default": "1.14.29",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.1",
+      "date": "2026-04-30",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.2",
+      "date": "2026-04-30",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.3",
+      "date": "2026-04-30",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.4",
+      "date": "2026-04-30",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.5",
+      "date": "2026-04-30",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.6",
+      "date": "2026-04-30",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.7",
+      "date": "2026-05-03",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "COGNEE_PORT",
+          "old_default": "8000",
+          "new_default": "8011",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.8",
+      "date": "2026-05-03",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_FRONTEND_PORT",
+          "default": "8012",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RENDER_GID",
+          "default": "992",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.05-rc6.9",
+      "date": "2026-05-08",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "START_DOMAIN",
+          "default": "start.${MAIN_DOMAIN}",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga",
+      "date": "2026-06-14",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.1",
+      "date": "2026-06-15",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.2",
+      "date": "2026-06-18",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "BACKUP_TMP_DIR",
+          "default": "",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.3",
+      "date": "2026-06-19",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.4",
+      "date": "2026-06-20",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.5",
+      "date": "2026-06-21",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.6",
+      "date": "2026-06-21",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-ga.7",
+      "date": "2026-06-22",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-rc1",
+      "date": "2026-06-09",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "1.14.1",
+          "new_default": "1.14.2"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "1.26.1",
+          "new_default": "1.26.2"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "CLICKHOUSE_VERSION",
+          "old_default": "24.8.4.13",
+          "new_default": "24.8.14.39"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "CRAWL4AI_VERSION",
+          "old_default": "0.8.6",
+          "new_default": "0.8.9"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_VERSION",
+          "old_default": "0.6.0-local",
+          "new_default": "0.6.1-local"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GOTENBERG_VERSION",
+          "old_default": "8.32.0",
+          "new_default": "8.33.0"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OBSERVABILITY_VERSION",
+          "old_default": "1.20.0",
+          "new_default": "1.21.1"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "VALKEY_VERSION",
+          "old_default": "9.0.4",
+          "new_default": "9.1.0"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "PAPERCLIP_VERSION",
+          "old_default": "v2026.513.0",
+          "new_default": "v2026.517.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SEARXNG_VERSION",
+          "old_default": "2026.5.17-f26e45077",
+          "new_default": "2026.6.8-f3fab143b"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENCODE_VERSION",
+          "old_default": "1.15.5",
+          "new_default": "1.16.2"
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2026.2.3",
+          "new_default": "2026.2.4",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-rc2",
+      "date": "2026-06-12",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "BACKUP_EXCLUDE_DIFY_PLUGINS",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "DOCLING_RQ_WORKER_REPLICAS",
+          "default": "2",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-rc3",
+      "date": "2026-06-13",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.06-rc4",
+      "date": "2026-06-14",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga",
+      "date": "2026-07-06",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.10",
+      "date": "2026-07-17",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "BACKUP_EXCLUDE_REGEXP",
+          "old_default": "gpustack-data|speaches-data",
+          "new_default": "gpustack-data|speaches-data|postgres-data|valkey-data|postgres-komodo-data",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ONYX_LITELLM_EXTRA_BODY",
+          "default": "{\"chat_template_kwargs\":{\"enable_thinking\":false}}",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2026.2.4",
+          "new_default": "2026.2.6",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.4",
+      "date": "2026-07-10",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.5",
+      "date": "2026-07-10",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.6",
+      "date": "2026-07-10",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.7",
+      "date": "2026-07-11",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.8",
+      "date": "2026-07-11",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-ga.9",
+      "date": "2026-07-11",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-rc1",
+      "date": "2026-07-04",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_INTERNAL_TOKEN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "LIGHTRAG_EMBEDDING_DIM",
+          "old_default": "768",
+          "new_default": "4096",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LIGHTRAG_EMBEDDING_SEND_DIM",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MANAGER_PROXY_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_CHANNEL",
+          "default": "internal",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LLM_MAX_CONCURRENT",
+          "default": "100000",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LLM_MAX_CONCURRENT_WINDOW",
+          "default": "1s",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SSO_ADMIN_GROUP",
+          "default": "razzfazz.ai Super Admins",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ENABLE_OWUI_OAUTH_ROLE_MANAGEMENT",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OWUI_OAUTH_ALLOWED_ROLES",
+          "default": "razzfazz.ai Chat Users,razzfazz.ai Super Admins",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "1.14.2",
+          "new_default": "1.15.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "SERVER_CONSOLE_API_URL",
+          "default": "http://dify-api:5001",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ENABLE_LEARN_APP",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ENABLE_AGENT_V2",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "NEXT_PUBLIC_ENABLE_FEATURE_PREVIEW",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "ENABLE_OAUTH_BEARER",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DEVICE_FLOW_APPROVE_RATE_LIMIT_PER_HOUR",
+          "default": "10",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "OPENAPI_ENABLED",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "OPENAPI_CORS_ALLOW_ORIGINS",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "OPENAPI_KNOWN_CLIENT_IDS",
+          "default": "difyctl",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "OPENAPI_RATE_LIMIT_PER_TOKEN",
+          "default": "60",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "PLUGIN_MODEL_PROVIDERS_CACHE_TTL",
+          "default": "86400",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_ENV_NACOS_CONNECT_TIMEOUT",
+          "default": "3.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_ENV_NACOS_REQUEST_TIMEOUT",
+          "default": "10.0",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env.dify",
+          "key": "SSRF_REVERSE_PROXY_PORT",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env.dify",
+          "key": "SSRF_SANDBOX_HOST",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "ADMIN_CONTACT_EMAIL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_CORE_STACK_RESERVE_MB",
+          "default": "8192",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MEM_DEFAULT_GB",
+          "default": "2",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "AGENT_MEM_PER_INSTANCE_MAX_GB",
+          "default": "16",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "CODEX_VERSION",
+          "default": "0.142.5",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_ACCESS_CONTROL",
+          "default": "true",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "GITEA_OAUTH_AUTO_REGISTER",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_DOMAIN",
+          "default": "mcp.${MAIN_DOMAIN}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_MANAGER_DB",
+          "default": "mcp_manager_db",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_MANAGER_DB_PASSWORD",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_MANAGER_DB_USER",
+          "default": "mcp_manager_user",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_MANAGER_PORT",
+          "default": "5120",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_MANAGER_SECRET_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MCP_MAX_INSTANCES",
+          "default": "50",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OAUTH_GITHUB_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OAUTH_GOOGLE_CLIENT_SECRET",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OWUI_CONTENT_EXTRACTION_ENGINE",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "SUPPORT_EMAIL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_SMTP_HOST",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_SMTP_PORT",
+          "default": "587",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "VAULTWARDEN_SMTP_SECURITY",
+          "default": "off",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "EDGE_TTS_PORT",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "EDGE_TTS_VERSION",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "SETUP_DOMAIN",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "NGINX_SOCKET_IO_UPSTREAM",
+          "default": "api_websocket:5001",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "1.26.2",
+          "new_default": "1.26.4",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "CRAWL4AI_VERSION",
+          "old_default": "0.8.9",
+          "new_default": "0.9.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "OPENWEBUI_VERSION",
+          "old_default": "0.9.5",
+          "new_default": "0.10.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_VERSION",
+          "old_default": "0.6.1-local",
+          "new_default": "0.6.3-local",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "LIGHTRAG_VERSION",
+          "old_default": "v1.4.16",
+          "new_default": "v1.5.4",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SEARXNG_VERSION",
+          "old_default": "2026.6.13-a29cda858",
+          "new_default": "2026.7.3-747cec4c2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "CLICKHOUSE_VERSION",
+          "old_default": "24.8.14.39",
+          "new_default": "25.8.25.37",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "BACKUP_VERSION",
+          "old_default": "v2",
+          "new_default": "v2.48.2",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "PAPERCLIP_VERSION",
+          "old_default": "v2026.609.0",
+          "new_default": "v2026.626.0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "HERMES_AGENT_VERSION",
+          "default": "v2026.7.1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MOLTIS_VERSION",
+          "default": "20260603.01",
+          "comment": ""
+        },
+        {
+          "action": "remove",
+          "file": ".env",
+          "key": "GSD_PI_VERSION",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [
+        "Repo Layout-A reorg (#26): all per-module directories (chat, dify, llm, search, knowledge, doc-processing, monitor, observability, agents, gitea, stts, tools, apps) moved under modules/. The LLM device overlay therefore moved from llm/compose.devices.<HW>.yml to modules/llm/compose.devices.<HW>.yml. Existing boxes' live .env COMPOSE_FILE carries the old top-level path; razzfazz-upgrade.sh rewrites it in place via migrate_compose_file_to_modules_layout (Step 5b.0.5b) BEFORE composing, preserving any operator-added overlays. No operator action required, no new .env keys. core/ stays at repo root.",
+        "Dify 1.14.2 -> 1.15.0 (#26): 24 new Alembic revisions run automatically on dify-api start (MIGRATION_ENABLED=true) — nearly all additive; one data migration normalizes legacy end_user rows. Rollback path is the pre-upgrade Postgres volume backup (razzfazz-upgrade.sh --rollback), NOT an Alembic downgrade. Upstream 1.15 also mandates a one-shot 'flask backfill-plugin-auto-upgrade' AFTER 'flask db upgrade'; this is now wired automatically (run_data_migrations in cli/upgrade.sh, triggered exactly on the crossing into Dify >=1.15.0, retried until the migrated schema is ready, idempotent-ish)."
+      ],
+      "notes": ""
+    },
+    {
+      "version": "2026.07-rc2",
+      "date": "2026-07-05",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga",
+      "date": "2026-07-27",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.1",
+      "date": "2026-07-28",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "USER_DEFINED_APT_PACKAGES",
+          "default": "libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 libx11-6 libxcb1 libxext6 libxi6 fonts-liberation",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.10",
+      "date": "2026-08-05",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.11",
+      "date": "2026-08-06",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "1.27.0",
+          "new_default": "1.27.1",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "LIGHTRAG_VERSION",
+          "old_default": "v1.5.4",
+          "new_default": "v1.5.5",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "HERMES_AGENT_VERSION",
+          "old_default": "v2026.7.1",
+          "new_default": "v2026.8.3",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.12",
+      "date": "2026-08-12",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.13",
+      "date": "2026-08-20",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "COGNEE_EMBEDDING_DIM",
+          "old_default": "768",
+          "new_default": "4096",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.14",
+      "date": "2026-08-21",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.3",
+      "date": "2026-07-29",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.4",
+      "date": "2026-07-30",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.5",
+      "date": "2026-08-01",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.6",
+      "date": "2026-08-02",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.7",
+      "date": "2026-08-02",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.8",
+      "date": "2026-08-03",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-ga.9",
+      "date": "2026-08-03",
+      "env_changes": [],
+      "requires_build": true,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-rc1",
+      "date": "2026-07-21",
+      "env_changes": [
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_NETWORK_MODE",
+          "default": "online",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_OFFLINE",
+          "default": "0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_CORPORATE_PROXY",
+          "default": "0",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_REGISTRY_MIRROR",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_PROXY_URL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_PROXY_NOPROXY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_PROXY_HOST_PIN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_PROXY_EGRESS_SET",
+          "default": "standard",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_CORPORATE_DNS",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "RAZZFAZZ_EXTRA_CA_FILE",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MAC_GATEWAY_MASTER_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "MAC_GATEWAY_PORT",
+          "default": "4000",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "LITELLM_VERSION",
+          "default": "main-v1.83.7-stable",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_LOG_EXPORT_ENABLED",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_COLLECTOR_VERSION",
+          "default": "0.130.1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_COLLECTOR_LOGS_OVERLAY",
+          "default": "otel-collector-logs-disabled.yaml",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_EXPORTER_OTLP_ENDPOINT",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_EXPORTER_OTLP_PROTOCOL",
+          "default": "grpc",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_EXPORTER_OTLP_HEADERS",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OTEL_EXPORTER_OTLP_INSECURE",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OWUI_OPENAI_BASE_URLS",
+          "default": "http://gpustack:9090/v1-openai",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "OWUI_OPENAI_KEYS",
+          "default": "${GPUSTACK_API_KEY}",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "NEXT_PUBLIC_ENABLE_AGENT_V2",
+          "default": "false",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_KEEPALIVE",
+          "default": "true",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_KEEPALIVE_IDLE",
+          "default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_KEEPALIVE_INTERVAL",
+          "default": "10",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "REDIS_KEEPALIVE_COUNT",
+          "default": "10",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "API_WEBSOCKET_WORKER_AMOUNT",
+          "default": "1",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "WORKFLOW_GENERATION_TIMEOUT_MS",
+          "default": "180000",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "AGENT_BACKEND_BASE_URL",
+          "default": "http://agent_backend:5050",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "AGENT_BACKEND_RUN_TIMEOUT_SECONDS",
+          "default": "1200",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "AGENT_BACKEND_STREAM_MAX_RECONNECTS",
+          "default": "3",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "AGENT_BACKEND_STREAM_READ_TIMEOUT_SECONDS",
+          "default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_STUB_API_BASE_URL",
+          "default": "http://agent_backend:5050/agent-stub",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_INNER_API_URL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_PLUGIN_DAEMON_URL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_REDIS_URL",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_REDIS_PREFIX",
+          "default": "dify-agent",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_RUN_RETENTION_SECONDS",
+          "default": "259200",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_SHELLCTL_ENTRYPOINT",
+          "default": "http://local_sandbox:5004",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_SHUTDOWN_GRACE_SECONDS",
+          "default": "30",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_SERVER_SECRET_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_INNER_API_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_PLUGIN_DAEMON_API_KEY",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env.dify",
+          "key": "DIFY_AGENT_SHELLCTL_AUTH_TOKEN",
+          "default": "",
+          "comment": ""
+        },
+        {
+          "action": "add",
+          "file": ".env",
+          "key": "COGNEE_KUZU_AUTO_MIGRATE",
+          "default": "true",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-rc2",
+      "date": "2026-07-23",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "AUTHENTIK_VERSION",
+          "old_default": "2026.2.6",
+          "new_default": "2026.5.5",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_VERSION",
+          "old_default": "1.15.0",
+          "new_default": "1.16.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "DIFY_PLUGIN_VERSION",
+          "old_default": "0.6.3-local",
+          "new_default": "0.6.4-local",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "GITEA_VERSION",
+          "old_default": "1.26.4",
+          "new_default": "1.27.0",
+          "comment": ""
+        },
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "SEARXNG_VERSION",
+          "old_default": "2026.7.3-747cec4c2",
+          "new_default": "2026.7.19-6da6eee26",
+          "comment": ""
+        }
+      ],
+      "requires_build": true,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-rc4",
+      "date": "2026-07-26",
+      "env_changes": [
+        {
+          "action": "change_default",
+          "file": ".env",
+          "key": "VALKEY_VERSION",
+          "old_default": "9.1.0",
+          "new_default": "9.1.1",
+          "comment": ""
+        }
+      ],
+      "requires_build": false,
+      "requires_pull": true,
+      "breaking_changes": [],
+      "notes": ""
+    },
+    {
+      "version": "2026.08-rc5",
+      "date": "2026-07-26",
+      "env_changes": [],
+      "requires_build": false,
+      "requires_pull": false,
+      "breaking_changes": [],
+      "notes": ""
+    }
+  ]
+}

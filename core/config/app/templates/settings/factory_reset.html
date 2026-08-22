@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block page_title %}Factory Reset{% endblock %}
+{% block page_content %}
+<div class="page-header">
+    <h1 style="color:#ef4444">Factory Reset</h1>
+    <p class="page-subtitle">Completely reset the rzfz.ai stack to initial state</p>
+</div>
+
+<div style="background:#fee2e2;border:1px solid #fecaca;color:#991b1b;padding:1rem;border-radius:8px;margin-bottom:1.5rem">
+    <strong style="font-size:1rem">This will destroy ALL data.</strong>
+    <ul style="margin:0.5rem 0 0 1.25rem;font-size:0.875rem">
+        <li>All Docker volumes will be deleted (databases, uploads, configurations)</li>
+        <li>All user accounts, chat history, workflows, documents — gone</li>
+        <li>All secrets will need to be regenerated</li>
+        <li>Authentik SSO configuration will be reset</li>
+        <li>Backups in the <code>backups/</code> directory are preserved</li>
+        <li>The <code>.env</code> file is preserved</li>
+    </ul>
+</div>
+
+<div class="detail-section">
+    <div class="detail-section-title">Confirm Factory Reset</div>
+    <form method="POST" action="{{ url_for('settings.factory_reset_execute') }}">
+        <div class="form-group">
+            <label class="form-label">Admin password</label>
+            <input type="password" name="password" class="apply-input" required style="max-width:300px">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Type <strong>DELETE</strong> to confirm</label>
+            <input type="text" name="confirmation" class="apply-input" required style="max-width:300px" autocomplete="off" placeholder="DELETE">
+        </div>
+        <button type="submit" class="btn btn-primary" style="background:#ef4444;margin-top:0.5rem"
+                onclick="return confirm('FINAL WARNING: This will destroy all data. Are you absolutely sure?')">
+            Execute Factory Reset
+        </button>
+    </form>
+</div>
+{% endblock %}

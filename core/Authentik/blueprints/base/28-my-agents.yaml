@@ -1,0 +1,52 @@
+version: 1
+metadata:
+  name: "Module - MCP & Agent Manager"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # M020 S08 — single static "My Agents" Application
+  # #36/#61 — UNIFIED "MCP & Agent Manager"
+  # ==========================================
+  # ONE user-facing application for BOTH per-user agents AND per-user MCP
+  # integrations. The slug stays `my-agents` (stable app id + policy
+  # bindings + start-portal tile), but the display name is now
+  # "MCP & Agent Manager": the same tile is the single launcher for the
+  # combined dashboard at AGENTS_DOMAIN, where the user manages their
+  # running hermes / moltis / coding-tools instances AND reaches their
+  # personal MCP integrations (linked to the MCP dashboard).
+  #
+  # The standalone hidden "MCP Manager" application (blueprint
+  # 31-mcp-manager.yaml, slug `mcp`) is RETIRED — the mcp-manager backend
+  # stays reachable + SSO-gated on MCP_DOMAIN via its forward-auth provider
+  # (kept, but no separate user-facing app/tile).
+  #
+  # No new provider needed — the existing `Caddy Forward Auth Provider for
+  # Agents` from 26-agents.yaml already gates AGENTS_DOMAIN.
+  - model: authentik_core.application
+    identifiers:
+      slug: my-agents
+    attrs:
+      name: "Agent Manager"
+      group: "2 AI Assistants"
+      # #36/#61: NO provider on this launcher app. An Authentik provider is
+      # unique-per-application; the "Caddy Forward Auth Provider for Agents"
+      # (which gates agents.${MAIN_DOMAIN}) is already owned by the `agents`
+      # application. This `my-agents` app is purely the user-facing launcher
+      # tile (meta_launch_url=blank://blank → real tile is the start-portal
+      # one; gating of the AGENTS_DOMAIN traffic is done by the `agents`
+      # app's provider). The earlier `provider: !Find [...Agents]` line here
+      # ALWAYS failed serializer validation ("Application with this provider
+      # already exists") — which is why this app's name/icon never updated
+      # from a blueprint edit until now (#36). Dropping it lets the blueprint
+      # apply cleanly.
+      meta_launch_url: "blank://blank"
+      meta_description: "Provision and manage your personal AI agents (Hermes, Moltis, OpenCode, GSD-2) and connect your own MCP integrations."
+      meta_publisher: "razzfazz.ai"
+      # #36: use the MCP integration/connector icon (razzfazz-ai_mcp_icon.png)
+      # — the previous razzfazz-ai_agent_icon.png never existed in
+      # core/Authentik/media/ (broken /branding path). The mcp icon fits the
+      # combined MCP + Agent surface.
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_mcp_icon.png"
+      open_in_new_tab: true
+      policy_engine_mode: any

@@ -1,0 +1,63 @@
+version: 1
+metadata:
+  name: "Base - Groups"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Chat Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Workflow Automation Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai LLM Management Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Docker Management Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Git Users"
+  # Per-module user groups added in 2026.05 (GA blocker fix).
+  # Cognee Users, RAG Users, Paperless Users, and Observability Users
+  # remain inline in their per-module blueprints (10-lightrag.yaml,
+  # 11-cognee.yaml, 19-paperless-ngx.yaml, 27-observability.yaml).
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai AI Agents Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Crawl4AI Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Docling Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Infisical Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Matrix Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Onyx Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai OpenHands Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Paperclip Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Stirling-PDF Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Vaultwarden Users"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai User Admins"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Super Admins"
+    attrs:
+      is_superuser: true

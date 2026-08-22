@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ agent_label }} — razzfazz.ai</title>
+    <!-- H1: xterm@5.3.0 + xterm-addon-fit@0.8.0 vendored locally (no CDN) for
+         air-gap + supply-chain safety. Files under web/static/vendor/, COPYd
+         into the image by the Dockerfile. -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm.min.css') }}" />
+    <script src="{{ url_for('static', filename='vendor/xterm.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'JetBrains Mono','Fira Code',monospace; background:#0f0f0f; color:#e0e0e0;
+               display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+        .topbar { display:flex; align-items:center; justify-content:space-between; padding:.5rem 1rem;
+                  background:#151515; border-bottom:1px solid #2a2a2a; flex-shrink:0; }
+        .topbar-left { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; }
+        .logo { color:#CD1719; font-size:1rem; font-weight:bold; letter-spacing:.05em; }
+        .pill { display:inline-flex; align-items:center; gap:.3rem; background:#1e1e1e; border:1px solid #333;
+                border-radius:4px; padding:.2rem .55rem; font-size:.7rem; color:#999; }
+        .pill .dot { width:6px; height:6px; border-radius:50%; background:#555; }
+        .pill .dot.ok { background:#4caf50; } .pill .dot.warn { background:#ff9800; } .pill .dot.err { background:#f44336; }
+        .pill a { color:#888; text-decoration:none; } .pill a:hover { color:#ccc; }
+        .topbar-right { display:flex; align-items:center; gap:.5rem; }
+        .btn { background:#1e1e1e; border:1px solid #383838; color:#ccc; padding:.25rem .65rem; border-radius:4px;
+               cursor:pointer; font-size:.72rem; font-family:inherit; transition:background .15s; }
+        .btn:hover { background:#2a2a2a; }
+        .btn.primary { background:#2a0a0a; border-color:#CD1719; color:#CD1719; } .btn.primary:hover { background:#3a1010; }
+        .tabbar { display:flex; align-items:center; gap:.25rem; padding:.3rem 1rem 0; background:#111;
+                  border-bottom:1px solid #222; flex-shrink:0; overflow-x:auto; }
+        .tab { padding:.3rem .85rem; font-size:.72rem; color:#777; border:1px solid transparent; border-bottom:none;
+               border-radius:4px 4px 0 0; cursor:pointer; background:transparent; font-family:inherit; white-space:nowrap; }
+        .tab:hover { color:#bbb; background:#1a1a1a; }
+        .tab.active { background:#0f0f0f; border-color:#333; color:#e0e0e0; }
+        .tab .tab-close { margin-left:.4rem; color:#555; font-size:.7rem; } .tab .tab-close:hover { color:#f44336; }
+        .tab-add { color:#555; padding:.3rem .6rem; cursor:pointer; font-size:.85rem; border:1px solid transparent;
+                   border-radius:4px 4px 0 0; background:transparent; font-family:inherit; }
+        .tab-add:hover { color:#999; background:#1a1a1a; }
+        .term-area { flex:1; display:flex; flex-direction:column; overflow:hidden; background:#0a0a0a; padding:4px; }
+        .term-pane { flex:1; display:none; } .term-pane.active { display:flex; flex-direction:column; }
+        .xterm { flex:1; } .xterm-viewport { height:100% !important; }
+        .statusbar { display:flex; align-items:center; gap:1rem; padding:.2rem 1rem; background:#CD1719;
+                     font-size:.65rem; color:rgba(255,255,255,.9); flex-shrink:0; }
+        .statusbar .sep { opacity:.4; }
+        /* modal */
+        .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center;
+                    justify-content:center; z-index:50; }
+        .modal-bg.open { display:flex; }
+        .modal { background:#161616; border:1px solid #333; border-radius:8px; padding:1.25rem; width:min(560px,92vw);
+                 max-height:88vh; overflow:auto; }
+        .modal h2 { font-size:.95rem; margin-bottom:.9rem; color:#e0e0e0; }
+        .modal label { display:block; font-size:.72rem; color:#aaa; margin:.7rem 0 .25rem; }
+        .modal select, .modal input[type=text], .modal input[type=password] { width:100%; background:#0d0d0d;
+                 border:1px solid #333; color:#e0e0e0; padding:.45rem .55rem; border-radius:4px; font-family:inherit; font-size:.78rem; }
+        .modal .row { display:flex; gap:.5rem; margin-top:1rem; justify-content:flex-end; }
+        .radio-row { display:flex; gap:.5rem; margin-top:.3rem; flex-wrap:wrap; }
+        .radio-row label { display:inline-flex; align-items:center; gap:.35rem; background:#0d0d0d; border:1px solid #333;
+                 padding:.35rem .6rem; border-radius:4px; margin:0; cursor:pointer; font-size:.74rem; color:#ccc; }
+        .install-item { border:1px solid #2a2a2a; border-radius:6px; padding:.6rem .7rem; margin-bottom:.6rem; background:#111; }
+        .install-item .name { font-size:.78rem; color:#e0e0e0; font-weight:600; }
+        .install-item .note { font-size:.68rem; color:#888; margin:.3rem 0; }
+        .install-item code { display:block; background:#0a0a0a; border:1px solid #262626; border-radius:4px;
+                 padding:.4rem .5rem; font-size:.72rem; color:#8fd; word-break:break-all; }
+        .hint { font-size:.68rem; color:#777; margin-top:.4rem; }
+        .gitea-repo { display:flex; justify-content:space-between; align-items:center; padding:.35rem .5rem;
+                 border:1px solid #262626; border-radius:4px; margin-bottom:.35rem; font-size:.74rem; }
+        /* FEATURE 1: forwarded-port preview links in the Ports pill */
+        #ports-list a.port-link { color:#8fd; text-decoration:none; margin-left:.4rem;
+                 padding:.05rem .3rem; border:1px solid #2a4; border-radius:3px; background:#0d1a0d; }
+        #ports-list a.port-link:hover { background:#132; color:#bfe; }
+        #ports-pill .none { color:#666; margin-left:.35rem; }
+    </style>
+</head>
+<body>
+<div class="topbar">
+    <div class="topbar-left">
+        <span class="logo">⌨ {{ agent_label }}</span>
+        {% if llm_base_url %}
+        <span class="pill"><span class="dot ok"></span>model {{ llm_model or 'local' }}</span>
+        {% endif %}
+        <span class="pill"><span class="dot {{ 'ok' if gitea_ok else 'warn' }}"></span>
+            {% if gitea_external_url %}<a href="{{ gitea_external_url }}" target="_blank">Gitea</a>{% else %}Gitea{% endif %}
+        </span>
+        <span class="pill" title="Select text with the mouse to copy it to your clipboard. Paste with Cmd+V (Mac) or Ctrl+Shift+V (Linux).">📋 select to copy · Cmd/Ctrl+V paste</span>
+        <!-- FEATURE 1: forwarded-port preview. Auto-refreshes; each LISTENing
+             dev-server port becomes a click-to-open preview link. -->
+        <span class="pill" id="ports-pill" title="Web servers you start inside this agent (e.g. npm run dev) appear here — click to open in a new tab. Bind the server to 0.0.0.0 (NOT 127.0.0.1/localhost) or the preview can't reach it.">
+            <span class="dot"></span>🔌 Ports<span id="ports-list"></span>
+        </span>
+    </div>
+    <div class="topbar-right">
+        <button class="btn primary" onclick="openNewSession()">+ New session</button>
+        <button class="btn" onclick="openClone()">Clone repo</button>
+        {% if agent_kind == 'user-defined' %}
+        <button class="btn" onclick="openInstall()">Suggested installers</button>
+        {% endif %}
+    </div>
+</div>
+
+<div class="tabbar" id="tabbar">
+    <button class="tab-add" onclick="openNewSession()">＋</button>
+</div>
+
+<div class="term-area" id="term-area"></div>
+
+<div class="statusbar">
+    <span>{{ agent_kind }}</span><span class="sep">|</span>
+    <span>workspace {{ workspace }}</span><span class="sep">|</span>
+    <span id="sess-count">0 sessions</span><span class="sep">|</span>
+    <span>uptime {{ uptime }}</span>
+</div>
+
+<!-- ── New session modal ── -->
+<div class="modal-bg" id="ns-modal">
+    <div class="modal">
+        <h2>New session</h2>
+        <label>Repository (working directory)</label>
+        <select id="ns-repo"></select>
+        <div class="hint">Sessions are tmux-backed and survive a container restart.</div>
+        {% if supports_model_config %}
+        <label>Model / authentication</label>
+        <div class="radio-row">
+            <label><input type="radio" name="ns-auth" value="local" checked onchange="nsAuthChange()"> Local model (default)</label>
+            <label><input type="radio" name="ns-auth" value="own-key" onchange="nsAuthChange()"> Own API key</label>
+            <label><input type="radio" name="ns-auth" value="subscription" onchange="nsAuthChange()"> Own subscription</label>
+        </div>
+        <div id="ns-model-wrap">
+            <label>Model</label>
+            <select id="ns-model">
+                {% for m in model_aliases %}<option value="{{ m }}"{% if m == llm_model %} selected{% endif %}>{{ m }}</option>{% endfor %}
+            </select>
+        </div>
+        <div id="ns-key-wrap" style="display:none;">
+            <label>Your API key (stored in your persistent volume)</label>
+            <input type="password" id="ns-key" placeholder="sk-...">
+        </div>
+        <div id="ns-sub-hint" class="hint" style="display:none;">
+            {% if agent_kind == 'codex' %}Runs <code style="display:inline">codex login --device-auth</code> in the session so you can sign in with your ChatGPT/OpenAI subscription.{% else %}Sign in inside the session once it opens.{% endif %}
+        </div>
+        {% endif %}
+        <div class="row">
+            <button class="btn" onclick="closeModal('ns-modal')">Cancel</button>
+            <button class="btn primary" onclick="createSession()">Create</button>
+        </div>
+    </div>
+</div>
+
+<!-- ── Clone repo modal ── -->
+<div class="modal-bg" id="clone-modal">
+    <div class="modal">
+        <h2>Clone repository</h2>
+        <label>Git URL (https://…)</label>
+        <input type="text" id="clone-url" placeholder="https://github.com/user/repo.git">
+        <label>Username (optional — blank uses the token as the username)</label>
+        <input type="text" id="clone-user" placeholder="your git username" autocomplete="off">
+        <label>Your git token / password (optional, for private repos)</label>
+        <input type="password" id="clone-token" placeholder="ghp_… / gitea PAT">
+        {% if gitea_external_url %}
+        <div style="border-top:1px solid #262626; margin:1rem 0 0;"></div>
+        <h2 style="margin-top:1rem;">Clone from Gitea</h2>
+        <div class="hint" id="gitea-status"></div>
+        <div id="gitea-token-row" style="display:none;">
+            <label>Store your Gitea token (needed once)</label>
+            <input type="password" id="gitea-token" placeholder="Gitea personal access token">
+            <div class="hint">Create the PAT in Gitea → Settings → Applications with <b>both</b>
+                <code>read:user</code> <b>and</b> <code>read:repository</code> scopes — listing your
+                repos needs <code>read:user</code>, cloning needs <code>read:repository</code>.</div>
+            <div class="row"><button class="btn" onclick="saveGiteaToken()">Save token</button></div>
+        </div>
+        <div id="gitea-repos"></div>
+        {% endif %}
+        <div class="row">
+            <button class="btn" onclick="closeModal('clone-modal')">Cancel</button>
+            <button class="btn primary" onclick="doClone()">Clone URL</button>
+        </div>
+    </div>
+</div>
+
+{% if agent_kind == 'user-defined' %}
+<!-- ── Suggested installers modal ── -->
+<div class="modal-bg" id="install-modal">
+    <div class="modal">
+        <h2>Suggested agent installers</h2>
+        <div class="hint">We ship none of these — copy a command into a session to install it yourself.
+            Your install + its config persist across restarts (persistent volume).</div>
+        <div style="margin-top:.8rem;">
+            {% for s in install_suggestions %}
+            <div class="install-item">
+                <div class="name">{{ s.name }}</div>
+                <div class="note">{{ s.note }}</div>
+                <code data-cmd="{{ s.cmd }}" onclick="copyText(this)">{{ s.cmd }}</code>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="row"><button class="btn" onclick="closeModal('install-modal')">Close</button></div>
+    </div>
+</div>
+{% endif %}
+
+<script>
+const AGENT_KIND = {{ agent_kind|tojson }};
+const SUPPORTS_MODEL = {{ supports_model_config|tojson }};
+const tabs = {};           // name → {pane, term, fitAddon, ws, repo}
+let repos = {{ repos|tojson }};
+
+// ── #167: editable tab / session names ───────────────────────────────────────
+// Double-click a tab to rename it; the custom label persists in localStorage
+// (per-instance — each agent is its own subdomain/origin) so it survives a
+// reload/re-attach. A blank rename reverts to the default `s<N> · repo` label.
+const TAB_LABELS_KEY = 'rzfz-coding-tab-labels';
+function loadTabLabels() {
+    try { return JSON.parse(localStorage.getItem(TAB_LABELS_KEY) || '{}') || {}; }
+    catch (_) { return {}; }
+}
+function saveTabLabel(name, label) {
+    const m = loadTabLabels();
+    if (label) m[name] = label; else delete m[name];
+    try { localStorage.setItem(TAB_LABELS_KEY, JSON.stringify(m)); } catch (_) {}
+}
+function tabDisplay(name, repo) {
+    const custom = loadTabLabels()[name];
+    if (custom) return custom;
+    return name + (repo && repo !== '(workspace root)' ? ' · ' + repo : '');
+}
+function renameTab(name) {
+    const cur = loadTabLabels()[name] || '';
+    const v = prompt('Rename tab "' + name + '" (leave blank for the default):', cur);
+    if (v === null) return;                       // cancelled
+    saveTabLabel(name, v.trim().slice(0, 40));
+    const span = document.querySelector('#tab-' + name + ' .tab-label');
+    if (span) span.textContent = tabDisplay(name, tabs[name] && tabs[name].repo);
+}
+
+function buildWsUrl(session) {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return proto + '//' + location.host + '/terminal?session=' + encodeURIComponent(session);
+}
+
+function attachTab(name, repo) {
+    if (tabs[name]) { activateTab(name); return; }
+    const tabBtn = document.createElement('button');
+    tabBtn.className = 'tab'; tabBtn.id = 'tab-' + name;
+    tabBtn.title = 'Double-click to rename';
+    // #167: label lives in its own span so a rename only touches the label,
+    // never the close button.
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'tab-label';
+    labelSpan.textContent = tabDisplay(name, repo);
+    tabBtn.appendChild(labelSpan);
+    const close = document.createElement('span');
+    close.className = 'tab-close'; close.textContent = '✕';
+    close.onclick = (e) => killSession(name, e);
+    tabBtn.appendChild(close);
+    tabBtn.onclick = () => activateTab(name);
+    tabBtn.ondblclick = (e) => { e.preventDefault(); renameTab(name); };
+    document.getElementById('tabbar').insertBefore(tabBtn, document.querySelector('.tab-add'));
+
+    const pane = document.createElement('div');
+    pane.className = 'term-pane'; pane.id = 'pane-' + name;
+    document.getElementById('term-area').appendChild(pane);
+
+    const term = new Terminal({
+        theme: { background:'#0a0a0a', foreground:'#e0e0e0', cursor:'#CD1719', selectionBackground:'#CD171940' },
+        fontFamily: "'JetBrains Mono','Fira Code',monospace", fontSize:13, cursorBlink:true, scrollback:8000,
+        // allowProposedApi: needed for parser.registerOscHandler (the OSC 52 path).
+        allowProposedApi: true,
+    });
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon); term.open(pane);
+
+    // ── clipboard: copy + paste (#36 / PR #84 — corrected) ───────────────────
+    // The terminal is a tmux pane with `mouse on`, so a trackpad/mouse DRAG is
+    // captured by TMUX (copy-mode selection), NOT by xterm.js — xterm's own
+    // onSelectionChange / getSelection() never fire for the real drag. So we
+    // wire the OSC 52 clipboard path: tmux.conf has `set-clipboard on`, which
+    // makes tmux emit an `ESC ] 52 ; c ; <base64> BEL` escape when the drag-end
+    // copy-selection runs. We register an OSC 52 handler on xterm's parser and
+    // write the decoded text to navigator.clipboard. Result: select-with-mouse →
+    // on the clipboard, WITHOUT disabling mouse-scroll. (We register the handler
+    // directly rather than vendoring @xterm/addon-clipboard: that scoped addon
+    // peer-depends on @xterm/xterm ^6.x and the legacy xterm-addon-clipboard is
+    // gone from npm — a version-mismatched vendored addon would be riskier than
+    // this ~10-line dependency-free handler, which is exactly what the addon does
+    // internally. Base64 via browser-native atob; secure context = OK behind Caddy.)
+    const writeClip = (t) => { try { navigator.clipboard.writeText(t); } catch (_) {} };
+    term.parser.registerOscHandler(52, (data) => {
+        // data = "<selection>;<base64>"  (selection is c / p / etc — ignore it)
+        const semi = data.indexOf(';');
+        if (semi === -1) return true;
+        const b64 = data.slice(semi + 1);
+        if (b64 === '?') return true;              // query form — nothing to write
+        try {
+            const bin = atob(b64);
+            // atob gives a binary string; decode as UTF-8 for multibyte-safe text.
+            const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+            writeClip(new TextDecoder().decode(bytes));
+        } catch (_) { /* malformed OSC 52 — ignore */ }
+        return true;                                // handled
+    });
+
+    // Keyboard copy/paste — cover BOTH idioms:
+    //   * Mac:   Cmd+C / Cmd+V  (metaKey). Cmd+C was never SIGINT, safe to bind.
+    //   * Linux: Ctrl+Shift+C / Ctrl+Shift+V. Plain Ctrl+C stays SIGINT.
+    // These handle the Shift+drag / xterm-native-selection case (when the user
+    // holds Shift to bypass tmux mouse capture and select via the browser).
+    const copySelection = () => {
+        if (term.hasSelection()) {
+            const sel = term.getSelection();
+            if (sel) { writeClip(sel); }
+            return true;
+        }
+        return false;
+    };
+    const pasteClipboard = () => {
+        try {
+            navigator.clipboard.readText().then((t) => { if (t) term.paste(t); }).catch(() => {});
+        } catch (_) {}
+    };
+    term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== 'keydown') return true;
+        const isCopy  = (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) ||
+                        (e.metaKey && !e.ctrlKey && (e.key === 'C' || e.key === 'c'));
+        const isPaste = (e.ctrlKey && e.shiftKey && (e.key === 'V' || e.key === 'v')) ||
+                        (e.metaKey && !e.ctrlKey && (e.key === 'V' || e.key === 'v'));
+        if (isCopy)  { copySelection();  e.preventDefault(); return false; }
+        if (isPaste) { pasteClipboard(); e.preventDefault(); return false; }
+        return true;
+    });
+    // Also copy any xterm-native selection when it changes (Shift+drag case).
+    term.onSelectionChange(() => { copySelection(); });
+    // Right-click: copy the selection if any, else paste.
+    pane.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (!copySelection()) pasteClipboard();
+    });
+
+    const ws = new WebSocket(buildWsUrl(name));
+    ws.onopen = () => { fitAddon.fit(); sendResize(ws, term); };
+    ws.onmessage = (e) => {
+        const d = typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data);
+        // Server keepalive control frames (#36 / PR #84): the server sends
+        // {"type":"ping"} during idle-input periods so proxies keep the socket
+        // warm, and {"type":"pong"} in reply to our ping. These are NOT PTY
+        // output — swallow them (exact-string match so a user cat-ing JSON is
+        // unaffected) instead of printing the JSON into the terminal.
+        if (d === '{"type": "ping"}' || d === '{"type":"ping"}' ||
+            d === '{"type": "pong"}' || d === '{"type":"pong"}') return;
+        term.write(d);
+    };
+    ws.onclose = () => { term.write('\r\n\x1b[33m[detached — reload to re-attach]\x1b[0m\r\n');
+        const b = document.getElementById('tab-' + name); if (b) b.style.opacity = '0.5'; };
+    ws.onerror = () => term.write('\r\n\x1b[31m[WebSocket error]\x1b[0m\r\n');
+    term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'input', data:d})); });
+
+    const ka = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'ping'})); else clearInterval(ka); }, 45000);
+    ws.addEventListener('close', () => clearInterval(ka));
+    const ro = new ResizeObserver(() => { fitAddon.fit(); sendResize(ws, term); }); ro.observe(pane);
+
+    tabs[name] = {pane, term, fitAddon, ws, repo};
+    activateTab(name);
+    updateCount();
+}
+
+function sendResize(ws, term) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'resize', cols:term.cols, rows:term.rows})); }
+
+function activateTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.term-pane').forEach(p => p.classList.remove('active'));
+    document.getElementById('tab-' + name)?.classList.add('active');
+    const pane = document.getElementById('pane-' + name);
+    if (pane) { pane.classList.add('active'); const t = tabs[name];
+        if (t) { t.fitAddon.fit(); sendResize(t.ws, t.term); t.term.focus(); } }
+}
+
+function killSession(name, e) {
+    e && e.stopPropagation();
+    if (!confirm('Kill session ' + name + '? Its shell history is lost (files persist).')) return;
+    fetch('/session/kill', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})})
+        .then(() => { const t = tabs[name]; if (t) { try{t.ws.close();}catch(_){} try{t.term.dispose();}catch(_){} t.pane.remove(); delete tabs[name]; }
+            saveTabLabel(name, '');  // #167: don't let a reused s<N> inherit a stale custom label
+            document.getElementById('tab-' + name)?.remove(); updateCount();
+            const rest = Object.keys(tabs); if (rest.length) activateTab(rest[rest.length-1]); });
+}
+
+function updateCount() { document.getElementById('sess-count').textContent = Object.keys(tabs).length + ' session' + (Object.keys(tabs).length===1?'':'s'); }
+
+// ── modals ──
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function openNewSession() {
+    const sel = document.getElementById('ns-repo'); sel.innerHTML = '';
+    repos.forEach(r => { const o = document.createElement('option'); o.value = r; o.textContent = r; sel.appendChild(o); });
+    document.getElementById('ns-modal').classList.add('open');
+}
+function nsAuthChange() {
+    if (!SUPPORTS_MODEL) return;
+    const v = document.querySelector('input[name=ns-auth]:checked').value;
+    document.getElementById('ns-model-wrap').style.display = (v === 'local' || v === 'own-key') ? 'block' : 'none';
+    document.getElementById('ns-key-wrap').style.display = (v === 'own-key') ? 'block' : 'none';
+    document.getElementById('ns-sub-hint').style.display = (v === 'subscription') ? 'block' : 'none';
+}
+function createSession() {
+    const repo = document.getElementById('ns-repo').value;
+    let body = { repo, launch: AGENT_KIND !== 'user-defined' };
+    if (SUPPORTS_MODEL) {
+        const auth = document.querySelector('input[name=ns-auth]:checked').value;
+        body.auth_mode = auth;
+        if (auth === 'own-key') body.api_key = document.getElementById('ns-key').value;
+        if (auth === 'local' || auth === 'own-key') body.model = document.getElementById('ns-model').value;
+    }
+    fetch('/session', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})
+        .then(r => r.json()).then(d => {
+            if (d.error) { alert('Create failed: ' + d.error); return; }
+            closeModal('ns-modal'); attachTab(d.name, d.repo);
+        }).catch(e => alert('Create failed: ' + e));
+}
+
+function openClone() {
+    document.getElementById('clone-modal').classList.add('open');
+    {% if gitea_external_url %}refreshGitea();{% endif %}
+}
+function doClone() {
+    const url = document.getElementById('clone-url').value;
+    const username = document.getElementById('clone-user').value;
+    const token = document.getElementById('clone-token').value;
+    if (!url) { alert('Enter a git URL'); return; }
+    fetch('/clone', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url, username, token})})
+        .then(r => r.json()).then(d => {
+            if (d.error) { alert('Clone failed: ' + d.error); return; }
+            repos = d.repos; alert('Cloned. It is now available as a session working dir.'); closeModal('clone-modal');
+        }).catch(e => alert('Clone failed: ' + e));
+}
+
+{% if gitea_external_url %}
+function refreshGitea() {
+    fetch('/gitea/repos').then(r => r.json()).then(d => {
+        const status = document.getElementById('gitea-status');
+        const tokRow = document.getElementById('gitea-token-row');
+        const list = document.getElementById('gitea-repos');
+        list.innerHTML = '';
+        if (d.error) {
+            status.textContent = 'Gitea: ' + d.error;
+            tokRow.style.display = 'block';
+            return;
+        }
+        tokRow.style.display = 'none';
+        status.textContent = d.repos.length + ' repo(s) available';
+        d.repos.forEach(r => {
+            const row = document.createElement('div'); row.className = 'gitea-repo';
+            const name = document.createElement('span'); name.textContent = r.full_name + (r.private ? ' 🔒' : '');
+            const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = 'Clone';
+            btn.onclick = () => giteaClone(r.full_name);
+            row.appendChild(name); row.appendChild(btn); list.appendChild(row);
+        });
+    });
+}
+function saveGiteaToken() {
+    const token = document.getElementById('gitea-token').value;
+    if (!token) return;
+    fetch('/gitea/token', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token})})
+        .then(() => refreshGitea());
+}
+function giteaClone(full_name) {
+    fetch('/gitea/clone', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({full_name})})
+        .then(r => r.json()).then(d => {
+            if (d.error) { alert('Clone failed: ' + d.error); return; }
+            repos = d.repos; alert('Cloned ' + full_name);
+        });
+}
+{% endif %}
+
+{% if agent_kind == 'user-defined' %}
+function openInstall() { document.getElementById('install-modal').classList.add('open'); }
+// Copy an installer command to the clipboard. Reads the STABLE command from
+// data-cmd (falling back to the DOM text, captured once and remembered on the
+// element) — never from the possibly-already-mutated visible text. A per-element
+// timeout is stored on the node and cleared on re-click, so a double-click can't
+// (a) copy the literal "copied" label nor (b) leave the label stuck. Same logic
+// for every installer line (was inconsistent: some lines copied "copied" and
+// never reverted). (#36 / PR #84)
+function copyText(el) {
+    if (el.dataset.origText === undefined) el.dataset.origText = el.textContent;
+    const cmd = el.dataset.cmd !== undefined ? el.dataset.cmd : el.dataset.origText;
+    navigator.clipboard.writeText(cmd).then(() => {
+        if (el._copyTimer) clearTimeout(el._copyTimer);
+        el.textContent = '✓ copied';
+        el._copyTimer = setTimeout(() => { el.textContent = el.dataset.origText; el._copyTimer = null; }, 1500);
+    }).catch(() => {});
+}
+{% endif %}
+
+// ── FEATURE 1: forwarded-port preview ────────────────────────────────────────
+// Poll /api/ports and render each LISTENing dev-server port as a click-to-open
+// preview link. The link points at /__port/<port>/ on THIS per-instance
+// subdomain, which the agent-manager proxy reverse-proxies (owner-only, same
+// auth path as the terminal) to http://<this-container>:<port>. So the moment
+// the user runs e.g. `npm run dev` on :3000, a `3000 →` link appears.
+function portPreviewUrl(port) {
+    return location.protocol + '//' + location.host + '/__port/' + port + '/';
+}
+function refreshPorts() {
+    fetch('/api/ports').then(r => r.json()).then(d => {
+        const list = document.getElementById('ports-list');
+        if (!list) return;
+        const ports = (d.ports || []).map(p => p.port);
+        if (!ports.length) { list.innerHTML = '<span class="none">none</span>'; return; }
+        list.innerHTML = '';
+        ports.forEach(p => {
+            const a = document.createElement('a');
+            a.className = 'port-link';
+            a.href = portPreviewUrl(p);
+            a.target = '_blank';
+            a.rel = 'noopener';
+            a.textContent = p + ' →';
+            a.title = 'Open the server on port ' + p + ' in a new tab';
+            list.appendChild(a);
+        });
+    }).catch(() => {});
+}
+setInterval(refreshPorts, 4000);
+window.addEventListener('load', refreshPorts);
+
+// ── on load: re-attach existing tmux sessions (restart persistence), else open one ──
+window.addEventListener('load', () => {
+    fetch('/api/state').then(r => r.json()).then(s => {
+        repos = s.repos;
+        if (s.sessions.length) {
+            s.sessions.forEach(sess => attachTab(sess.name, sess.repo));
+        } else {
+            // First launch: create a default session (auto-launches the agent
+            // for coding agents; a bare shell for user-defined).
+            fetch('/session', {method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({repo:'(workspace root)', launch: AGENT_KIND !== 'user-defined', auth_mode:'local', model: s.default_model || ''})})
+                .then(r => r.json()).then(d => { if (!d.error) attachTab(d.name, d.repo); });
+        }
+    });
+});
+</script>
+</body>
+</html>

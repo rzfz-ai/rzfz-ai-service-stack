@@ -1,0 +1,317 @@
+# razzfazz.ai Start Portal — tile manifest (M028 S02 + S11 refinements)
+#
+# Visibility rule: a tile renders iff
+#     (is_admin OR required_group == "any" OR user has required_group)
+#     AND
+#     (profile == "core" OR profile in COMPOSE_PROFILES)
+#
+# Categories sort by their numeric prefix; tiles within a category sort by
+# `order` (default 100), then `id`. **S11 #13** the numeric prefix is the
+# manifest-side SORT KEY only — the portal renders the heading without the
+# digit ("1 Productivity" → "Productivity").
+#
+# Live agent tiles (from agent-manager /api/instances) are **emitted into
+# "2 AI Assistants" alongside `my-agents`** (S11 #6) — no separate "0 My
+# Running Agents" category.
+#
+# Always-on tiles (rendered by app.py with hardcoded URLs):
+#   start-portal — this page (a self-link is meaningless)
+#
+# `${VAR}` placeholders are substituted from the container's env at render
+# time. MAIN_DOMAIN and AGENTS_DOMAIN are guaranteed.
+#
+# Icon names map to /static/icons/razzfazz-ai_<icon>_icon.png (which the
+# Dockerfile copies in from core/Authentik/media/ at build time). Special
+# value `__svg_manage_auth__` renders an inline SVG glyph (S11 #11).
+#
+# `description:` is shown as a tooltip on hover (S11 #8). English only.
+
+tiles:
+  # ──────────────────────────────────────────────────────────────────────
+  # Always-on essentials
+  # ──────────────────────────────────────────────────────────────────────
+  - id: help
+    name: Help Center
+    category: "1 Productivity"
+    icon: help
+    url: "https://help.${MAIN_DOMAIN}"
+    description: "Documentation and how-to guides for every module in the stack."
+    required_group: any
+    profile: core
+    order: 1
+    default_pinned: true
+
+  - id: manage-auth
+    name: My Profile
+    category: "5 Administration"
+    icon: profile                     # razzfazz-ai_profile_icon.png
+    url: "https://auth.${MAIN_DOMAIN}/if/user/"
+    description: "Manage your profile — change password, set up MFA (TOTP / WebAuthn), review active sessions."
+    required_group: any
+    profile: core
+    order: 1
+
+  - id: licenses
+    name: Licenses
+    category: "5 Administration"
+    icon: license
+    url: "https://license.${MAIN_DOMAIN}"
+    description: "Open-source licenses and attribution for the components in this stack."
+    required_group: any
+    profile: core
+    order: 90
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 1 Productivity
+  # ──────────────────────────────────────────────────────────────────────
+  - id: chat
+    name: Chat
+    category: "1 Productivity"
+    icon: chat
+    url: "https://chat.${MAIN_DOMAIN}"
+    description: "Open WebUI — chat with the local LLMs, switch models, manage knowledge collections."
+    required_group: "razzfazz.ai Chat Users"
+    profile: chat
+    order: 10
+    default_pinned: true
+
+  - id: workflow-automation
+    name: Workflow Automation
+    category: "1 Productivity"
+    icon: workflow
+    url: "https://dify.${MAIN_DOMAIN}"
+    description: "Dify — visual LLM workflow builder, RAG agents, prompt orchestration."
+    # M030-followup 2026-05-12: was "razzfazz.ai Workflow Users" — wrong;
+    # the canonical Authentik group is "Workflow Automation Users" per
+    # core/Authentik/apply-policy-bindings.py:109. Eric Pieber on prod
+    # had the correct group but didn't see this tile because of the typo.
+    required_group: "razzfazz.ai Workflow Automation Users"
+    profile: dify
+    order: 20
+
+  - id: documents
+    name: Documents
+    category: "1 Productivity"
+    icon: documents
+    url: "https://paperless.${MAIN_DOMAIN}"
+    description: "paperless-ngx — scan, OCR, archive, search documents."
+    required_group: "razzfazz.ai Paperless Users"
+    profile: paperless-ngx
+    order: 30
+
+  - id: matrix
+    name: Matrix
+    category: "1 Productivity"
+    icon: matrix
+    url: "https://matrix.${MAIN_DOMAIN}"
+    description: "Element Web — encrypted Matrix chat backed by your local Synapse server."
+    required_group: "razzfazz.ai Matrix Users"
+    profile: matrix
+    order: 40
+
+  - id: pdf-tools
+    name: PDF Tools
+    category: "1 Productivity"
+    icon: pdf
+    url: "https://pdf.${MAIN_DOMAIN}"
+    description: "Stirling-PDF — 50+ operations: split, merge, OCR, redact, sign."
+    required_group: "razzfazz.ai Stirling-PDF Users"
+    profile: stirling-pdf
+    order: 50
+
+  - id: search
+    name: Search
+    category: "1 Productivity"
+    icon: search
+    url: "https://onyx.${MAIN_DOMAIN}"
+    description: "Onyx — AI-powered enterprise search across your documents and connectors."
+    required_group: "razzfazz.ai Onyx Users"
+    profile: onyx
+    order: 60
+
+  - id: crawl4ai
+    name: Crawl4AI
+    category: "1 Productivity"
+    icon: search
+    url: "https://crawl4ai.${MAIN_DOMAIN}/playground"
+    description: "Crawl4AI — RAG-friendly web crawler with browser automation and Markdown extraction."
+    required_group: "razzfazz.ai Crawl4AI Users"
+    profile: crawl4ai
+    order: 70
+
+  - id: password-manager
+    name: Password Manager
+    category: "1 Productivity"
+    icon: vault
+    url: "https://vault.${MAIN_DOMAIN}"
+    description: "Vaultwarden — Bitwarden-compatible password manager with SSO login."
+    required_group: "razzfazz.ai Vaultwarden Users"
+    profile: vaultwarden
+    order: 80
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 2 AI Assistants — live per-user agent tiles (Hermes/Moltis/OpenHands/
+  # OpenCode/Paperclip) emit into this section at render time (S11 #6).
+  # ──────────────────────────────────────────────────────────────────────
+  - id: my-agents
+    name: Agent Manager
+    category: "2 AI Assistants"
+    # #36/#61 — single combined tile. Was "AI Agents" (icon: home). The
+    # separate/hidden MCP Manager tile is retired; this one tile opens the
+    # combined dashboard that manages BOTH agents and MCP integrations.
+    icon: mcp
+    url: "https://${AGENTS_DOMAIN}/dashboard"
+    description: "Provision your personal Hermes, Moltis, OpenHands, OpenCode, and Paperclip agents, and connect your own MCP integrations."
+    # M030-followup 2026-05-12: was "any" — too permissive; surfaced an AI
+    # Agents tile to every user even when they had no agent-related group,
+    # leading to a useless dashboard where every card said "Contact admin
+    # for access". Canonical Authentik group is "razzfazz.ai AI Agents Users"
+    # per core/Authentik/apply-policy-bindings.py:160 (my-agents binding).
+    required_group: "razzfazz.ai AI Agents Users"
+    profile: agents
+    order: 10
+    default_pinned: true
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 3 Development
+  # ──────────────────────────────────────────────────────────────────────
+  - id: git-repository
+    name: Git Repository
+    category: "3 Development"
+    icon: git
+    url: "https://git.${MAIN_DOMAIN}"
+    description: "Gitea — self-hosted Git server with issue tracker, CI hooks, container registry."
+    # M030-followup 2026-05-12: was "razzfazz.ai Gitea Users" — wrong;
+    # the canonical Authentik group is "razzfazz.ai Git Users" per
+    # core/Authentik/apply-policy-bindings.py:132. Same shape bug as the
+    # Workflow Automation tile — symptom: Eric Pieber on prod was in the
+    # correct group but didn't see this tile.
+    required_group: "razzfazz.ai Git Users"
+    profile: gitea
+    order: 10
+
+  - id: docling-converter
+    name: Docling Converter
+    category: "3 Development"
+    icon: docling
+    url: "https://docling.${MAIN_DOMAIN}/docs"
+    description: "Docling — document conversion API (PDF, DOCX, images → Markdown / JSON)."
+    required_group: "razzfazz.ai Docling Users"
+    profile: docling
+    order: 20
+
+  - id: openhands
+    name: OpenHands
+    category: "3 Development"
+    icon: openhands
+    url: "https://openhands.${MAIN_DOMAIN}"
+    description: "OpenHands — autonomous AI software development agent."
+    required_group: "razzfazz.ai OpenHands Users"
+    profile: openhands
+    order: 30
+
+  - id: secrets-manager
+    name: Secrets Manager
+    category: "3 Development"
+    icon: secrets
+    url: "https://infisical.${MAIN_DOMAIN}"
+    description: "Infisical — secrets management for developers and AI coding agents."
+    required_group: "razzfazz.ai Infisical Users"
+    profile: infisical
+    order: 40
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 4 Knowledge Engines
+  # ──────────────────────────────────────────────────────────────────────
+  - id: cognee-knowledge
+    name: Cognee Knowledge Engine
+    category: "4 Knowledge Engines"
+    icon: cognee
+    url: "https://cognee.${MAIN_DOMAIN}"
+    description: "Cognee — GraphRAG knowledge engine for AI agent memory."
+    required_group: "razzfazz.ai Cognee Users"
+    profile: cognee
+    order: 10
+
+  - id: lightrag
+    name: RAG Knowledge Base
+    category: "4 Knowledge Engines"
+    icon: rag
+    url: "https://rag.${MAIN_DOMAIN}"
+    description: "LightRAG — graph-based RAG knowledge base on PostgreSQL + Apache AGE."
+    required_group: "razzfazz.ai RAG Users"
+    profile: lightrag
+    order: 20
+
+  - id: paperclip
+    name: Paperclip
+    category: "4 Knowledge Engines"
+    icon: paperclip
+    url: "https://paperclip.${MAIN_DOMAIN}"
+    description: "Paperclip — AI company orchestration: hire AI agents, set goals, automate workflows."
+    required_group: "razzfazz.ai Paperclip Users"
+    profile: paperclip
+    order: 30
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 5 Administration
+  # ──────────────────────────────────────────────────────────────────────
+  - id: razzfazz-management
+    name: rzfz.ai Management
+    category: "5 Administration"
+    icon: setup                       # S11 #11 — Authentik uses razzfazz-ai_setup_icon.png for this app
+    url: "https://config.${MAIN_DOMAIN}"
+    description: "Configuration Portal — modules, settings, backup, governance, LLM runtime."
+    required_group: "razzfazz.ai Super Admins"
+    profile: core
+    order: 10
+
+  - id: backup
+    name: Backup
+    category: "5 Administration"
+    icon: backup
+    url: "https://backup.${MAIN_DOMAIN}"
+    description: "Backup Management — schedule, run, restore, and inspect stack backups."
+    required_group: "razzfazz.ai Super Admins"
+    profile: core
+    order: 20
+
+  - id: container-management
+    name: Administration
+    category: "5 Administration"
+    icon: admin
+    url: "https://admin.${MAIN_DOMAIN}"
+    description: "Komodo — container management, logs, deployments, system metrics."
+    required_group: "razzfazz.ai Super Admins"
+    profile: monitor
+    order: 30
+
+  - id: llm-management
+    name: LLM Management
+    category: "5 Administration"
+    icon: llm
+    url: "https://llm.${MAIN_DOMAIN}"
+    description: "GPUStack — deploy and manage local LLM models, inspect inference."
+    # M030-followup 2026-05-12: was "razzfazz.ai LLM Users" — wrong; the
+    # canonical Authentik group is "razzfazz.ai LLM Management Users" per
+    # core/Authentik/apply-policy-bindings.py:113. Same shape bug as the
+    # other three group-name mismatches fixed in this commit.
+    required_group: "razzfazz.ai LLM Management Users"
+    # Three interchangeable LLM backends share the same UI at llm.<domain>:
+    #   llm        — GPUStack v2.1.x (experimental, M029)
+    #   llm-legacy — GPUStack v0.7.1 + Vulkan (stable AMD Strix Halo path, M029-S04)
+    #   llm-cpu    — GPUStack v0.7.1 CPU
+    # Tile shows when ANY of them is active. Match init-authentik.sh's
+    # `profile_active "llm" || "llm-legacy" || "llm-cpu"` umbrella.
+    profile: "llm,llm-legacy,llm-cpu"
+    order: 40
+
+  - id: observability
+    name: Observability
+    category: "5 Administration"
+    icon: admin
+    url: "https://observability.${MAIN_DOMAIN}"
+    description: "OpenLIT — stack-wide LLM observability: cost, latency, tokens, prompts."
+    required_group: "razzfazz.ai Observability Users"
+    profile: observability
+    order: 50

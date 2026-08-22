@@ -1,0 +1,135 @@
+# ==============================================================================
+# OTel Collector logs overlay — EXTERNAL LOG EXPORT (#197)
+# ==============================================================================
+# Merged on top of otel-collector-config.yaml ONLY when the operator opts in:
+#   OTEL_LOG_EXPORT_ENABLED=true
+#   OTEL_COLLECTOR_LOGS_OVERLAY=otel-collector-logs-export.yaml
+#
+# What it adds:
+#   * a `filelog/containers` receiver tailing every container's json-file log
+#     under /var/lib/docker/containers (mounted read-only into the collector);
+#   * an external OTLP exporter (`otlp/external`, gRPC) to the customer-owned
+#     OTLP/SIEM target (Loki+OTel, Tempo, Datadog agent, Splunk OTel, Elastic,
+#     a plain OTel Collector, ...);
+#   * a dedicated `logs/external` pipeline wiring the two.
+#
+# It leaves the base traces/metrics/logs→ClickHouse pipelines (fixing #193)
+# untouched — external log shipping and internal LLM telemetry are independent.
+#
+# SECURITY / egress: dialing OTEL_EXPORTER_OTLP_ENDPOINT is a DELIBERATE
+# outbound. Allow-list that host in the box egress model (do not blanket-open).
+# OTEL_EXPORTER_OTLP_HEADERS is a credential — treat as secret, never logged
+# (service.telemetry above is metrics:none / no self-export of the auth header).
+# Container stdout/stderr can carry sensitive data → the customer target is
+# customer-owned; on-collector redaction is a documented extension (see the
+# commented `transform/redact` + `filter/logs` blocks below).
+# ==============================================================================
+
+receivers:
+  filelog/containers:
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    # Never re-ship on restart: checkpoint offsets in the file_storage extension.
+    storage: file_storage
+    start_at: end
+    include_file_path: true
+    include_file_name: false
+    retry_on_failure:
+      enabled: true
+    operators:
+      # Parse the Docker json-file driver line ({"log","stream","time"}),
+      # promote the message, and derive container.id from the file path.
+      # NOTE (v1 limitation): this yields container.id + stream, NOT the
+      # friendly container name/image — that needs either a docker.sock mount
+      # (a real attack-surface increase we deliberately avoid) or a separate
+      # id→name resolver. Friendly-name enrichment is a documented fast-follow.
+      - type: container
+        format: docker
+        add_metadata_from_filepath: true
+
+processors:
+  resource/logs:
+    attributes:
+      - key: service.namespace
+        value: razzfazz-ai
+        action: upsert
+      - key: deployment.environment
+        value: ${env:MAIN_DOMAIN:-razzfazz-box}
+        action: upsert
+  batch/logs:
+    timeout: 5s
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+
+  # --- OPTIONAL, opt-in redaction / filtering (commented; see design note) ---
+  # transform/redact:
+  #   error_mode: ignore
+  #   log_statements:
+  #     - context: log
+  #       statements:
+  #         - replace_pattern(body, "(?i)(authorization|api[-_]?key|token)\\s*[:=]\\s*\\S+", "$$1: [REDACTED]")
+  # filter/logs:      # exclude noisy containers by log.file.path (RE2)
+  #   error_mode: ignore
+  #   logs:
+  #     log_record:
+  #       - 'IsMatch(log.file.path, ".*(clickhouse|otel-collector).*") == true'
+
+exporters:
+  # DEFAULT external exporter: OTLP/gRPC. host:4317 (or a TLS ingress).
+  otlp/external:
+    endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    headers:
+      # v1: single fixed `Authorization` header sourced from .env. Set the value
+      # to e.g. "Bearer <token>" or "Api-Token dt0c01...". Empty = no auth
+      # (mTLS / trusted-network targets). Multi-header or non-Authorization
+      # setups: add entries here.
+      Authorization: "${env:OTEL_EXPORTER_OTLP_HEADERS:-}"
+    tls:
+      # false (default) = TLS on, verified against system CA roots (works for
+      # any public-CA / Let's Encrypt OTLP ingress). true = plaintext (only for
+      # a collector on a trusted network). Private CA: uncomment ca_file and
+      # mount the CA bundle into the collector.
+      insecure: ${env:OTEL_EXPORTER_OTLP_INSECURE:-false}
+      # ca_file: /etc/otelcol/ca/custom-ca.pem
+    sending_queue:
+      enabled: true
+      queue_size: 2000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # ALTERNATIVE external exporter: OTLP/HTTP (http/protobuf). Defined but NOT
+  # wired into a pipeline by default, so the collector does not instantiate it.
+  # To use http/protobuf: point OTEL_EXPORTER_OTLP_ENDPOINT at the https URL and
+  # swap `otlp/external` → `otlphttp/external` in the logs/external pipeline.
+  otlphttp/external:
+    endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    headers:
+      Authorization: "${env:OTEL_EXPORTER_OTLP_HEADERS:-}"
+    tls:
+      insecure: ${env:OTEL_EXPORTER_OTLP_INSECURE:-false}
+    sending_queue:
+      enabled: true
+      queue_size: 2000
+    retry_on_failure:
+      enabled: true
+
+extensions:
+  # Persist filelog read offsets across collector restarts (otel-collector-data
+  # volume). Without it, `start_at: end` still avoids a cold-start replay, but
+  # the checkpoint makes restarts lossless mid-stream.
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+
+service:
+  # Replaces the base extensions list (list-merge = replace): keep health_check,
+  # add file_storage.
+  extensions: [health_check, file_storage]
+  pipelines:
+    logs/external:
+      receivers: [filelog/containers]
+      # memory_limiter is defined in the base config; reused here.
+      processors: [memory_limiter, resource/logs, batch/logs]
+      exporters: [otlp/external]

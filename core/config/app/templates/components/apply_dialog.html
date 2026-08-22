@@ -1,0 +1,74 @@
+<!-- Reusable impact preview + apply dialog -->
+<div id="apply-overlay" class="apply-overlay hidden" onclick="applyDialog.close()">
+    <div class="apply-dialog" onclick="event.stopPropagation()">
+        <!-- Header -->
+        <div class="apply-header">
+            <h2 id="apply-title">Apply Change</h2>
+            <button class="apply-close" onclick="applyDialog.close()">&times;</button>
+        </div>
+
+        <!-- Preview phase -->
+        <div id="apply-preview" class="apply-phase">
+            <!-- Impact summary -->
+            <div class="apply-section">
+                <div class="apply-label">Action</div>
+                <div id="apply-impact-text" class="apply-value"></div>
+            </div>
+
+            <div class="apply-section">
+                <div class="apply-label">Containers affected</div>
+                <div id="apply-containers" class="apply-value"></div>
+            </div>
+
+            <div class="apply-section">
+                <div class="apply-label">Risk level</div>
+                <div id="apply-risk" class="apply-value"></div>
+            </div>
+
+            <!-- Memory bar -->
+            <div id="apply-memory-section" class="apply-section">
+                <div class="apply-label">Memory impact</div>
+                <div class="memory-bar-container">
+                    <div class="memory-bar">
+                        <div id="memory-bar-current" class="memory-bar-fill"></div>
+                        <div id="memory-bar-delta" class="memory-bar-delta"></div>
+                    </div>
+                    <div id="memory-bar-text" class="memory-bar-text"></div>
+                </div>
+                <div id="memory-warning" class="memory-warning hidden"></div>
+            </div>
+
+            <!-- Exclusion conflict -->
+            <div id="apply-conflict" class="apply-conflict hidden"></div>
+
+            <!-- Password field (shown for caution/danger) -->
+            <div id="apply-password-section" class="apply-section hidden">
+                <div class="apply-label">Admin password required</div>
+                <input type="password" id="apply-password" class="apply-input" placeholder="Enter admin password" autocomplete="off"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();applyDialog.confirm();}">
+            </div>
+
+            <!-- Error display -->
+            <div id="apply-error" class="apply-error hidden"></div>
+
+            <!-- Action buttons -->
+            <div class="apply-actions">
+                <button class="btn btn-secondary" onclick="applyDialog.close()">Cancel</button>
+                <button id="apply-confirm-btn" class="btn btn-primary" onclick="applyDialog.confirm()">Confirm &amp; Apply</button>
+            </div>
+        </div>
+
+        <!-- Terminal phase (shown during/after apply) -->
+        <div id="apply-terminal" class="apply-phase hidden">
+            <div class="terminal-output" id="terminal-output"></div>
+            <div id="apply-result" class="apply-result hidden">
+                <span id="apply-result-icon"></span>
+                <span id="apply-result-text"></span>
+                <span id="apply-result-duration" class="apply-duration"></span>
+            </div>
+            <div class="apply-actions">
+                <button id="apply-done-btn" class="btn btn-primary hidden" onclick="applyDialog.done()">Done</button>
+            </div>
+        </div>
+    </div>
+</div>
