@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Manager - razzfazz.ai</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+<div class="container">
+    <header>
+        <div class="header-left">
+            <img src="/branding/razzfazz-ai-logo.png" alt="razzfazz.ai" class="logo">
+            <h1>Agent Manager</h1>
+        </div>
+        <div class="user-info">
+            <span>{{ username }}</span>
+            {% if is_admin %}<a href="{{ url_for('admin.index') }}">Admin</a>{% endif %}
+        </div>
+    </header>
+
+    <section class="agents-grid">
+        <div class="cards">
+            {% for card in cards %}
+            <div class="card {% if card.instance %}state-{{ card.instance.state }}{% elif card.restricted %}restricted{% else %}available{% endif %}">
+                <div class="card-header">
+                    <div class="card-title">
+                        {# #36 — per-agent-type icon. icon_url comes from the catalog
+                           (catalog.py), served by Caddy branding_static on AGENTS_DOMAIN.
+                           Guarded so a type without an icon still renders a clean header. #}
+                        {% if card.type.icon_url %}
+                        <img class="agent-icon" src="{{ card.type.icon_url }}"
+                             alt="" width="32" height="32" loading="lazy">
+                        {% endif %}
+                        <h3>{{ card.type.display_name }}</h3>
+                    </div>
+                    {% if card.instance %}
+                        {% if card.instance.state == 'running' %}
+                            <span class="badge running">Running</span>
+                        {% elif card.instance.state == 'stopped' %}
+                            <span class="badge stopped">Stopped</span>
+                        {% elif card.instance.state == 'provisioning' %}
+                            <span class="badge provisioning">Starting...</span>
+                        {% elif card.instance.state == 'error' %}
+                            <span class="badge error">Error</span>
+                        {% endif %}
+                        {# M030-S2: update-available indicator (only when running version != catalog) #}
+                        {% if card.update_available %}
+                            <span class="badge update-available" title="A newer version is available — click Update to bring this agent up to date without losing data.">⬆ Update available: {{ card.instance.image_version }} → {{ card.update_target_version }}</span>
+                        {% endif %}
+                    {% elif card.restricted %}
+                        <span class="badge restricted">Restricted</span>
+                    {% endif %}
+                </div>
+
+                <p class="description">{{ card.type.description }}</p>
+
+                {# #36 / PR #84 — live memory usage vs the per-instance limit. #}
+                {% if card.stats %}
+                <div class="stats">
+                    <span>RAM: {{ card.stats.mem_usage_mb }}MB{% if card.mem_limit %} / {{ card.mem_limit }}{% endif %}</span>
+                    {% if card.stats.mem_percent is not none %}
+                    <span style="color:var(--text-dim);font-size:0.8em">({{ card.stats.mem_percent }}%)</span>
+                    {% endif %}
+                </div>
+                {% elif card.instance and card.mem_limit %}
+                <div class="stats"><span>Memory limit: {{ card.mem_limit }}</span></div>
+                {% endif %}
+
+                {# Show the per-instance generated secret as the workspace login
+                   password for any agent whose UI is password-gated. Pre-hotfix
+                   only moltis qualified; hermes-workspace also reads
+                   HERMES_PASSWORD from the same _generated_secret so add it
+                   here (operator-reported 2026-05-19: had to `docker exec env`
+                   to find the password every time). Extend to other agents'
+                   IDs as their UIs gain similar password gates. #}
+                {% if card.instance and card.instance.config and card.instance.config.get('_generated_secret') and card.type.id in ('moltis', 'hermes') %}
+                <div class="secret-row">
+                    <span class="secret-label">Password:</span>
+                    <code class="secret-value" id="secret-{{ card.type.id }}">{{ card.instance.config['_generated_secret'][:4] }}••••••••</code>
+                    <button class="btn-copy" onclick="copySecret('{{ card.instance.config['_generated_secret'] }}', this)" title="Copy password">Copy</button>
+                </div>
+                {% endif %}
+
+                {# Paperclip uses a one-time "bootstrap CEO" invite URL for first
+                   login (the URL is minted on demand by `paperclipai auth
+                   bootstrap-ceo`, which requires the server to be running —
+                   so we cannot print it at container startup; instead a
+                   "Get bootstrap URL" button calls the API on demand and
+                   pastes the URL inline. After the CEO has claimed the
+                   invite, the button still works but prints a "CEO already
+                   claimed" hint. #}
+                {% if card.instance and card.instance.state == 'running' and card.type.id == 'paperclip' %}
+                <div class="secret-row" id="paperclip-bootstrap-{{ card.instance.id }}">
+                    <span class="secret-label">First-login URL:</span>
+                    <button class="btn btn-secondary btn-xs"
+                            onclick="fetchPaperclipBootstrap('{{ card.instance.id }}', this)">
+                        Get bootstrap URL
+                    </button>
+                </div>
+                {% endif %}
+
+                {# M030-S2 (refined): two-row button layout.
+                   Row 1 = "Open" actions (Open + Open in Chat) — primary user intent.
+                   Row 2 = lifecycle / config (Update if available, Stop, Settings).
+                   Settings dropped its `btn-subtle` text-link styling in favor of
+                   matching `btn-secondary` so all row-2 buttons have the same
+                   height + visual weight as the Open button. #}
+                <div class="actions" style="display:flex;flex-direction:column;gap:8px;">
+                    {% if card.instance %}
+                        {% if card.instance.state == 'running' %}
+                            {# Row 1: Open + Open in Chat #}
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                {# rc6.7 #91 — render Open in a "Starting…" pending state until /api/ready/<id>
+                                   confirms the container is actually serving. JS swaps the button text/class
+                                   and re-enables the click target once ready. #}
+                                <a href="{{ card.open_url }}"
+                                   class="btn btn-primary btn-pending"
+                                   data-ready-probe="{{ card.instance.id }}"
+                                   target="_blank"
+                                   aria-busy="true">Starting…</a>
+                                {% if card.chat_url %}
+                                {# M020 S08 — for hermes/moltis/coding-tools, deep-link into OpenWebUI with the right pipe model preselected. #}
+                                <a href="{{ card.chat_url }}"
+                                   class="btn btn-secondary btn-pending"
+                                   data-ready-probe="{{ card.instance.id }}"
+                                   data-ready-label="Open in Chat"
+                                   target="_blank"
+                                   aria-busy="true">Starting…</a>
+                                {% endif %}
+                            </div>
+                            {# Row 2: lifecycle / config — Update (when available), Stop, Settings.
+                               All use btn-secondary for consistent height + visual weight. #}
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                {# M030-S2: Update button when newer image is available. Non-destructive
+                                   (preserves chats/skills/files); confirms first to set expectations
+                                   about ~30s downtime. #}
+                                {% if card.update_available %}
+                                <button class="btn btn-secondary"
+                                        onclick="if(confirm('Update {{ card.type.display_name }} to {{ card.update_target_version }}?\n\nYour chats, skills, files, and config are preserved. The agent will be briefly stopped (~30s downtime).\n\nContinue?')) agentAction('upgrade', '{{ card.instance.id }}')">Update</button>
+                                {% endif %}
+                                {# ga.2 (#219): Restart — bounces a wedged agent in place.
+                                   Non-destructive (container/volumes/data preserved), a few
+                                   seconds of downtime. Light confirm because it interrupts
+                                   any in-flight work. #}
+                                <button class="btn btn-secondary"
+                                        onclick="if(confirm('Restart {{ card.type.display_name }}?\n\nThe agent process is bounced (a few seconds of downtime). Your chats, skills, files, and config are preserved. Any in-progress task is interrupted.\n\nContinue?')) agentAction('restart', '{{ card.instance.id }}')">Restart</button>
+                                <button class="btn btn-secondary" onclick="agentAction('stop', '{{ card.instance.id }}')">Stop</button>
+                                <a href="{{ url_for('dashboard.instance_detail', instance_id=card.instance.id) }}" class="btn btn-secondary">Settings</a>
+                            </div>
+                        {% elif card.instance.state == 'stopped' %}
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn btn-primary" onclick="agentAction('start', '{{ card.instance.id }}')">Start</button>
+                                <a href="{{ url_for('dashboard.instance_detail', instance_id=card.instance.id) }}" class="btn btn-secondary">Settings</a>
+                            </div>
+                            {# M030-S2: NO Delete button on cards. Delete moved to per-instance Settings page (Danger Zone, type-to-confirm). #}
+                        {% elif card.instance.state == 'error' %}
+                            <span class="error-msg">{{ card.instance.error_message }}</span>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <a href="{{ url_for('dashboard.instance_detail', instance_id=card.instance.id) }}" class="btn btn-secondary">Settings</a>
+                            </div>
+                            {# M030-S2: NO Delete button on cards even in error state. Delete via Settings page. #}
+                        {% endif %}
+                    {% elif card.can_launch %}
+                        {# #36 / PR #84 — power/admin get a memory picker before
+                           launch; regular users launch at the default (the
+                           SERVER enforces the tier gate either way). #}
+                        <button class="btn btn-primary" data-launch-type="{{ card.type.id }}"
+                                onclick="openLaunchDialog('{{ card.type.id }}', '{{ card.type.display_name }}')">Launch</button>
+                    {% elif card.restricted %}
+                        <span class="restricted-msg">Contact admin for access</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    {# #36/#61 — MCP Integrations section. The combined dashboard surfaces BOTH
+       agent provisioning (above) AND per-user MCP integrations (here). Shown
+       only when the mcp profile is active. Links to the SSO-gated MCP dashboard
+       at mcp.<domain>/dashboard (same "AI Agents Users" group gate). This is the
+       linked-view unification; a deep in-dashboard MCP CRUD merge is a scoped
+       follow-up (see PR). #}
+    {% if mcp_active %}
+    <section class="mcp-section">
+        <div class="mcp-card">
+            <div class="mcp-card-head">
+                <img class="agent-icon" src="/branding/razzfazz-ai_mcp_icon.png"
+                     alt="" width="40" height="40" loading="lazy">
+                <div>
+                    <h3>MCP Integrations</h3>
+                    <p class="description">
+                        Connect your own external tools (Moco / SEQITracker,
+                        Pipedrive, GitHub, Google, …) to your agents. Your
+                        credentials are encrypted at rest and only ever reach
+                        your own private MCP proxy.
+                    </p>
+                </div>
+            </div>
+            <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a href="{{ mcp_url }}" class="btn btn-primary" target="_blank" rel="noopener">
+                    Manage MCP Integrations
+                </a>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+
+    <footer>
+        {% if tier %}
+        <span>Tier: {{ tier.display_name }}</span> &middot;
+        {% endif %}
+        <span>{{ total_instances }} instance(s)</span> &middot;
+        <span>{{ total_mem|round(0)|int }} MB used</span>
+    </footer>
+</div>
+
+{# #36 / PR #84 — launch dialog with a tier-gated memory picker. Shown only for
+   power/admin (can_set_memory); regular users never see this (launch fires at
+   the default), and the SERVER enforces the same gate regardless. #}
+<div id="launch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-card,#fff);color:var(--text,#111);border-radius:10px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);">
+    <h3 id="launch-modal-title" style="margin-top:0;">Launch agent</h3>
+    {% if can_set_memory %}
+    <p style="font-size:0.85rem;color:var(--text-dim,#666);">
+      Choose how much memory this agent may use. Higher limits let it handle
+      bigger workloads but count against the shared budget.
+    </p>
+    <label style="display:block;font-size:0.85rem;margin-bottom:6px;">Memory</label>
+    <select id="launch-mem-gb" style="width:100%;padding:8px;border-radius:6px;border:1px solid #d1d5db;margin-bottom:16px;">
+      {% for gb in mem_presets %}
+      <option value="{{ gb }}" {% if gb == mem_default_gb %}selected{% endif %}>{{ gb }} GB{% if gb == mem_default_gb %} (default){% endif %}</option>
+      {% endfor %}
+    </select>
+    {% else %}
+    <p style="font-size:0.85rem;color:var(--text-dim,#666);">
+      This agent launches with the default {{ mem_default_gb }} GB memory limit.
+    </p>
+    {% endif %}
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeLaunchDialog()">Cancel</button>
+      <button class="btn btn-primary" id="launch-confirm-btn" onclick="confirmLaunch()">Launch</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function agentAction(action, instanceId, agentType, body) {
+    // M030-S2: Delete is intentionally NOT reachable via this generic
+    // helper — it must go through the per-instance Settings page Danger
+    // Zone with type-to-confirm. Block it loudly if anything tries to
+    // route a delete through here (defense against future regressions).
+    if (action === 'delete') {
+        alert('Delete must go through the per-instance Settings page → Danger Zone. ' +
+              'Open the agent\'s Settings to delete it.');
+        return;
+    }
+    let url;
+    if (action === 'launch') {
+        url = '/api/launch/' + agentType;
+    } else {
+        url = '/api/' + action + '/' + instanceId;
+    }
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                 body: body ? JSON.stringify(body) : undefined })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            // M030-S2: upgrade endpoint returns 4xx/5xx with explicit
+            // {error, message} on failure; surface message rather than
+            // a bare status. For success, reload to pick up new state.
+            if (!ok || data.error) {
+                const msg = data.message || data.error || ('HTTP ' + status);
+                alert(action + ' failed: ' + msg);
+            } else {
+                if (data.message) {
+                    // Brief inline toast before reload — gives the user a
+                    // moment to see what just happened.
+                    console.log(data.message);
+                }
+                location.reload();
+            }
+        })
+        .catch(err => alert(action + ' failed: ' + err));
+}
+
+// #36 / PR #84 — launch dialog with a tier-gated memory picker.
+let _launchType = null;
+// Expose on window so the tier gate is introspectable (used by the browser
+// acceptance test) as well as by confirmLaunch below.
+window._canSetMemory = {{ can_set_memory | tojson }};
+const _canSetMemory = window._canSetMemory;
+function openLaunchDialog(agentType, displayName) {
+    _launchType = agentType;
+    const modal = document.getElementById('launch-modal');
+    const title = document.getElementById('launch-modal-title');
+    title.textContent = 'Launch ' + displayName;
+    modal.style.display = 'flex';
+}
+function closeLaunchDialog() {
+    document.getElementById('launch-modal').style.display = 'none';
+    _launchType = null;
+}
+function confirmLaunch() {
+    if (!_launchType) return;
+    let body = null;
+    // Only power/admin see the picker; a regular user's launch carries no
+    // mem_gb and the server provisions the default (the tier gate is
+    // server-side, so a hand-crafted body from a regular user is ignored too).
+    if (_canSetMemory) {
+        const sel = document.getElementById('launch-mem-gb');
+        if (sel) body = { mem_gb: parseInt(sel.value, 10) };
+    }
+    const type = _launchType;
+    closeLaunchDialog();
+    agentAction('launch', null, type, body);
+}
+
+function copySecret(secret, btn) {
+    navigator.clipboard.writeText(secret).then(() => {
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+}
+
+// Fetches the paperclip bootstrap-CEO invite URL on demand and replaces the
+// button with the URL + copy affordance. The API endpoint shells into the
+// running paperclip container and runs `pnpm paperclipai auth bootstrap-ceo`.
+// Each call mints a fresh invite (the previous unaccepted one is revoked).
+function fetchPaperclipBootstrap(instanceId, btn) {
+    btn.disabled = true;
+    btn.textContent = 'Fetching…';
+    fetch('/api/bootstrap-url/' + instanceId, { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, data: d })))
+        .then(({ ok, data }) => {
+            const row = document.getElementById('paperclip-bootstrap-' + instanceId);
+            if (!ok || data.error) {
+                btn.disabled = false;
+                btn.textContent = 'Get bootstrap URL';
+                alert('Bootstrap failed: ' + (data.message || data.error || 'unknown'));
+                return;
+            }
+            // Clear via removeChild loop, then rebuild with textContent + DOM
+            // factories. innerHTML is deliberately avoided so a malicious
+            // upstream response can't smuggle markup into the dashboard.
+            while (row.firstChild) row.removeChild(row.firstChild);
+            const label = document.createElement('span');
+            label.className = 'secret-label';
+            label.textContent = 'First-login URL:';
+            row.appendChild(label);
+            row.appendChild(document.createTextNode(' '));
+            if (data.already_claimed) {
+                const note = document.createElement('em');
+                note.textContent = 'CEO account already claimed.';
+                row.appendChild(note);
+                return;
+            }
+            const url = data.invite_url || '';
+            const code = document.createElement('code');
+            code.className = 'secret-value';
+            code.style.fontSize = '0.78rem';
+            code.style.wordBreak = 'break-all';
+            code.textContent = url.length > 60 ? url.substring(0, 60) + '…' : url;
+            row.appendChild(code);
+            row.appendChild(document.createTextNode(' '));
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'btn-copy';
+            copyBtn.textContent = 'Copy';
+            copyBtn.addEventListener('click', () => copySecret(url, copyBtn));
+            row.appendChild(copyBtn);
+            if (data.expires) {
+                row.appendChild(document.createTextNode(' '));
+                const exp = document.createElement('span');
+                exp.className = 'secret-label';
+                exp.textContent = 'expires ' + data.expires;
+                row.appendChild(exp);
+            }
+        })
+        .catch(err => {
+            btn.disabled = false;
+            btn.textContent = 'Get bootstrap URL';
+            alert('Bootstrap fetch failed: ' + err);
+        });
+}
+
+// rc6.7 #91 — poll /api/ready/<id> for each pending Open button and swap
+// the button to its real label once the container is actually serving.
+// Times out after ~3 minutes; the user can still click "Starting…" (the
+// href is correct, target=_blank), it just signals not-yet-ready.
+(function () {
+    const pending = document.querySelectorAll('a.btn-pending[data-ready-probe]');
+    pending.forEach(el => {
+        const instanceId = el.dataset.readyProbe;
+        const label = el.dataset.readyLabel || 'Open';
+        let attempts = 0;
+        const tick = () => {
+            fetch('/api/ready/' + instanceId, { credentials: 'same-origin' })
+                .then(r => r.ok ? r.json() : { ready: false })
+                .then(data => {
+                    if (data.ready) {
+                        el.classList.remove('btn-pending');
+                        el.removeAttribute('aria-busy');
+                        el.textContent = label;
+                    } else if (++attempts < 90) {
+                        setTimeout(tick, 2000);
+                    } else {
+                        el.textContent = label + ' (slow start)';
+                    }
+                })
+                .catch(() => { if (++attempts < 90) setTimeout(tick, 2000); });
+        };
+        tick();
+    });
+})();
+
+// M020 S08 — auto-action via query string. The OpenWebUI per-user pipes
+// (chat/functions/_lib/per_user_routing.py) build NotProvisioned messages
+// with launch links of the form ?launch=<agent_type>; clicking through
+// from the chat lands here and we auto-fire the corresponding action so
+// the launch dialog (or start) opens immediately.
+(function () {
+    const params = new URLSearchParams(window.location.search);
+    const autoLaunch = {{ auto_launch | tojson }};
+    const autoStart  = {{ auto_start  | tojson }};
+    if (autoLaunch) {
+        // Find the matching Launch button and confirm before firing —
+        // explicit (not silent) so the user knows the click came from
+        // a redirect, not their own action.
+        const btn = document.querySelector('button[data-launch-type="' + autoLaunch + '"]');
+        if (btn && confirm('Launch a personal ' + autoLaunch + ' agent now?')) {
+            btn.click();
+        }
+        // Strip the param so a refresh doesn't re-prompt
+        params.delete('launch');
+        history.replaceState({}, '', location.pathname + (params.toString() ? '?' + params : ''));
+    } else if (autoStart) {
+        if (confirm('Start instance ' + autoStart + ' now?')) {
+            agentAction('start', autoStart);
+        }
+        params.delete('start');
+        history.replaceState({}, '', location.pathname + (params.toString() ? '?' + params : ''));
+    }
+})();
+</script>
+</body>
+</html>

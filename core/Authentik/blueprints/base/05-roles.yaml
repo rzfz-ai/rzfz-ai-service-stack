@@ -1,0 +1,63 @@
+version: 1
+metadata:
+  name: "Base - Roles v3"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # Define Custom Roles
+  # ==========================================
+  - model: authentik_rbac.role
+    identifiers:
+      name: "razzfazz.ai User Group Admin"
+    attrs:
+      name: "razzfazz.ai User Group Admin"
+      description: "Can manage users and groups within razzfazz.ai"
+      permissions:
+        # authentik Core
+        - authentik_core.view_application
+        - authentik_core.view_group
+        # 'change_group' allows adding/removing users from groups
+        - authentik_core.change_group 
+        - authentik_core.view_token
+        - authentik_core.view_user
+        
+        # authentik Enterprise.Providers.Google Workspace
+        - authentik_providers_google_workspace.view_googleworkspaceprovider
+
+        # authentik Enterprise.Providers.Microsoft Entra
+        - authentik_providers_microsoft_entra.view_microsoftentraprovider
+
+        # authentik Events
+        - authentik_events.view_event
+        - authentik_tasks.view_task
+
+        # authentik Flows
+        - authentik_flows.view_flowtoken
+
+        # authentik Outpost
+        - authentik_outposts.view_dockerserviceconnection
+        - authentik_outposts.view_outpost
+        - authentik_outposts.view_outpostserviceconnection
+
+        # authentik Providers.LDAP
+        - authentik_providers_ldap.view_ldapprovider
+
+        # authentik Providers.OAuth2
+        - authentik_providers_oauth2.view_oauth2provider
+
+        # authentik Providers.Proxy
+        - authentik_providers_proxy.view_proxyprovider
+
+        # authentik Providers.SCIM
+        - authentik_providers_scim.view_scimprovider
+
+        # authentik RBAC
+        - authentik_rbac.access_admin_interface
+
+        # authentik Sources.Kerberos
+        - authentik_sources_kerberos.view_groupkerberossourceconnection
+        - authentik_sources_kerberos.view_kerberossource
+
+        # authentik Sources.LDAP
+        - authentik_sources_ldap.view_ldapsource

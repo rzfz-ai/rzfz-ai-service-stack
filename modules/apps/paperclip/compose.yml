@@ -1,0 +1,68 @@
+# ==============================================================================
+# PAPERCLIP MODULE (AI Company Orchestration Platform)
+# ==============================================================================
+# Profile: paperclip
+# Description: Open-source orchestration for AI agent companies. Hire AI
+#              employees, set goals, automate jobs. Org chart, tasks, budgets
+#              and agent templates in one self-hosted UI.
+# Status: Experimental — AI agent orchestration is evolving rapidly
+# Config: .env
+# Dependencies: postgres, valkey
+# Upstream: https://github.com/paperclipai/paperclip (MIT)
+# ==============================================================================
+services:
+  paperclip:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PAPERCLIP_TAG: ${PAPERCLIP_VERSION:-v2026.707.0}
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["paperclip"]
+    container_name: paperclip
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PAPERCLIP_PORT:-3100}:3100"
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-docker}:${POSTGRES_PASSWORD:-}@postgres:5432/${PAPERCLIP_DB:-paperclip_db}
+      - REDIS_URL=redis://:${VALKEY_PASSWORD:-}@valkey:6379/5
+      - PORT=3100
+      - HOST=0.0.0.0
+      - SERVE_UI=true
+      - PAPERCLIP_DEPLOYMENT_MODE=authenticated
+      - PAPERCLIP_DEPLOYMENT_EXPOSURE=private
+      - PAPERCLIP_PUBLIC_URL=https://${PAPERCLIP_DOMAIN:-paperclip.localhost}
+      - BETTER_AUTH_SECRET=${PAPERCLIP_BETTER_AUTH_SECRET:-}
+      - PAPERCLIP_HOME=/paperclip
+      - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
+      - GPUSTACK_BASE_URL=http://gpustack:9090/v1-openai
+      # Gitea integration — for pi_local and opencode-local adapters
+      - GITEA_API_TOKEN=${GITEA_API_TOKEN:-}
+      - GITEA_INTERNAL_URL=http://gitea:3000
+      - GITEA_EXTERNAL_URL=https://${GITEA_DOMAIN:-git.${MAIN_DOMAIN:-razzfazz-box}}
+      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-AI Agent}
+      - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-agent@localhost}
+      - GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-AI Agent}
+      - GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-agent@localhost}
+      # Infisical — for agent secret retrieval at task runtime
+      - INFISICAL_API_URL=http://infisical:8080
+    volumes:
+      - paperclip-data:/paperclip
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3100/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  paperclip-data:

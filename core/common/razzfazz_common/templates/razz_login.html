@@ -1,0 +1,144 @@
+{# rzfz.ai shared standalone-login partial.
+
+   Standalone (does NOT extend razz_base.html) — used by Flask UIs that
+   serve a local-auth gate before any other content. Renders a centered
+   white card on the brand background, with a single password field +
+   submit button. The container's app.py controls the form action and
+   any error message via context.
+
+   Variables:
+     title        — <title> tag (default: "rzfz.ai")
+     heading      — h1 inside the card (default: "Sign in")
+     subtitle     — short prompt under the heading (default: "Enter the admin password to continue.")
+     submit_label — button text (default: "Sign in")
+     form_action  — form action attribute (default: empty = post-to-self)
+     error        — optional error string rendered above the form
+
+   Containers using this:
+     - core/config/app/templates/auth/login.html      (extends via {% extends %})
+     - (template-ready for backup + setup if/when they add local-auth)
+
+   Originally extracted 2026-05-08 from core/config/app/templates/auth/login.html
+   (M026/S09 #5 deferred slice; GA-bug-list cleanup).
+#}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ title|default('rzfz.ai') }}{% endblock %}</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='media/razzfazz-ai-favicon.png') }}">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: url('{{ url_for('static', filename='media/razzfazz.webp') }}') no-repeat center center fixed;
+            background-size: cover;
+            background-color: #f0f0f0;
+            color: #1a1a1a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .login-card {
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 12px;
+            padding: 2.5rem;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+        .brand-logo {
+            height: 32px;
+        }
+        .brand-name {
+            font-size: 0.875rem;
+            color: #555;
+            font-weight: 500;
+            letter-spacing: 0.025em;
+        }
+        .login-card h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            color: #1a1a1a;
+        }
+        .login-card .subtitle {
+            font-size: 0.875rem;
+            color: #666;
+            margin-bottom: 1.5rem;
+        }
+        .login-card label {
+            display: block;
+            font-size: 0.8125rem;
+            color: #555;
+            margin-bottom: 0.375rem;
+            font-weight: 500;
+        }
+        .login-card input[type="password"] {
+            width: 100%;
+            padding: 0.625rem 0.75rem;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            color: #1a1a1a;
+            font-size: 0.9375rem;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+        .login-card input[type="password"]:focus {
+            border-color: #CD1719;
+        }
+        .login-card button {
+            width: 100%;
+            padding: 0.625rem;
+            margin-top: 1rem;
+            background: #CD1719;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9375rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .login-card button:hover { background: #b01416; }
+        .error {
+            background: rgba(205, 23, 25, 0.08);
+            border: 1px solid rgba(205, 23, 25, 0.2);
+            color: #CD1719;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.8125rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <div class="login-card">
+        <div class="brand">
+            <img src="{{ url_for('static', filename='media/razzfazz-ai-logo.png') }}" alt="rzfz.ai" class="brand-logo">
+        </div>
+        <h1>{% block heading %}{{ heading|default('Sign in') }}{% endblock %}</h1>
+        <p class="subtitle">{% block subtitle %}{{ subtitle|default('Enter the admin password to continue.') }}{% endblock %}</p>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST"{% if form_action %} action="{{ form_action }}"{% endif %}>
+            <label for="password">Admin password</label>
+            <input type="password" id="password" name="password" autofocus required>
+            <button type="submit">{{ submit_label|default('Sign in') }}</button>
+        </form>
+        {% block extra_card %}{% endblock %}
+    </div>
+</body>
+</html>

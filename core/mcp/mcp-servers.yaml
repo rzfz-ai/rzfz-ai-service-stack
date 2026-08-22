@@ -1,0 +1,19 @@
+# Stack-wide MCP server registry (M035). Single source of truth for which MCP
+# servers are attached to the stack's AI tools. Synced to consumers by
+# core/mcp/sync.py. Secrets are referenced by .env key (auth.secret_ref), never
+# inlined here. Schema validated by tests/unit/mcp/test_mcp_registry_schema.py.
+version: 1
+servers:
+  - id: cognee
+    description: Cognee shared admin sidecar (DISABLED — superseded by per-user cognee proxies, #36 BLOCKER-2)
+    transport: streamable-http        # stdio | sse | streamable-http
+    url: http://cognee-mcp:8000/mcp
+    command: null                     # stdio only
+    args: []                          # stdio only
+    scope: internal                   # internal | external
+    auth:
+      header: X-Api-Key
+      secret_ref: COGNEE_MCP_API_KEY
+    enabled: false                    # #36 BLOCKER-2 — was true; admin-scoped, unauth from sandboxes
+    consumers: [all]                  # "all" or explicit subset of consumer ids
+    requires_profile: cognee

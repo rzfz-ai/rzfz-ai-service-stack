@@ -1,0 +1,22 @@
+razzfazz-coding-tools — build-recipe NOTICE (third-party upstream)
+================================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: opencode-ai (pinned)  —  MIT
+              https://github.com/sst/opencode
+  Built from: gsd-pi (unscoped, pinned 3.0.0 — legacy package)  —  MIT
+              https://github.com/gsd-build/gsd-2
+
+DEPRECATED / DISABLED legacy image (catalog enabled=False), superseded by the
+coding-agent split (coding-agent-web, #36 / PR#84). This image baked the OLD
+unscoped `gsd-pi@3.0.0` (its last release); the maintained agent is now
+`@opengsd/gsd-pi` (also MIT), a User Defined install suggestion. Both gsd
+packages are MIT. Our Dockerfile/wiring is Apache-2.0.
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

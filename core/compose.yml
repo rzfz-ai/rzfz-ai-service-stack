@@ -1,0 +1,1093 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# CORE INFRASTRUCTURE MODULE
+# ==============================================================================
+# Contains fundamental services required by other modules:
+# - Caddy: Reverse Proxy & Gateway
+# - Postgres: Main relational DB + pgvector
+# - Authentik: Identity Provider
+# - Valkey: Redis-compatible cache
+#
+# OPERATOR-NOTE on Docker installation method:
+# `security_opt: [no-new-privileges:true]` is reinstated as of 2026-05-10
+# afternoon. Earlier in the same release window we'd removed it because
+# postgres/valkey/authentik containers were failing with
+# `exec /usr/local/bin/docker-entrypoint.sh: operation not permitted`. Root
+# cause turned out NOT to be the no-new-privileges flag itself — it was
+# Canonical's snap-distributed Docker, which bundles its own (much stricter)
+# AppArmor profile that rejects the `aa_change_onexec` profile transition.
+# apt-installed `docker-ce` from download.docker.com uses the standard
+# `docker-default` AppArmor profile and works fine with no-new-privileges:true.
+# Going forward, prod boxes should run apt docker-ce, NOT snap docker. (Already
+# the case on dev, worker-box-1, and 0.91 cycle-test box.)
+# ==============================================================================
+services:
+  # ==========================================
+  # Caddy: Reverse Proxy & Gateway
+  # ==========================================
+  caddy:
+    build:
+      context: ./Caddy
+      dockerfile: Dockerfile
+    # #184 WS2a: built once at install (`docker compose build`, which ignores
+    # pull_policy); `up`/enable/disable never build or pull — a missing image
+    # fails clear via verify-images. Universal no-runtime-build.
+    pull_policy: never
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./Caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+      - ../certs:/certs:ro
+      - authentik-media:/srv/authentik-media:ro
+    env_file:
+      - ../.env
+    networks:
+      default:
+        # Network aliases so internal services that need to reach
+        # public hostnames (Authentik for OIDC discovery, Matrix
+        # homeserver for self-issued OIDC redirect URIs, …) resolve
+        # them to Caddy via Docker's embedded DNS — no static
+        # `extra_hosts: "<domain>:<CADDY_IP>"` workaround. Caddy's
+        # bridge IP changes whenever the container is recreated;
+        # aliases follow the container, so consumers stay healthy
+        # across restarts. Add new entries here whenever a new
+        # consumer needs to reach another `${*_DOMAIN}` from inside
+        # the bridge — DO NOT reintroduce the CADDY_IP detection
+        # path in razzfazz-init.sh / profile_provisioner.py.
+        aliases:
+          - ${AUTHENTIK_DOMAIN:-auth.${MAIN_DOMAIN:-razzfazz-box}}
+          - ${MATRIX_DOMAIN:-matrix.${MAIN_DOMAIN:-razzfazz-box}}
+          # #11: dify-api/plugin-daemon fetch uploaded files via
+          # FILES_URL=https://${DIFY_DOMAIN}; without this alias that resolves to
+          # 127.0.0.1 inside the bridge and the fetch stalls. The alias routes it
+          # to Caddy → dify-api (/files/* is forward_auth-exempt).
+          - ${DIFY_DOMAIN:-dify.${MAIN_DOMAIN:-razzfazz-box}}
+      ssrf_proxy_network: {}
+      # #61 (HIGH-1): Caddy reaches the per-user MCP proxies here. The proxies
+      # live on mcp-network ONLY (NOT the stack `default` network) so a user who
+      # influences any proxy cannot reach mcp-manager:5000/internal/* and
+      # enumerate other users' proxies/bearer tokens. Caddy still terminates TLS
+      # + forward-auth and dials each proxy by container name on this network.
+      # `external: true` (declared below): the network is created by the
+      # mcp-manager module / the MCPDockerClient; absent it, the alias resolves
+      # to nothing and the mcp routes 502 — harmless when the mcp profile is off.
+      mcp-network: {}
+    # rc6.7 #89: host-gateway alias so the Caddyfile's
+    # `reverse_proxy host.docker.internal:{re.sb.1}` resolves correctly
+    # (sandbox-path-proxy for OpenHands runtimes — ga-readiness #1).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # NB: caddy ALSO needs an interface on Docker's default `bridge`
+    # network to reach the openhands sandbox containers via
+    # host.docker.internal:<port>. The `bridge` network can't be
+    # attached via compose (network-scoped alias not supported), so
+    # the post-install/post-upgrade scripts run
+    # `docker network connect bridge caddy` after every
+    # `docker compose up -d`. See `connect_caddy_to_bridge()` in
+    # scripts/lib.sh (rc6.7 #89).
+
+  # ==========================================
+  # Postgres: Database with pgvector extension
+  # ==========================================
+  # Tuned for multi-app setup (Authentik, Dify, OpenWebUI, GPUStack, Gitea, LightRAG)
+  # Based on 16GB RAM, 8 CPUs, SSD storage
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg17
+    container_name: postgres
+    restart: unless-stopped
+    # postgres fast-shutdown flushes shared_buffers at stop; the 10s default can be
+    # cut short on a busy DB → SIGKILL → WAL recovery on next boot. 60s lets a host
+    # reboot / `docker compose up -d` shut it down cleanly. So a bare reboot is safe.
+    stop_grace_period: 60s
+    # 6g, not 2g: shared_buffers=2GB (below) + up-to-800 backends' work_mem need
+    # headroom ABOVE shared_buffers. mem_limit == shared_buffers left zero room →
+    # cgroup (memcg) OOM-killed postgres under load on prod (2026-08). Host has
+    # ample RAM; shared_buffers stays ~⅓ of the limit.
+    mem_limit: 6g
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-docker}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_DB=${POSTGRES_DB:-main_db}
+      # PGDATA pins the cluster to the `pgdata/` subdir of the volume. This MUST
+      # be declared here (not left to `.env.dify`) so the core DB's data path is
+      # independent of which env files a given `docker compose up` loads: an
+      # `environment:` entry always applies and takes precedence over env_file.
+      # Relying on `.env.dify`'s PGDATA alone made postgres crash-loop
+      # (`initdb: directory exists but is not empty`) on a recreate that didn't
+      # load it. Same value the shipped .env.dify.example uses → backward-compatible
+      # with existing clusters already living in `.../data/pgdata`. Refs #208.
+      - PGDATA=${PGDATA:-/var/lib/postgresql/data/pgdata}
+    env_file:
+      - ../.env
+      - ../.env.dify
+    command: >
+      postgres
+      -c max_connections=800
+      -c shared_buffers=2GB
+      -c effective_cache_size=6GB
+      -c maintenance_work_mem=512MB
+      -c work_mem=12MB
+      -c wal_buffers=64MB
+      -c checkpoint_completion_target=0.9
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c max_worker_processes=8
+      -c max_parallel_workers_per_gather=4
+      -c max_parallel_workers=8
+      -c max_parallel_maintenance_workers=4
+      -c huge_pages=try
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    shm_size: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docker} -d ${POSTGRES_DB:-main_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      # #182: DO NOT stop postgres during the volume archive. The physical
+      # datadir (postgres-data) is now EXCLUDED from the tar by the default
+      # BACKUP_EXCLUDE_REGEXP (config/.env.example) and captured LOGICALLY
+      # instead: the archive-pre hook runs `pg_dumpall` → databases/
+      # postgres_core.sql (a consistent cluster-wide SQL snapshot of every
+      # service DB + roles), which is what restore imports via `psql`
+      # (core/backup/manager/backup_manager.py restore_databases). Because
+      # offen never tars the live pgdata, it can't hit the pg_wal-recycle race
+      # (`lstat …/pg_wal/…: no such file` → whole nightly + upgrade backup
+      # FAILS silently, #157) — so there is no reason to stop postgres, and
+      # dependent apps no longer see the ~24 s DB-unavailability blip (500s)
+      # the stop used to cause every night.
+      #
+      # HARD INVARIANT: this `false` is only safe while postgres-data stays out
+      # of the tar. IF a box ever re-includes postgres-data in the archive
+      # (e.g. someone edits BACKUP_EXCLUDE_REGEXP by hand), the stop label MUST
+      # return to `true` or the #157 pg_wal race comes back. See the #182 note
+      # in config/.env.example.
+      - "docker-volume-backup.stop-during-backup=false"
+
+  # ==========================================
+  # Postgres DB reconciliation (every `compose up`)
+  # ==========================================
+  # init-db.sh is mounted into postgres at /docker-entrypoint-initdb.d/, which
+  # postgres only runs on FIRST init (empty data dir). When an operator enables
+  # a new profile post-install — e.g. `agents`, `cognee`, `vaultwarden`,
+  # `paperless`, `synapse` — the profile's database isn't created and the
+  # service crashloops with `database "X" does not exist`.
+  #
+  # This one-shot runs the SAME init-db.sh against the LIVE postgres after
+  # every `compose up`. The script's CREATE DATABASE statements were converted
+  # to the SELECT/\gexec NOT EXISTS pattern (postgres has no IF NOT EXISTS for
+  # CREATE DATABASE), so re-running is safe — existing DBs are no-ops, missing
+  # ones get created.
+  #
+  # Consumer services (e.g. agent-manager, dify-api) should depend on this
+  # via `service_completed_successfully` so compose orders them after the
+  # reconcile, not just after postgres healthy.
+  # ==========================================
+  postgres-db-reconcile:
+    image: pgvector/pgvector:0.8.2-pg17
+    container_name: postgres-db-reconcile
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    env_file:
+      - ../.env
+      - ../.env.dify
+    environment:
+      - PGHOST=postgres
+      - PGPASSWORD=${POSTGRES_PASSWORD:-}
+    volumes:
+      - ./init-db.sh:/init-db.sh:ro
+    command: ["bash", "/init-db.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ==========================================
+  # Authentik: Initialization (runs ONCE on first startup)
+  # ==========================================
+  # This container only executes on fresh installations.
+  # It checks for a flag file in authentik-media volume and skips
+  # if already initialized. To force re-init, remove the flag file
+  # or delete the authentik-media volume.
+  # ==========================================
+  authentik-init:
+    # #253: init tools (gettext/envsubst + docker-cli) are BAKED at build time,
+    # not `apk add`ed at runtime — so the always-run outpost-binding reconcile +
+    # blueprint templating work on air-gapped boxes. See core/Authentik/init/Dockerfile.
+    build:
+      context: ./Authentik/init
+      dockerfile: Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: authentik-init
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    command: /init/init-authentik.sh
+    env_file:
+      - ../.env
+    environment:
+      - DEPLOYMENT_SCENARIO=${DEPLOYMENT_SCENARIO:-base}
+      # F-A3: no raw socket — talk to docker-socket-proxy for docker exec
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    volumes:
+      # Scripts and Assets
+      - ./init-authentik.sh:/init/init-authentik.sh
+      # rc6.7 #94: extracted from the heredoc that used to live inside
+      # init-authentik.sh so the fast-path (profile toggle without
+      # version bump) can re-apply bindings too. Without it, an app
+      # recreated by `state: present` after a previous `state: absent`
+      # delete has zero policy bindings → no group has access → the
+      # tile is hidden from the App library.
+      - ./Authentik/apply-policy-bindings.py:/init/apply-policy-bindings.py
+      - ./Authentik/blueprints:/init/blueprints
+      - ./Authentik/media:/init/media
+      # Authentik 2025.12+ uses /data (was /media in 2025.10.x)
+      - authentik-media:/data
+      - authentik-blueprints:/blueprints
+    user: root
+    depends_on:
+      authentik-server:
+        condition: service_healthy
+      authentik-worker:
+        condition: service_started
+
+  # ==========================================
+  # Authentik: Media Volume Layout Migrator
+  # ==========================================
+  # 2025.10.x mounted authentik-media at /media (files at volume root);
+  # 2025.12+ mounts it at /data and expects media under /data/media/.
+  # On upgrades from 2025.10 this moves root-level files into /data/media/
+  # before authentik-server starts. Idempotent: skips entries that already
+  # exist at the target; safe on fresh installs (no-op on empty volume).
+  # ==========================================
+  authentik-media-migrator:
+    image: alpine:3.24
+    container_name: authentik-media-migrator
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /data/media
+        moved=0
+        for entry in /data/*; do
+          [ -e "$$entry" ] || continue
+          name=$$(basename "$$entry")
+          [ "$$name" = "media" ] && continue
+          if [ ! -e "/data/media/$$name" ]; then
+            mv "$$entry" "/data/media/"
+            moved=$$((moved + 1))
+          fi
+        done
+        echo "media-migrator: moved $$moved entries into /data/media/"
+    volumes:
+      - authentik-media:/data
+    user: root
+
+  # ==========================================
+  # Authentik: 0056_user_roles state reconciler
+  # ==========================================
+  # Handles the corrupt-state case where authentik_core_user_roles exists
+  # but django_migrations has no record of 0056_user_roles (left behind
+  # by an earlier `--fake` or partial run). Without this, `ak migrate`
+  # would try to re-CREATE the already-existing table and crash.
+  # - Fresh install / pre-2025.12 (table absent): no-op.
+  # - Normal already-migrated DB (table + record present): no-op.
+  # - Corrupt (table present, record absent): INSERT the record.
+  # ==========================================
+  authentik-migrate-reconcile:
+    image: postgres:17.10
+    container_name: authentik-migrate-reconcile
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        has_table=$$(psql -tA -c "SELECT to_regclass('authentik_core_user_roles')")
+        if [ "$$has_table" != "authentik_core_user_roles" ]; then
+          echo "reconcile: table authentik_core_user_roles not present — fresh install or pre-2025.12; nothing to do"
+          exit 0
+        fi
+        has_record=$$(psql -tA -c "SELECT 1 FROM django_migrations WHERE app='authentik_core' AND name='0056_user_roles' LIMIT 1")
+        if [ -n "$$has_record" ]; then
+          echo "reconcile: 0056_user_roles already recorded — consistent state; nothing to do"
+          exit 0
+        fi
+        echo "reconcile: table exists but 0056_user_roles unrecorded — inserting migration record"
+        psql -v ON_ERROR_STOP=1 -c \
+          "INSERT INTO django_migrations (app, name, applied) VALUES ('authentik_core', '0056_user_roles', NOW());"
+    environment:
+      PGHOST: postgres
+      PGUSER: ${AUTHENTIK_DB_USER:-${POSTGRES_USER:-docker}}
+      PGDATABASE: ${AUTHENTIK_DB:-authentik_db}
+      PGPASSWORD: ${AUTHENTIK_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ==========================================
+  # Authentik: Two-Hop Migration (2025.10 → 2025.12)
+  # ==========================================
+  # Authentik's Django migration chain from 2025.10.x cannot land directly
+  # on 2026.2.x (authentik_core.0056_user_roles queries a column added by
+  # authentik_rbac that isn't yet present). We bridge with a 2025.12.5
+  # container running `ak migrate` once; this brings the DB schema to
+  # 2025.12 so the 2026.2.3 server's own migrate step can finish cleanly.
+  # Idempotent — re-running against an already-migrated DB is a no-op.
+  # ==========================================
+  authentik-migrate-hop:
+    image: ghcr.io/goauthentik/server:2025.12.5
+    container_name: authentik-migrate-hop
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    # Upstream Authentik bug: authentik_core.0056_user_roles invokes a
+    # data migration (`migrate_object_permissions`) that calls the LIVE
+    # Role model class, not the historical model from ProjectState. This
+    # crashes on 2025.10.x data — the SELECT references columns the
+    # historical schema doesn't have, with types that don't match anyway.
+    #
+    # `--fake` is unusable because the same migration also creates the
+    # authentik_core_user_roles table (AddField user.roles m2m), which
+    # downstream code queries. Skipping it entirely breaks the stack.
+    #
+    # The clean workaround: overlay core/Authentik/migration-overrides/
+    # onto /authentik/core/migrations/ so Authentik loads a sanitized
+    # 0056_user_roles.py. The override keeps every AddField/AlterField/
+    # RemoveField/AlterUniqueTogether intact (schema unchanged, graph
+    # unchanged) and replaces just the RunPython body with a no-op.
+    #
+    # Idempotent: on an already-migrated DB the migrate command sees
+    # every migration as applied and exits 0 with "No migrations to apply".
+    command: ["migrate"]
+    volumes:
+      - ./Authentik/migration-overrides/0056_user_roles.py:/authentik/core/migrations/0056_user_roles.py:ro
+    env_file:
+      - ../.env
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-${POSTGRES_USER:-docker}}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB:-authentik_db}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      AUTHENTIK_REDIS__HOST: valkey
+      AUTHENTIK_REDIS__PASSWORD: ${VALKEY_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+      authentik-media-migrator:
+        condition: service_completed_successfully
+      authentik-migrate-reconcile:
+        condition: service_completed_successfully
+
+  # ==========================================
+  # Authentik: Identity Provider (Server)
+  # ==========================================
+  authentik-server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_VERSION:-2026.2.6}
+    container_name: authentik-server
+    restart: unless-stopped
+    # 2g (was 1g): with ~15 forward-auth providers the server hit 99% of a 1g
+    # limit under load (prod 2026-06-11 connection-storm recovery) and was at
+    # OOM risk; normal steady-state is ~430 MiB. The IdP is central to every
+    # gated UI, so give it headroom. Worker stays 1g (peaked ~58%).
+    mem_limit: 2g
+    security_opt:
+      - no-new-privileges:true
+    command: server
+    env_file:
+      - ../.env
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_HOST: https://${AUTHENTIK_DOMAIN:-auth.${MAIN_DOMAIN:-razzfazz-box}}
+      AUTHENTIK_HOST_BROWSER: https://${AUTHENTIK_DOMAIN:-auth.${MAIN_DOMAIN:-razzfazz-box}}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-${POSTGRES_USER:-docker}}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB:-authentik_db}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      AUTHENTIK_REDIS__HOST: valkey
+      AUTHENTIK_REDIS__PASSWORD: ${VALKEY_PASSWORD:-}
+    volumes:
+      - authentik-media:/data
+      - authentik-templates:/templates
+      - authentik-certs:/certs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/-/health/live/ || exit 1"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+      authentik-migrate-hop:
+        condition: service_completed_successfully
+
+  # ==========================================
+  # Authentik: Identity Provider (Worker)
+  # ==========================================
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_VERSION:-2026.2.6}
+    container_name: authentik-worker
+    restart: unless-stopped
+    mem_limit: 1g
+    security_opt:
+      - no-new-privileges:true
+    command: worker
+    env_file:
+      - ../.env
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_HOST: https://${AUTHENTIK_DOMAIN:-auth.${MAIN_DOMAIN:-razzfazz-box}}
+      AUTHENTIK_HOST_BROWSER: https://${AUTHENTIK_DOMAIN:-auth.${MAIN_DOMAIN:-razzfazz-box}}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-${POSTGRES_USER:-docker}}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB:-authentik_db}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      AUTHENTIK_REDIS__HOST: valkey
+      AUTHENTIK_REDIS__PASSWORD: ${VALKEY_PASSWORD:-}
+      # F-A3: no raw socket — manages Docker outposts via docker-socket-proxy
+      AUTHENTIK_OUTPOSTS__DOCKER_HOST: tcp://docker-socket-proxy:2375
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    volumes:
+      # F-A3: raw socket removed — talks to docker-socket-proxy via DOCKER_HOST
+      - authentik-media:/data
+      - authentik-certs:/certs
+      - authentik-templates:/templates
+      - authentik-blueprints:/blueprints
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+      authentik-migrate-hop:
+        condition: service_completed_successfully
+
+  # ==========================================
+  # Valkey: Redis-compatible Cache
+  # ==========================================
+  valkey:
+    image: valkey/valkey:${VALKEY_VERSION:-9.1.1}
+    # Pinned version — do not use :latest
+    container_name: valkey
+    restart: always
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    command: valkey-server --requirepass ${VALKEY_PASSWORD:-}
+    volumes:
+      - valkey-data:/data
+    ports:
+      - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "${VALKEY_PASSWORD:-}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ==========================================
+  # SMTP Relay: Centralized Mail Sending
+  # ==========================================
+  # Lightweight Postfix relay used by ALL services (Authentik, Dify, Gitea, OpenWebUI).
+  # Accepts unauthenticated mail from Docker network containers and either:
+  #   - Relays to an external SMTP provider (SMTP_MODE=relay, recommended)
+  #   - Sends directly to recipient MX servers (SMTP_MODE=direct)
+  # Configure via SMTP_* variables in .env
+  smtp-relay:
+    image: boky/postfix:v5.1.0
+    container_name: smtp-relay
+    restart: unless-stopped
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    # Remove stale Postfix PID file left over from previous run to prevent startup crash
+    entrypoint: ["/bin/sh", "-c", "rm -f /var/spool/postfix/pid/master.pid && exec /scripts/run.sh"]
+    environment:
+      # Allow all Docker network containers to send without auth
+      - ALLOWED_SENDER_DOMAINS=${SMTP_ALLOWED_SENDER_DOMAINS:-${MAIN_DOMAIN:-razzfazz-box}}
+      - HOSTNAME=${MAIN_DOMAIN:-razzfazz-box}
+      # Relay mode: forward via external SMTP provider
+      # When SMTP_MODE=relay, set RELAYHOST to external provider
+      # When SMTP_MODE=direct, leave RELAYHOST empty (sends directly to MX servers)
+      - RELAYHOST=${SMTP_RELAY_HOST:-}${SMTP_RELAY_PORT:+:${SMTP_RELAY_PORT:-}}
+      - RELAYHOST_USERNAME=${SMTP_RELAY_USERNAME:-}
+      - RELAYHOST_PASSWORD=${SMTP_RELAY_PASSWORD:-}
+      # Enable SASL AUTH for clients that require it (e.g. Dify email plugin)
+      # Only reachable from internal Docker network, so a static password is safe
+      - SMTPD_SASL_USERS=mail@${MAIN_DOMAIN:-razzfazz-box}:${SMTP_INTERNAL_PASSWORD:-mailpass}
+      # TZ for log timestamps
+      - TZ=${TZ:-Europe/Berlin}
+    volumes:
+      - smtp-relay-data:/var/spool/postfix
+    healthcheck:
+      test: ["CMD", "postfix", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+
+
+  # ==========================================
+  # Docker Socket Proxy: Restricted Docker API access
+  # ==========================================
+  # Provides a filtered, read-only Docker API for containers that only need
+  # to inspect state (monitoring, resource display). Containers that need
+  # write access (backup restore, Authentik outposts) still use the socket directly.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/lib/haproxy
+    environment:
+      # Read endpoints
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      INFO: 1
+      VERSION: 1
+      EVENTS: 1
+      PING: 1
+      # F-A3/F-B3: write operations required by razzfazz-config, razzfazz-backup-
+      # management, agent-manager, authentik-worker, and gpustack — migrated away
+      # from raw /var/run/docker.sock. Scope is intentionally narrow: no BUILD,
+      # COMMIT, PLUGINS, NODES, SERVICES, SWARM, TASKS, SECRETS.
+      POST: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+      ALLOW_RESTARTS: 1
+      EXEC: 1
+      BUILD: 0
+      COMMIT: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"
+
+  # ==========================================
+  # Backup: Automated Volume Backups (Offen)
+  # ==========================================
+  # ACCEPTED RISK F-053: No offsite backup replication. Future enhancement: add S3/MinIO
+  # storage backend via BACKUP_STORAGE_* environment variables.
+  # ACCEPTED RISK F-054: No secure erasure of deleted backups. Recommended mitigation:
+  # use LUKS full-disk encryption on the host filesystem to protect data at rest.
+  backup:
+    # F-069: Custom Dockerfile pre-installs docker-cli + openssl (no runtime apk)
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+      args:
+        BACKUP_VERSION: ${BACKUP_VERSION:-v2.48.2}
+    image: razzfazz-backup-service:${BACKUP_VERSION:-v2.48.2}
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: backup-service
+    restart: always
+    env_file:
+      - ../.env
+    # #125 ROOT CAUSE: offen/docker-volume-backup v2 DROPPED the v1
+    # `EXEC_PRE_BACKUP` env var — it is silently IGNORED. The pre-backup hook
+    # (postgres pg_dumpall → postgres_core.sql, the openssl-encrypted .env →
+    # env-backup.enc, and the per-user agent tarballs) therefore NEVER ran on
+    # any cron / CLI / UI backup since the v2 bump, so every archive shipped
+    # WITHOUT the DB dumps, .env, or agent state → restores came up with a
+    # postgres-data volume but no role/.env reconciliation → auth crash-loop.
+    # v2 runs pre-backup commands via the `docker-volume-backup.archive-pre`
+    # LABEL on the container that carries the script (here: backup-service
+    # itself — it holds the docker socket, the dot-env mounts, and the
+    # db-dumps volume the dumps are written into). The env var is left in
+    # place as harmless documentation of intent.
+    labels:
+      docker-volume-backup.archive-pre: /bin/sh -c "sh /scripts/pre-backup.sh"
+    environment:
+      EXEC_PRE_BACKUP: sh /scripts/pre-backup.sh
+      POSTGRES_USER: ${POSTGRES_USER:-docker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:-}
+      BACKUP_EXCLUDE_REGEXP: ${BACKUP_EXCLUDE_REGEXP:-gpustack-data|speaches-data}
+      # #132: offen v2 retention. Pruning is DISABLED unless BACKUP_PRUNING_PREFIX
+      # is set (v2 only deletes files matching the prefix, as a safety guard), so
+      # without it old backups never got pruned → a 929 GB pileup on 0.208. Our
+      # artifacts are named `backup-YYYY-MM-DD-HHMM.tar.gz[.gpg]`, so the prefix
+      # `backup-` scopes pruning to exactly our backups.
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_PRUNING_PREFIX: ${BACKUP_PRUNING_PREFIX:-backup-}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      BACKUP_ENCRYPTION_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD:-}
+      # F-001: Enable GPG encryption at rest for backup archives
+      GPG_PASSPHRASE: ${BACKUP_ENCRYPTION_PASSWORD:-}
+      # F-052: Notification URLs for backup failure alerting (e.g. ntfy, Slack, email)
+      NOTIFICATION_URLS: ${BACKUP_NOTIFICATION_URLS:-}
+      NOTIFICATION_LEVEL: ${BACKUP_NOTIFICATION_LEVEL:-error}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../backups:/archive
+      # offen builds the archive in a HARDCODED /tmp (s.file = /tmp/<name>); it
+      # does NOT honor TMPDIR. With GPG encryption that's ~2x the archive size
+      # written to /tmp per run, and an interrupted run leaks it as deleted-but-
+      # held inodes until the container restarts. On boxes whose OS/root disk is
+      # small (the archive disk is separate), that pressure on root can fill it
+      # and crash-loop postgres. So /tmp is a mount: default = a named volume on
+      # the docker root disk (fine when root is large, e.g. >=2TB NVMe). On a
+      # small-root box, set BACKUP_TMP_DIR in .env to a path on the dedicated
+      # backup disk so the temp build never touches root. See .env.example.
+      - ${BACKUP_TMP_DIR:-backup-tmp}:/tmp
+      - ./backup/pre-backup.sh:/scripts/pre-backup.sh:ro
+      # .env files for encrypted backup
+      - ../.env:/scripts/dot-env:ro
+      - ../.env.dify:/scripts/dot-env-dify:ro
+      # DB Dumps (Generated by pre-backup script)
+      - db-dumps:/backup/databases
+      # Core Backups
+      - postgres-data:/backup/postgres-data:ro
+      - caddy_data:/backup/caddy_data:ro
+      - caddy_config:/backup/caddy_config:ro
+      - valkey-data:/backup/valkey-data:ro
+      # App Backups (Referenzen auf globale Volumes)
+      - open-webui-data:/backup/open-webui-data:ro
+      - pipelines-data:/backup/pipelines-data:ro
+      - postgres-komodo-data:/backup/postgres-komodo-data:ro
+      - gpustack-data:/backup/gpustack-data:ro
+      - dify-app-data:/backup/dify-app-data:ro
+      - dify-sandbox-dependencies:/backup/dify-sandbox-dependencies:ro
+      - dify-sandbox-conf:/backup/dify-sandbox-conf:ro
+      - dify-plugin-daemon:/backup/dify-plugin-daemon:ro
+      - speaches-data:/backup/speaches-data:ro
+      - searxng-data:/backup/searxng-data:ro
+      - authentik-media:/backup/authentik-media:ro
+      - authentik-templates:/backup/authentik-templates:ro
+      - authentik-certs:/backup/authentik-certs:ro
+      - authentik-blueprints:/backup/authentik-blueprints:ro
+      - smtp-relay-data:/backup/smtp-relay-data:ro
+      - gitea-data:/backup/gitea-data:ro
+      - lightrag-data:/backup/lightrag-data:ro
+      - cognee-data:/backup/cognee-data:ro
+      - cognee-data-storage:/backup/cognee-data-storage:ro
+      - docling-scratch:/backup/docling-scratch:ro
+      - stirling-pdf-config:/backup/stirling-pdf-config:ro
+      - paperclip-data:/backup/paperclip-data:ro
+      # M020 S07 + M023 S06: hermes / moltis / coding-tools volumes removed —
+      # those agents are now per-user (volumes named `agent-<type>-<slug>-*`,
+      # provisioned by agent-manager). Per-user-volume backup is a separate
+      # workstream (future milestone). pre-M020 customers had no shipped
+      # data here.
+      - synapse-data:/backup/synapse-data:ro
+      # M007 volumes
+      - paperless-data:/backup/paperless-data:ro
+      - paperless-media:/backup/paperless-media:ro
+      - vaultwarden-data:/backup/vaultwarden-data:ro
+      - onyx-vespa-data:/backup/onyx-vespa-data:ro
+      - onyx-model-cache:/backup/onyx-model-cache:ro
+      - onyx-indexer-model-cache:/backup/onyx-indexer-model-cache:ro
+      - openhands-workspace:/backup/openhands-workspace:ro
+      # M019 — observability profile (OpenLIT + ClickHouse)
+      - observability-data:/backup/observability-data:ro
+      - clickhouse-data:/backup/clickhouse-data:ro
+      # ClickHouse native BACKUP target — populated by pre-backup.sh `BACKUP TO Disk('backups', ...)`
+      - clickhouse-backup:/backup/clickhouse-backup:ro
+    depends_on:
+      - postgres
+
+  # ==========================================
+  # Help Center: Local Documentation Hub
+  # ==========================================
+  razzfazz-help:
+    build:
+      # 2026.07 docs rework: context is the REPO ROOT (was ./core) so the help
+      # image can bake in the canonical customer docs from docs/enterprise/. The
+      # help Dockerfile's COPY paths are prefixed with core/ accordingly.
+      context: ..
+      dockerfile: core/help/Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: razzfazz-help
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - help-cache:/data
+      - ./Authentik/media:/app/static/media:ro
+      - ../config/manifests/versions.json:/app/manifests/versions.json:ro
+      # #125 P1: box-local, gitignored Enterprise-docs overlay. The image bakes
+      # docs/community as the base own_docs; this read-only mount layers the gated
+      # Enterprise docs in at /app/own_docs/enterprise (auto-discovered by
+      # cache_manager.discover_own_docs). Populated per-box by
+      # scripts/sync-enterprise-overlay.sh (from docs/enterprise/ on internal boxes;
+      # a USB bake / gated fetch on public boxes — P1.5/P2). When the host dir is
+      # empty/absent the hub is community-only (no crash). Retention by construction:
+      # overlay/ is gitignored, so a `git checkout <codeberg-tag>` upgrade never
+      # touches it. Path is repo-root-relative (../) like ../.env above.
+      - ../overlay/enterprise/docs:/app/own_docs/enterprise:ro
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+
+  # ==========================================
+  # Start Portal: Post-Login Launcher (M028)
+  # ==========================================
+  razzfazz-start-portal:
+    build:
+      # #54 — context is the REPO ROOT (was ./core) so the image can bake in
+      # the rzfz set-password helper (cli/ + scripts/lib.sh) the password broker
+      # shells out to. The Dockerfile's COPY paths are prefixed with core/
+      # accordingly (same pattern as razzfazz-help).
+      context: ..
+      dockerfile: core/start-portal/Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: razzfazz-start-portal
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # Read by app.py to load COMPOSE_PROFILES from the operator-edited .env
+      # (NEVER source the file — see memory feedback_dotenv_no_source.md).
+      STACK_ENV_PATH: /stack/.env
+      MANIFEST_PATH: /app/manifest.yaml
+      AGENT_MANAGER_URL: http://agent-manager:5000
+      # #54 follow-on — admin-contact for the password-help mailto link.
+      # app.py resolves ADMIN_CONTACT_EMAIL, else razzfazz-ai-admin@MAIN_DOMAIN.
+      # (MAIN_DOMAIN also arrives via env_file ../.env; both listed explicitly
+      # so the resolution is self-documenting and ADMIN_CONTACT_EMAIL is honoured
+      # even when absent from .env — empty default treated as unset.)
+      MAIN_DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+      ADMIN_CONTACT_EMAIL: ${ADMIN_CONTACT_EMAIL:-}
+      DATABASE_URL: postgresql://${AGENT_MANAGER_DB_USER:-${POSTGRES_USER:-docker}}:${AGENT_MANAGER_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}@postgres/${AGENT_MANAGER_DB:-agent_manager_db}
+      # #54 — password broker fan-out. The broker shells out to the rzfz
+      # set-password helper, which runs `docker exec` into dify/cognee/postgres.
+      # No raw socket — go through docker-socket-proxy (EXEC is enabled there).
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      # The helper reads AUTHENTIK_BOOTSTRAP_TOKEN / DIFY_DB / POSTGRES_USER from
+      # the mounted /stack/.env (targeted grep, never sourced).
+      RZFZ_SET_PW_ENV_FILE: /stack/.env
+      RZFZ_SETPW_CMD: /app/cli/set-password.sh
+    volumes:
+      # M028 — read-only mount of the host stack's .env so the portal can
+      # parse COMPOSE_PROFILES at request time (not at boot — operator can
+      # toggle profiles without restarting the portal).
+      - ../.env:/stack/.env:ro
+    depends_on:
+      postgres:
+        condition: service_started
+      docker-socket-proxy:
+        condition: service_started
+    labels:
+      - "com.docker.compose.project=razzfazz-stack"
+
+  # ==========================================
+  # Licenses: Local License Overview
+  # ==========================================
+  razzfazz-licenses:
+    build:
+      context: .
+      dockerfile: licenses/Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: razzfazz-licenses
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - ./Authentik/media:/app/static/media:ro
+      # #68 license reorg: SSOT for the licence overview, read live at request
+      # time (stack.json is the JSON mirror of stack.yaml; license-dates.json
+      # holds the rolling BSL Change Dates). Read-only.
+      - ../stack.json:/app/stack.json:ro
+      - ../config/manifests/license-dates.json:/app/license-dates.json:ro
+    labels:
+        - "com.docker.compose.project=razzfazz-stack"
+
+  # ==========================================
+  # (#22) The razzfazz-setup WEB container was removed in 2026.07. Its
+  # useful functions were migrated into the Configuration Portal
+  # (config.<domain>: TLS cert upload, GPUStack API key, RAG models,
+  # secrets-status, governance, logs, backup) and its dangerous/CLI-only
+  # ops (--regenerate-secrets, --reset, --set-backup-encryption-password)
+  # now run on the host via `rzfz setup` (cli/setup.sh -> cli/setup_lib/).
+  # ==========================================
+  razzfazz-backup-management:
+    build:
+      context: .
+      dockerfile: backup/manager/Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: razzfazz-backup-management
+    restart: always
+    ports:
+      - "127.0.0.1:5005:5000"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-docker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-main_db}
+      HOSTNAME: razzfazz-backup-management
+      BACKUP_INCLUDE_MODEL_FILES: ${BACKUP_INCLUDE_MODEL_FILES:-false}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      BACKUP_ENCRYPTION_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD:-}
+      # F-A3: talk to docker-socket-proxy instead of raw /var/run/docker.sock.
+      # backup_manager.py reads DOCKER_SOCK explicitly (default
+      # `unix://var/run/docker.sock`); set it alongside DOCKER_HOST so the
+      # script's `docker.DockerClient(base_url=DOCKER_SOCK)` honours the
+      # proxy. Without this, "create backup" hangs because the python docker
+      # SDK can't find /var/run/docker.sock and the operation-logs pane
+      # stays empty (rc6.7 #52).
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      DOCKER_SOCK: tcp://docker-socket-proxy:2375
+    volumes:
+      - ../backups:/archive
+      # BSB-03 / R-DEF-03 / R-COMP-13 — broad /stack is :ro.
+      # backup-management reads .env at every call (BSB-04 fix re-reads
+      # the rotated BACKUP_ENCRYPTION_PASSWORD per invocation) and reads
+      # compose.yml to enumerate volumes. No writes to the stack source
+      # tree itself — only the two .env files during restore (narrow rw
+      # mounts below). ISO 27001 A.8.4 conformance — see BSB-03-DEC-01.
+      - ..:/stack:ro
+      # Narrow rw — restore_env_files() decrypts env-backup.enc and
+      # env-dify-backup.enc back to /stack/.env / /stack/.env.dify.
+      # Files always exist (init.sh materializes them from .env*.example
+      # before compose up).
+      - ../.env:/stack/.env:rw
+      - ../.env.dify:/stack/.env.dify:rw
+      # Mount targets for restoration (mirroring backup service for path consistency)
+      # SECURITY: rw required — restore operations write directly to these volumes
+      - db-dumps:/restore_targets/databases
+      - postgres-data:/restore_targets/postgres-data
+      - caddy_data:/restore_targets/caddy_data
+      - caddy_config:/restore_targets/caddy_config
+      - valkey-data:/restore_targets/valkey-data
+      - open-webui-data:/restore_targets/open-webui-data
+      - pipelines-data:/restore_targets/pipelines-data
+      - postgres-komodo-data:/restore_targets/postgres-komodo-data
+      - gpustack-data:/restore_targets/gpustack-data
+      - dify-app-data:/restore_targets/dify-app-data
+      - dify-sandbox-dependencies:/restore_targets/dify-sandbox-dependencies
+      - dify-sandbox-conf:/restore_targets/dify-sandbox-conf
+      - dify-plugin-daemon:/restore_targets/dify-plugin-daemon
+      - speaches-data:/restore_targets/speaches-data
+      - searxng-data:/restore_targets/searxng-data
+      - authentik-media:/restore_targets/authentik-media
+      - authentik-templates:/restore_targets/authentik-templates
+      - authentik-certs:/restore_targets/authentik-certs
+      - authentik-blueprints:/restore_targets/authentik-blueprints
+      - smtp-relay-data:/restore_targets/smtp-relay-data
+      - gitea-data:/restore_targets/gitea-data
+      - lightrag-data:/restore_targets/lightrag-data
+      - cognee-data:/restore_targets/cognee-data
+      - cognee-data-storage:/restore_targets/cognee-data-storage
+      # M007 volumes
+      - paperless-data:/restore_targets/paperless-data
+      - paperless-media:/restore_targets/paperless-media
+      - vaultwarden-data:/restore_targets/vaultwarden-data
+      - onyx-vespa-data:/restore_targets/onyx-vespa-data
+      - onyx-model-cache:/restore_targets/onyx-model-cache
+      - onyx-indexer-model-cache:/restore_targets/onyx-indexer-model-cache
+      - openhands-workspace:/restore_targets/openhands-workspace
+      # Static Assets for UI
+      - ./Authentik/media:/app/static/media:ro
+
+  # ==========================================
+  # Config UI v2 (M008) — unified configuration portal
+  # ==========================================
+  razzfazz-config:
+    build:
+      context: .
+      dockerfile: config/Dockerfile
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    container_name: razzfazz-config
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5007:5000"
+    environment:
+      - ADMIN_PASSWORD=${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      - CONFIG_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      # STACK_ROOT must match the HOST path of the repo so that when
+      # apply_manager runs `docker compose` (via the docker-socket-proxy),
+      # compose hands bind-mount sources to the daemon as paths the daemon
+      # can resolve on the host filesystem. Pre-rc5 we used STACK_ROOT=/stack
+      # which produced paths like /stack/core/Caddy/Caddyfile that the
+      # daemon couldn't resolve — it auto-created /stack as a directory tree
+      # and the next caddy restart failed (mount file→directory mismatch).
+      # ${STACK_HOST_PATH} is set by razzfazz-init.sh / razzfazz-upgrade.sh
+      # to $(realpath .) on first install.
+      - STACK_ROOT=${STACK_HOST_PATH:-/stack}
+      # F-A3: talk to docker-socket-proxy instead of raw socket
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      # #36 follow-up: the MCP-integration governance page calls mcp-manager's
+      # token-gated /internal/governance endpoints. Empty when the mcp profile
+      # is off → the governance page shows a "mcp-manager not running" notice.
+      - MCP_INTERNAL_TOKEN=${MCP_INTERNAL_TOKEN:-}
+    volumes:
+      # Bind the repo at the HOST path inside the container so docker
+      # compose's bind-source resolution matches the daemon's view.
+      # Falls back to /stack for legacy installs that haven't run the
+      # rc5 upgrade yet.
+      # BSB-03 / R-DEF-03 / R-COMP-13 — broad mount is :ro.
+      # razzfazz-config reads compose.yml + every Dockerfile/script it
+      # surfaces in the Modules/Backup/Governance UIs. The few writes
+      # (.env apply, manifest refresh) are routed through the narrow rw
+      # mounts below. ISO 27001 A.8.4 conformance — BSB-03-DEC-01.
+      - ${STACK_HOST_PATH:-..}:${STACK_HOST_PATH:-/stack}:ro
+      # Narrow rw — apply_manager.py + config_manager.py + image_checker.py
+      # write here. The host-path-aware target form keeps both legacy
+      # /stack/ installs and rc5+ STACK_HOST_PATH installs working.
+      - ${STACK_HOST_PATH:-..}/.env:${STACK_HOST_PATH:-/stack}/.env:rw
+      - ${STACK_HOST_PATH:-..}/.env.dify:${STACK_HOST_PATH:-/stack}/.env.dify:rw
+      # image_checker.py refreshes config/manifests/versions.json from the
+      # upstream git remote.
+      - ${STACK_HOST_PATH:-..}/config/manifests/versions.json:${STACK_HOST_PATH:-/stack}/config/manifests/versions.json:rw
+      # backup blueprint reads/writes ARCHIVE_DIR (/stack/backups).
+      - ${STACK_HOST_PATH:-..}/backups:${STACK_HOST_PATH:-/stack}/backups:rw
+      # checksum_manager.py governance DB.
+      - ${STACK_HOST_PATH:-..}/.checksums.db:${STACK_HOST_PATH:-/stack}/.checksums.db:rw
+      # #168: the mac_backends blueprint (Mac LLM gateway panel) rewrites the
+      # gateway's config.yaml via an atomic write (config.yaml.tmp + os.replace).
+      # The broad mount above is :ro, so without this narrow rw override every
+      # add/remove/pull route 500s ("Read-only file system"). Mount the DIRECTORY
+      # (not the single file) so the tmp+rename inode swap works and doesn't go
+      # stale — same reasoning as the .env dir-mount fix.
+      - ${STACK_HOST_PATH:-..}/modules/llm/mac-gateway:${STACK_HOST_PATH:-/stack}/modules/llm/mac-gateway:rw
+      # #22: Settings → Domain & TLS cert-upload (migrated from razzfazz-setup)
+      # writes the operator's bring-your-own cert.pem/key.pem here. Narrow rw;
+      # Caddy mounts the same ../certs as :ro at /certs. Directory ships in-tree.
+      - ${STACK_HOST_PATH:-..}/certs:${STACK_HOST_PATH:-/stack}/certs:rw
+      - razzfazz-config-data:/data
+      - razzfazz-config-audit:/var/log/razzfazz
+      - ./Authentik/media:/app/app/static/media:ro
+      # Read-only bind of the operator's git credentials so image_checker
+      # can fetch the upstream manifest via the smart-HTTP git protocol —
+      # which Authentik's proxy on git.razzfazz.ai exempts (raw-file
+      # paths get the SSO redirect; smart-HTTP /info/refs etc. don't).
+      # Path is set by razzfazz-init.sh / razzfazz-upgrade.sh from
+      # ${HOME}/.git-credentials. Falls back to /dev/null on installs
+      # that haven't been upgraded yet — image_checker degrades to its
+      # error-with-workaround path in that case.
+      - ${STACK_GIT_CREDENTIALS_PATH:-/dev/null}:/root/.git-credentials:ro
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+
+  # ==========================================
+  # autoheal: restarts containers stuck in Docker `unhealthy` state.
+  # Watches every container with the label `autoheal=true`. Currently used by
+  # the gpustack family (gpustack, gpustack-legacy, gpustack-cpu) — M018
+  # discovered (S03.1) that gpustack v2.x can wedge under sustained
+  # saturation while runners stay healthy; the API stops responding but the
+  # process doesn't exit, so `restart: unless-stopped` alone won't recover
+  # it. The healthcheck on the gpustack service flips it to unhealthy after
+  # 3 failed /healthz probes; autoheal then `docker restart`s it within ~30s.
+  # Add `autoheal: "true"` as a service label to opt any container into this.
+  # Reads /var/run/docker.sock directly (it's the watchdog itself; running
+  # via docker-socket-proxy would be a chicken-and-egg if the proxy hangs).
+  # ==========================================
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: autoheal
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: "autoheal"
+      AUTOHEAL_INTERVAL: "30"        # seconds between health scans
+      AUTOHEAL_START_PERIOD: "60"    # grace after container start
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: "30"
+      DOCKER_SOCK: "/var/run/docker.sock"
+    # SECURITY: raw /var/run/docker.sock RW (not via docker-socket-proxy).
+    # F-RC5-3 review (2026-04-29): kept on raw socket by design.
+    # - Chicken-and-egg: autoheal's purpose is to restart unhealthy containers
+    #   INCLUDING the proxy itself if it hangs. Routing through the proxy
+    #   defeats this.
+    # - Blast radius is bounded: AUTOHEAL_CONTAINER_LABEL=autoheal means
+    #   autoheal only restarts containers carrying `labels: { autoheal: "true" }`.
+    #   Today that's exactly one container (gpustack). Adding a service to
+    #   autoheal scope is an explicit per-service opt-in.
+    # - All other services with docker.sock access (backup-service,
+    #   komodo-periphery) use `:ro` read-only mount, which
+    #   denies start/stop/exec at the kernel level.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres-data:
+  valkey-data:
+  authentik-media:
+  authentik-templates:
+  authentik-certs:
+  authentik-blueprints:
+  db-dumps:
+  smtp-relay-data:
+  help-cache:
+  razzfazz-config-data:
+  razzfazz-config-audit:
+  # Default scratch location for offen's hardcoded /tmp archive build, used
+  # unless BACKUP_TMP_DIR is set in .env to a host path (see core/compose.yml
+  # backup service). Lives on the docker root disk.
+  backup-tmp:
+
+networks:
+  ssrf_proxy_network:
+    driver: bridge
+    internal: true
+  # #61 (HIGH-1): the per-user MCP-proxy network. SAME `mcp-network` the
+  # mcp-manager module declares (modules/mcp-manager/compose.yml, `name:
+  # mcp-network`) — compose merges the two identical declarations. Caddy
+  # attaches to it (above) to reach the proxies, which live ONLY here — never on
+  # the stack `default` network — so a proxy can't reach mcp-manager's
+  # /internal/* and enumerate other users. Declared here (not external) so Caddy
+  # always has the network even before the mcp profile's services are created.
+  mcp-network:
+    name: mcp-network
+    driver: bridge
+  # #36 security-review — egress-controlled network for the sandboxed coding
+  # agents (opencode / gsd-pi / codex / user-defined). Each such per-user
+  # container is attached by the provisioner to THIS network ONLY (never the
+  # stack `default` net), so it can reach the whitelisted supporting services
+  # that also join `coding-agents` (searxng, gitea, docling, cognee, dify-api,
+  # gpustack, tika, crawl4ai, speaches, stirling-pdf, presidio-*) by
+  # container name, plus the internet (NON-internal → keeps git/npm/pip + cloud
+  # API/subscription egress), but CANNOT reach postgres / valkey / authentik /
+  # config-portal / backup or any non-whitelisted module. Declared here (not
+  # external) so it always exists even before the agents profile is up; the
+  # whitelisted modules opt in with `name: coding-agents` in their own
+  # networks: block, and compose merges the identical declarations.
+  coding-agents:
+    name: coding-agents
+    driver: bridge

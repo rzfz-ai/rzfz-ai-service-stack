@@ -1,0 +1,2187 @@
+# profiles.yaml — Profile metadata manifest for razzfazz.ai Configuration UI
+# Single source of truth for all module metadata, status, and resource info.
+# Fields marked [deferred] are populated in later slices.
+
+categories:
+  Core: { order: 0, icon: server }
+  AI & Chat: { order: 1, icon: chat }
+  Workflows: { order: 2, icon: workflow }
+  LLM Inference: { order: 3, icon: cpu }
+  Monitoring: { order: 4, icon: monitor }
+  Search: { order: 5, icon: search }
+  Speech: { order: 6, icon: mic }
+  Documents: { order: 7, icon: doc }
+  Git: { order: 8, icon: git }
+  Knowledge: { order: 9, icon: brain }
+  Agents: { order: 10, icon: bot }
+  Communication: { order: 11, icon: message }
+  Security: { order: 12, icon: shield }
+  Enterprise Search: { order: 13, icon: search }
+  Developer Tools: { order: 14, icon: code }
+
+profiles:
+  # ==========================================================================
+  # CORE (always-on, no profile toggle)
+  # ==========================================================================
+  core:
+    name: "Core Infrastructure"
+    category: "Core"
+    maturity: production
+    origin: AT
+    license: Proprietary
+    github: null
+    description: "Always-on foundation: reverse proxy, database, identity, cache, SMTP, backup"
+    long_description: |
+      The core infrastructure layer runs unconditionally and provides shared
+      services for every other module. Caddy serves as the sole external entry
+      point (reverse proxy, TLS termination), Authentik provides SSO and OIDC
+      identity management, PostgreSQL (pgvector) is the shared relational
+      database, and Valkey handles caching and task queues. An internal Postfix
+      SMTP relay delivers mail, and the backup service snapshots Docker volumes
+      on a cron schedule. The Setup, Help, and Licenses web UIs are also part
+      of core.
+    has_ui: false
+    containers:
+      - name: caddy
+        image: "razzfazz-caddy:latest"
+        check_updates: false
+      - name: postgres
+        image: "pgvector/pgvector:pg17"
+        check_updates: true
+      - name: authentik-server
+        image: "ghcr.io/goauthentik/server"
+        check_updates: true
+      - name: authentik-worker
+        image: "ghcr.io/goauthentik/server"
+        check_updates: false
+      - name: valkey
+        image: "valkey/valkey:8-alpine"
+        check_updates: true
+      - name: smtp-relay
+        image: "boky/postfix:latest"
+        check_updates: true
+      # #538: this claimed the upstream `offen/docker-volume-backup:latest`, but
+      # core/compose.yml BUILDS `razzfazz-backup-service` locally (F-069 adds
+      # docker-cli + openssl). With check_updates: true the portal compared a
+      # Docker Hub digest against a locally-built image, which can never match —
+      # a permanent phantom "update available". A local build has no registry to
+      # check, so the flag is off; the upstream base is tracked via BACKUP_VERSION.
+      - name: backup-service
+        image: "razzfazz-backup-service:latest"
+        check_updates: false
+      - name: razzfazz-help
+        image: "razzfazz-help:latest"
+        check_updates: false
+      - name: razzfazz-licenses
+        image: "razzfazz-licenses:latest"
+        check_updates: false
+      - name: razzfazz-backup-management
+        image: "razzfazz-backup-management:latest"
+        check_updates: false
+      - name: razzfazz-config
+        image: "razzfazz-config:latest"
+        check_updates: false
+      # F-A3: docker socket isolation. razzfazz-config, agent-manager,
+      # backup-service, authentik-worker, and gpustack all talk to this
+      # proxy via DOCKER_HOST tcp://docker-socket-proxy:2375 instead of
+      # mounting the raw /var/run/docker.sock.
+      - name: docker-socket-proxy
+        image: "tecnativa/docker-socket-proxy:v0.4.2"
+        check_updates: true
+      # M018 / S03.5: autoheal sidecar. Watches `autoheal=true`-labelled
+      # containers in Docker `unhealthy` state and restarts them after the
+      # configured grace period. ~120 s unattended recovery from the
+      # gpustack-server hang failure mode + similar Docker-healthcheck-
+      # signaled stalls anywhere in the stack.
+      - name: autoheal
+        image: "willfarrell/autoheal:1.2.0"
+        check_updates: true
+    urls: []
+    databases:
+      - authentik_db
+    ram_estimate_mb: 3400
+    dependencies:
+      required: []
+    mutual_exclusion: []
+    enable_impact: "Core services cannot be toggled — they are always running."
+    disable_impact: "Core services cannot be disabled."
+    stack_impact: none
+    risk_on_toggle: danger
+
+  # ==========================================================================
+  # PRODUCTION PROFILES
+  # ==========================================================================
+  chat:
+    name: "Chat"
+    category: "AI & Chat"
+    maturity: production
+    origin: US
+    license: MIT
+    github: "https://github.com/open-webui/open-webui"
+    description: "ChatGPT-like interface for local LLM models with RAG, tools, and user management"
+    long_description: |
+      Open WebUI provides a full-featured ChatGPT-like interface for interacting
+      with locally-running AI models. It supports multi-model conversations,
+      retrieval-augmented generation (RAG) with document upload, web search
+      integration via SearXNG, voice input/output via Speaches, custom pipelines,
+      and multi-user access control via Authentik SSO.
+
+      Use cases: team AI chat, document Q&A, code review, content generation,
+      knowledge base queries with uploaded documents.
+    has_ui: true
+    app_icon: "razzfazz-ai_chat_icon.png"
+    containers:
+      - name: openwebui
+        image: "ghcr.io/open-webui/open-webui"
+        check_updates: true
+      - name: pipelines
+        image: "ghcr.io/open-webui/pipelines"
+        check_updates: true
+      # #538: one-shot init containers. Missing here, a portal-enabled chat
+      # skipped BOTH the schema migrate/reconcile and the OWUI seed. They exit
+      # after running; get_profile_health() already ignores exited one-shots.
+      - name: openwebui-migrate-reconcile
+        image: "postgres:17.10"
+        check_updates: false
+      - name: openwebui-seed
+        image: "razzfazz-stack-openwebui-seed:latest"
+        check_updates: false
+    urls:
+      - subdomain: chat
+        label: "Chat UI"
+    databases:
+      - openwebui_db
+    ram_estimate_mb: 800
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+      optional: ["searxng", "stts"]
+    mutual_exclusion: []
+    enable_impact: "Pulls ~2 GB image, creates database, starts in ~30s"
+    disable_impact: "Stops containers, data preserved in volumes"
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "chat/compose.yml"
+    compose_depends_on: ["postgres", "valkey"]
+    networking:
+      caddy_routes:
+        - subdomain: chat
+          target: "openwebui:8080"
+      internal_connections:
+        - from: openwebui
+          to: "gpustack:9090"
+          purpose: "LLM inference API (OpenAI-compatible)"
+        - from: openwebui
+          to: "postgres:5432"
+          purpose: "Application database"
+        - from: openwebui
+          to: "searxng:8080"
+          purpose: "Web search (when enabled)"
+        - from: pipelines
+          to: "openwebui:8080"
+          purpose: "Pipeline callbacks"
+    storage:
+      volumes:
+        - name: open-webui-data
+          purpose: "User uploads, RAG documents, chat history"
+        - name: pipelines-data
+          purpose: "Pipeline configurations and custom code"
+    authentik:
+      app_name: "Chat"
+      provider: "Caddy Forward Auth Provider To Chat"
+      user_group: "razzfazz.ai Chat Users"
+    env_vars:
+      - name: OPENWEBUI_PORT
+        default: "8080"
+        secret: false
+        description: "Internal port for Open WebUI"
+      - name: WEBUI_SECRET_KEY
+        secret: true
+        description: "Session encryption key"
+      - name: ENABLE_OLLAMA_API
+        default: "false"
+        secret: false
+        description: "Expose Ollama-compatible API via GPUStack"
+
+  dify:
+    name: "Workflows (Dify)"
+    category: "Workflows"
+    maturity: production
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/langgenius/dify"
+    description: "LLM workflow automation platform — visual builder for AI agents, RAG pipelines, and chatbots"
+    has_ui: true
+    app_icon: "razzfazz-ai_workflow_icon.png"
+    containers:
+      - name: dify-api
+        image: "langgenius/dify-api"
+        check_updates: true
+      - name: dify-worker
+        image: "langgenius/dify-api"
+        check_updates: false
+      - name: dify-worker-beat
+        image: "langgenius/dify-api"
+        check_updates: false
+      - name: dify-web
+        image: "razzfazz-dify-web:latest"
+        check_updates: false
+      - name: dify-sandbox
+        image: "langgenius/dify-sandbox"
+        check_updates: true
+      - name: dify-plugin-daemon
+        image: "langgenius/dify-plugin-daemon"
+        check_updates: true
+      - name: dify-init-permissions
+        image: "busybox:latest"
+        check_updates: false
+    urls:
+      - subdomain: dify
+        label: "Workflow Builder"
+    databases:
+      - dify_db
+      - dify_plugin_db
+    ram_estimate_mb: 2100
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+      optional: ["searxng"]
+    mutual_exclusion: []
+    enable_impact: "Starts 7 containers (~2 GB RAM), creates 2 databases"
+    disable_impact: "Stops all Dify containers, data preserved"
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "dify/compose.yml"
+    compose_depends_on: ["postgres", "valkey", "caddy"]
+    networking:
+      caddy_routes:
+        - subdomain: dify
+          target: "dify-web:3000"
+        - subdomain: dify
+          path: "/console/api/*, /api/*, /v1/*, /files/*, /triggers/*"
+          target: "dify-api:5001"
+      internal_connections:
+        - from: dify-api
+          to: "postgres:5432"
+          purpose: "Application database (dify_db)"
+        - from: dify-api
+          to: "valkey:6379"
+          purpose: "Task queue and cache"
+        - from: dify-api
+          to: "caddy:8195"
+          purpose: "SSRF-protected outbound HTTP proxy"
+        - from: dify-plugin-daemon
+          to: "dify-api:5001"
+          purpose: "Plugin callbacks to Dify API"
+        - from: dify-sandbox
+          to: "caddy:8195"
+          purpose: "Sandboxed code execution outbound proxy"
+    storage:
+      volumes:
+        - name: dify-app-data
+          purpose: "Uploaded files, workflow data, app storage"
+        - name: dify-sandbox-dependencies
+          purpose: "Cached Python dependencies for sandbox"
+        - name: dify-sandbox-conf
+          purpose: "Sandbox configuration"
+        - name: dify-plugin-daemon
+          purpose: "Installed plugins and plugin storage"
+    authentik:
+      app_name: "Workflow Automation"
+      provider: "Caddy Forward Auth Provider to Dify"
+      user_group: "razzfazz.ai Workflow Automation Users"
+    env_vars:
+      - name: DIFY_VERSION
+        default: "latest"
+        secret: false
+        description: "Dify API/worker image tag"
+      - name: DIFY_DOMAIN
+        default: "dify.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for the Dify web UI"
+      - name: DIFY_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret for Dify"
+      - name: SANDBOX_API_KEY
+        default: "dify-sandbox"
+        secret: true
+        description: "API key for Dify sandbox code execution service"
+    long_description: |
+      Dify is a visual LLM application platform for building AI agents, RAG
+      pipelines, chatbots, and workflow automations without writing code. It
+      connects to local models via GPUStack, supports document ingestion with
+      vector search, and provides a plugin marketplace for extending capabilities.
+
+      Use cases: customer support bots, document summarization workflows,
+      multi-step AI agents, internal knowledge bases, API-driven LLM apps.
+
+  llm-cpu:
+    name: "LLM Inference (CPU, stable)"
+    category: "LLM Inference"
+    maturity: production
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/gpustack/gpustack"
+    description: "GPUStack v0.7.1-cpu — STABLE CPU LLM inference path. M029-S04 reverted the deprecation: while upstream GPUStack v2.x stabilizes, the v0.7.1 CPU path is the production default for CPU-only deployments. Use the `llm` profile + HARDWARE=cpu only as the EXPERIMENTAL opt-in."
+    has_ui: true
+    app_icon: "razzfazz-ai_llm_icon.png"
+    containers:
+      - name: gpustack
+        image: "gpustack/gpustack:v0.7.1-cpu"
+        check_updates: true
+      - name: model-sync
+        image: "razzfazz-model-sync:latest"
+        check_updates: false
+      - name: ollama-proxy
+        image: "eyalrot2/ollama-openai-proxy:latest"
+        check_updates: true
+    urls:
+      - subdomain: llm
+        label: "GPUStack Dashboard"
+    databases:
+      - gpustack_db
+    ram_estimate_mb: 800
+    ram_dynamic: true
+    ram_notes: |
+      Base GPUStack container uses ~800 MB. Loaded models consume
+      additional CPU memory depending on model size and quantization:
+      gemma4 (Q4): ~5 GB, qwen3-coder-next (Q4): ~9 GB.
+      Model memory is ON TOP of the container estimate.
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: ["llm", "llm-legacy"]
+    enable_impact: "Starts GPUStack + model sync + Ollama proxy. Models must be deployed separately."
+    disable_impact: "Stops LLM inference. Chat and Dify lose model access."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "llm/compose.yml"
+    compose_depends_on: ["postgres"]
+    networking:
+      caddy_routes:
+        - subdomain: llm
+          target: "gpustack:9090"
+      internal_connections:
+        - from: gpustack
+          to: "postgres:5432"
+          purpose: "GPUStack metadata database"
+        - from: model-sync
+          to: "gpustack:9090"
+          purpose: "Poll GPUStack API for model list"
+        - from: model-sync
+          to: "postgres:5432"
+          purpose: "Sync model list to Open WebUI database"
+        - from: ollama-proxy
+          to: "caddy:8989"
+          purpose: "Translate Ollama API to GPUStack OpenAI API"
+    storage:
+      volumes:
+        - name: gpustack-data
+          purpose: "Model files, GPUStack state, inference cache"
+    authentik:
+      app_name: "LLM Management"
+      provider: "Caddy Forward Auth Provider for LLM"
+      user_group: "razzfazz.ai LLM Management Users"
+    env_vars:
+      - name: GPUSTACK_PORT
+        default: "9090"
+        secret: false
+        description: "Internal API port for GPUStack"
+      - name: GPUSTACK_API_KEY
+        default: "gpustack_CHANGEME_AFTER_FIRST_START"
+        secret: true
+        description: "API key for GPUStack model management and inference"
+      - name: GPUSTACK_MODE
+        default: "standalone"
+        secret: false
+        description: "Deployment mode: standalone, master, or worker"
+      - name: GPUSTACK_DATABASE_URL
+        secret: true
+        description: "PostgreSQL connection string for GPUStack"
+    long_description: |
+      GPUStack is a model serving platform that manages downloading, loading,
+      and serving LLM models via an OpenAI-compatible API. The CPU profile
+      uses llama.cpp for inference without GPU acceleration. It includes a
+      model-sync sidecar that mirrors the model list to Open WebUI and an
+      Ollama-compatible proxy for legacy tool integration.
+
+      Use cases: serving local LLMs for chat, code completion, embeddings,
+      multi-model A/B testing, distributed inference across worker nodes.
+
+  llm-legacy:
+    name: "LLM Inference (stable, GPUStack 0.7.1 + Vulkan)"
+    category: "LLM Inference"
+    maturity: production
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/gpustack/gpustack"
+    description: "GPUStack v0.7.1 + custom AMD Vulkan build — STABLE production default for AMD Strix Halo. M029-S04: promoted from rollback safety net to default while upstream v2.x stabilizes. Validated leak-free under stop/start cycles (M029-S01) — see ~/.gsd/reports/m029-s01-result-2026-05-07.md. Will be retired once `llm` (v2.1.x) has been in production ≥30 days post-2026.05-ga (tracked in M025-S01 split-out at 2026.10)."
+    has_ui: true
+    app_icon: "razzfazz-ai_llm_icon.png"
+    containers:
+      - name: gpustack
+        image: "razzfazz-gpustack:vulkan"
+        check_updates: false
+      - name: model-sync
+        image: "razzfazz-model-sync:latest"
+        check_updates: false
+      - name: ollama-proxy
+        image: "eyalrot2/ollama-openai-proxy:latest"
+        check_updates: true
+    urls:
+      - subdomain: llm
+        label: "GPUStack Dashboard"
+    databases:
+      - gpustack_db
+    ram_estimate_mb: 800
+    ram_dynamic: true
+    ram_notes: |
+      Base GPUStack with Vulkan uses ~800 MB. Models are offloaded
+      to GPU VRAM when possible, reducing CPU memory usage.
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: ["llm", "llm-cpu"]
+    enable_impact: "Starts the frozen 0.7.1 + AMD Vulkan stack. Use only as a rollback from the standard `llm` profile."
+    disable_impact: "Stops LLM inference. Chat and Dify lose model access."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "llm/compose.yml"
+    compose_depends_on: ["postgres"]
+    networking:
+      caddy_routes:
+        - subdomain: llm
+          target: "gpustack:9090"
+      internal_connections:
+        - from: gpustack
+          to: "postgres:5432"
+          purpose: "GPUStack metadata database"
+        - from: model-sync
+          to: "gpustack:9090"
+          purpose: "Poll GPUStack API for model list"
+        - from: model-sync
+          to: "postgres:5432"
+          purpose: "Sync model list to Open WebUI database"
+        - from: ollama-proxy
+          to: "caddy:8989"
+          purpose: "Translate Ollama API to GPUStack OpenAI API"
+    storage:
+      volumes:
+        - name: gpustack-data
+          purpose: "Model files, GPUStack state, inference cache"
+    authentik:
+      app_name: "LLM Management"
+      provider: "Caddy Forward Auth Provider for LLM"
+      user_group: "razzfazz.ai LLM Management Users"
+    env_vars:
+      - name: GPUSTACK_PORT
+        default: "9090"
+        secret: false
+        description: "Internal API port for GPUStack"
+      - name: GPUSTACK_API_KEY
+        default: "gpustack_CHANGEME_AFTER_FIRST_START"
+        secret: true
+        description: "API key for GPUStack model management and inference"
+      - name: GPUSTACK_MODE
+        default: "standalone"
+        secret: false
+        description: "Deployment mode: standalone, master, or worker"
+    long_description: |
+      GPUStack with Vulkan/ROCm GPU acceleration for AMD Radeon GPUs.
+      Offloads model layers to GPU VRAM for significantly faster inference
+      compared to CPU-only mode. Built from a custom Dockerfile that includes
+      Vulkan ICD and ROCm libraries. Otherwise identical to the CPU profile
+      in features: model sync, Ollama proxy, and OpenAI-compatible API.
+
+      Use cases: high-throughput local LLM inference on AMD GPUs, serving
+      large models that benefit from VRAM offloading, real-time chat.
+
+  llm:
+    name: "LLM Inference (experimental, GPUStack 2.1.x)"
+    category: "LLM Inference"
+    maturity: experimental
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/gpustack/gpustack"
+    description: "GPUStack v2.1.x model server — EXPERIMENTAL. M029-S04: demoted from default to experimental while upstream stabilizes. Known issues: bus.py / cache.py memory leak under stop/start cycles (rc6.7 #48 / upstream PR #5255 still open) — partial backport via usercustomize.py monkey-patches. Custom backends (kyuz0 ROCm runner for AMD Strix Halo, ggml-org llama.cpp:server for CPU) registered automatically by llm/gpustack/init-backends.py. NVIDIA uses built-in vLLM. Pick `llm-legacy` for AMD or `llm-cpu` for CPU as the stable defaults; opt into `llm` for the latest features by passing --llm-experimental to razzfazz-init.sh / razzfazz-upgrade.sh, or via the Configuration Portal toggle."
+    has_ui: true
+    app_icon: "razzfazz-ai_llm_icon.png"
+    containers:
+      - name: gpustack
+        image: "gpustack/gpustack:v2.1.2"
+        check_updates: true
+      - name: model-sync
+        image: "razzfazz-model-sync:latest"
+        check_updates: false
+      - name: ollama-proxy
+        image: "eyalrot2/ollama-openai-proxy:latest"
+        check_updates: true
+    urls:
+      - subdomain: llm
+        label: "GPUStack Dashboard"
+    databases:
+      - gpustack_db
+    ram_estimate_mb: 800
+    ram_dynamic: true
+    ram_notes: |
+      Base GPUStack v2.x server uses ~800 MB. Inference happens in
+      separate runner containers (llama-server in kyuz0/amd-strix-halo-toolboxes
+      for AMD, llama.cpp:server for CPU, gpustack/runner:cuda-vllm for NVIDIA);
+      their memory is on top of the server estimate and is dominated by
+      the loaded model size + KV cache.
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: ["llm-legacy", "llm-cpu"]
+    enable_impact: "Starts upstream GPUStack v2.x + model-sync. Hardware overlay (HARDWARE) determines which devices the server sees. init-backends.py registers the custom inference backends."
+    disable_impact: "Stops LLM inference. Chat and Dify lose model access."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "llm/compose.yml"
+    compose_depends_on: ["postgres"]
+    networking:
+      caddy_routes:
+        - subdomain: llm
+          target: "gpustack:9090"
+      internal_connections:
+        - from: gpustack
+          to: "postgres:5432"
+          purpose: "GPUStack metadata database (gpustack_db)"
+        - from: gpustack
+          to: "docker-socket-proxy:2375"
+          purpose: "Spawn per-model runner containers (llama-box-custom, llama-cpp-cpu-custom)"
+        - from: model-sync
+          to: "gpustack:9090"
+          purpose: "Poll GPUStack API for model list, write OpenWebUI placeholder meta"
+        - from: model-sync
+          to: "postgres:5432"
+          purpose: "Sync model list to Open WebUI database"
+        - from: ollama-proxy
+          to: "caddy:8989"
+          purpose: "Translate Ollama API to GPUStack OpenAI API"
+    storage:
+      volumes:
+        - name: gpustack-data
+          purpose: "Model files, GPUStack state, inference cache"
+    authentik:
+      app_name: "LLM Management"
+      provider: "Caddy Forward Auth Provider for LLM"
+      user_group: "razzfazz.ai LLM Management Users"
+    env_vars:
+      - name: GPUSTACK_VERSION
+        default: "v2.1.2"
+        secret: false
+        description: "Upstream gpustack/gpustack image tag for the `llm` profile"
+      - name: HARDWARE
+        default: "amd"
+        secret: false
+        description: "Hardware target (amd|nvidia|cpu) — selects llm/compose.devices.<HARDWARE>.yml"
+      - name: COMPOSE_FILE
+        default: "compose.yml:llm/compose.devices.amd.yml"
+        secret: false
+        description: "Auto-set from HARDWARE by razzfazz-init.sh / razzfazz-upgrade.sh"
+      - name: GPUSTACK_PORT
+        default: "9090"
+        secret: false
+        description: "Internal API port for GPUStack"
+      - name: GPUSTACK_API_KEY
+        default: "gpustack_CHANGEME_AFTER_FIRST_START"
+        secret: true
+        description: "API key for GPUStack model management and inference"
+      - name: GPUSTACK_MODE
+        default: "standalone"
+        secret: false
+        description: "Deployment mode: standalone, master, or worker"
+      - name: GPUSTACK_BIND
+        default: "0.0.0.0"
+        secret: false
+        description: "Required 0.0.0.0 in standalone for the embedded-worker self-healthcheck via host.docker.internal"
+      - name: GPUSTACK_DATABASE_URL
+        secret: true
+        description: "PostgreSQL connection string for GPUStack"
+    long_description: |
+      Standard LLM inference path (M018+). Upstream GPUStack v2.x with custom
+      backends registered via the v2 admin API (POST /v2/inference-backends):
+        - llama-box-custom → kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1 (AMD)
+        - llama-cpp-cpu-custom → ghcr.io/ggml-org/llama.cpp:server (CPU)
+      NVIDIA uses GPUStack's built-in vLLM backend (auto-pulls
+      gpustack/runner:cuda-vllm-* on demand).
+
+      Hardware-specific bits live in a separate device overlay file
+      (llm/compose.devices.<HARDWARE>.yml) so a single service definition
+      covers all variants. razzfazz-init.sh auto-detects HARDWARE; operators
+      can override with --hardware.
+
+      Use cases: serving local LLMs for chat, code completion, embeddings,
+      multi-model A/B testing, distributed inference across worker nodes.
+
+  mac-llm:
+    name: "Mac LLM Gateway (LiteLLM)"
+    category: "LLM Inference"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: "https://github.com/BerriAI/litellm"
+    description: "Fronts one-or-more Macs running Ollama (Apple-Silicon / MLX) as a SECOND OpenAI-compatible endpoint — load-balanced + health-checked — via a LiteLLM proxy. Opt-in, OFF by default; GPUStack is UNTOUCHED. Declare Macs in modules/llm/mac-gateway/config.yaml (from config.example.yaml); a Config Portal panel (P2) will manage them. Internal-only in P1 (master-key auth, no Caddy route)."
+    has_ui: false
+    containers:
+      - name: llm-mac-gateway
+        image: "ghcr.io/berriai/litellm:main-v1.93.0-stable"
+        check_updates: true
+    ram_estimate_mb: 400
+    ram_dynamic: false
+    ram_notes: |
+      LiteLLM proxy is a lightweight Python service (mem_limit 1g). All
+      inference happens ON the Macs (outside the stack) — no model memory here.
+    dependencies:
+      required: ["core"]
+    enable_impact: "Starts the llm-mac-gateway LiteLLM proxy. Requires MAC_GATEWAY_MASTER_KEY set and modules/llm/mac-gateway/config.yaml populated with your Macs. Add http://llm-mac-gateway:4000/v1 as a 2nd OpenAI endpoint in Open WebUI / Dify to surface the Mac models."
+    disable_impact: "Stops the Mac gateway. Mac-hosted models disappear from the model list; the GPUStack path is unaffected."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "llm/mac-gateway/compose.yml"
+    compose_depends_on: []
+    networking:
+      internal_connections:
+        - from: openwebui
+          to: "llm-mac-gateway:4000"
+          purpose: "2nd OpenAI-compatible endpoint (Mac-hosted models), master-key auth"
+        - from: llm-mac-gateway
+          to: "<mac-ip>:11434"
+          purpose: "Route inference to each Mac's Ollama OpenAI-compatible /v1 endpoint (host LAN, plaintext — firewall each Mac to this box's IP)"
+    env_vars:
+      - name: MAC_GATEWAY_MASTER_KEY
+        secret: true
+        description: "Master key components present to authenticate to the gateway. Required when mac-llm is enabled."
+      - name: MAC_GATEWAY_PORT
+        default: "4000"
+        secret: false
+        description: "Loopback host-side debug port (127.0.0.1); in-network consumers use llm-mac-gateway:4000"
+      - name: LITELLM_VERSION
+        default: "main-v1.93.0-stable"
+        secret: false
+        description: "Pinned LiteLLM image tag (ghcr.io/berriai/litellm:<tag>). Repin to a reviewed tag / digest at ship."
+    long_description: |
+      An opt-in LiteLLM proxy (llm-mac-gateway) that federates Mac-hosted
+      Ollama/MLX models into the stack as a SECOND OpenAI-compatible endpoint,
+      load-balanced and health-checked. GPUStack is left completely untouched —
+      the gateway is a second endpoint alongside gpustack:9090/v1-openai, not a
+      replacement (design decision, 2026-07-12).
+
+      Each Mac is a host ip:port plus one-or-more {alias, ollama_tag} models,
+      declared in the per-box, gitignored config.yaml (template:
+      config.example.yaml). Two Macs sharing an alias for the same model
+      auto-form one load-balance group.
+
+      P1 (this release) is declarative: hand-edit config.yaml + wire Open WebUI.
+      P2 adds a Config Portal "Mac LLM backends" panel (add/remove Macs, live
+      health, Tier-1 model management over Ollama's HTTP API). Internal-only —
+      no external route in P1; managed via the SSO-gated Config Portal.
+
+  monitor:
+    name: "Monitoring (Komodo)"
+    category: "Monitoring"
+    maturity: production
+    origin: US
+    license: GPL-3.0
+    github: "https://github.com/moghtech/komodo"
+    description: "Container monitoring and management UI — logs, restart controls, deployment tracking"
+    has_ui: true
+    app_icon: "razzfazz-ai_admin_icon.png"
+    containers:
+      - name: komodo-core
+        image: "ghcr.io/moghtech/komodo-core"
+        check_updates: true
+      - name: komodo-periphery
+        image: "ghcr.io/moghtech/komodo-periphery"
+        check_updates: true
+      - name: ferretdb
+        image: "ghcr.io/ferretdb/ferretdb"
+        check_updates: true
+      - name: postgres-komodo
+        image: "ghcr.io/ferretdb/postgres-documentdb"
+        check_updates: true
+    urls:
+      - subdomain: admin
+        label: "Komodo Dashboard"
+    databases: []
+    ram_estimate_mb: 600
+    dependencies:
+      required: []
+    mutual_exclusion: []
+    enable_impact: "Starts 4 containers with own PostgreSQL. Uses ~600 MB RAM."
+    disable_impact: "Stops monitoring UI. No impact on other services."
+    stack_impact: none
+    risk_on_toggle: safe
+    compose_file: "monitor/compose.yml"
+    compose_depends_on: ["postgres-komodo", "ferretdb"]
+    networking:
+      caddy_routes:
+        - subdomain: admin
+          target: "komodo-core:8180"
+      internal_connections:
+        - from: komodo-core
+          to: "ferretdb:27017"
+          purpose: "MongoDB-compatible document store (via FerretDB)"
+        - from: ferretdb
+          to: "postgres-komodo:5432"
+          purpose: "FerretDB backend storage"
+        - from: komodo-periphery
+          to: "/var/run/docker.sock"
+          purpose: "Docker container management and log collection"
+    storage:
+      volumes:
+        - name: postgres-komodo-data
+          purpose: "Komodo monitoring database (separate PostgreSQL instance)"
+    authentik:
+      app_name: "Administration"
+      provider: "Caddy Forward Auth Provider to Admin"
+      user_group: "razzfazz.ai Docker Management Users"
+    env_vars:
+      - name: KOMODO_PORT
+        default: "8180"
+        secret: false
+        description: "Internal port for Komodo Core web UI"
+      - name: KOMODO_INIT_ADMIN_USERNAME
+        default: "admin"
+        secret: false
+        description: "Initial admin username for Komodo"
+      - name: KOMODO_INIT_ADMIN_PASSWORD
+        default: "Run4Quality!"
+        secret: true
+        description: "Initial admin password for Komodo"
+      - name: KOMODO_PASSKEY
+        secret: true
+        description: "Passkey for Komodo periphery agent authentication"
+    long_description: |
+      Komodo provides a web-based dashboard for monitoring and managing all
+      Docker containers in the stack. It shows real-time logs, resource usage,
+      restart controls, and deployment tracking. Uses its own PostgreSQL
+      instance via FerretDB (MongoDB-compatible) to avoid sharing the main
+      database.
+
+      Use cases: container health monitoring, log inspection, restart/stop
+      individual services, track deployment history and resource consumption.
+
+  searxng:
+    name: "Search (SearXNG)"
+    category: "Search"
+    maturity: production
+    origin: EU
+    license: AGPL-3.0
+    github: "https://github.com/searxng/searxng"
+    description: "Privacy-focused metasearch engine — aggregates results from 70+ search engines"
+    has_ui: true
+    # Internal-only: container has a built-in web UI, but the stack uses
+    # SearXNG as a backend search engine for OpenWebUI (consumed via Docker
+    # DNS at http://searxng:8080). NOT exposed to end users via Caddy +
+    # Authentik. The validator (scripts/validate-module.sh) skips Caddy/
+    # Authentik wiring probes (C7/C8) when this flag is set. F-A1 (S01.4.2).
+    internal_only: true
+    app_icon: "razzfazz-ai_search_icon.png"
+    containers:
+      - name: searxng
+        image: "searxng/searxng:latest"
+        check_updates: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 300
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts SearXNG. Used by Chat and Dify for web search."
+    disable_impact: "Web search in Chat and Dify stops working."
+    stack_impact: none
+    risk_on_toggle: safe
+    compose_file: "search/searxng/compose.yml"
+    compose_depends_on: []
+    networking:
+      caddy_routes: []
+      internal_connections:
+        - from: openwebui
+          to: "searxng:8080"
+          purpose: "Web search queries from Chat"
+        - from: dify-api
+          to: "searxng:8080"
+          purpose: "Web search queries from Dify workflows"
+    storage:
+      volumes: []
+    env_vars:
+      - name: SEARXNG_PORT
+        default: "8088"
+        secret: false
+        description: "Internal port for SearXNG search API"
+      - name: SEARXNG_VERSION
+        default: "latest"
+        secret: false
+        description: "SearXNG Docker image tag"
+    long_description: |
+      SearXNG is a privacy-respecting metasearch engine that aggregates results
+      from 70+ search engines (Google, Bing, DuckDuckGo, etc.) without tracking.
+      It runs as an internal service consumed by Open WebUI and Dify for web
+      search augmentation. No external UI is exposed; it operates as a backend
+      API for other services.
+
+      Use cases: web search in AI chat conversations, grounding LLM responses
+      with current information, research augmentation in Dify workflows.
+
+  crawl4ai:
+    name: "Crawl4AI"
+    category: "Search"
+    maturity: experimental
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/unclecode/crawl4ai"
+    description: "RAG-friendly web crawler — Markdown extraction, structured scraping, browser automation"
+    has_ui: true
+    app_icon: "razzfazz-ai_search_icon.png"
+    containers:
+      - name: crawl4ai
+        image: "unclecode/crawl4ai"
+        check_updates: true
+    urls:
+      - subdomain: crawl4ai
+        label: "Crawl4AI Playground"
+    databases: []
+    ram_estimate_mb: 1024
+    dependencies:
+      required: ["core"]
+      recommended: []
+      optional: []
+    mutual_exclusion: []
+    enable_impact: "Pulls ~3 GB image (Chromium + Playwright bundled), starts in ~60s. Reserves 1g RAM + 1g shared memory for the headless browser."
+    disable_impact: "Stops the crawler container; cache volume preserved for re-enable."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "search/crawl4ai/compose.yml"
+    compose_depends_on: []
+    networking:
+      caddy_routes:
+        - subdomain: crawl4ai
+          target: "crawl4ai:11235"
+      internal_connections:
+        - from: dify-api
+          to: "crawl4ai:11235"
+          purpose: "RAG ingestion crawls from Dify knowledge-base workflows"
+        - from: openwebui
+          to: "crawl4ai:11235"
+          purpose: "On-demand page distillation requested from chat"
+    storage:
+      volumes:
+        - name: crawl4ai-cache
+          purpose: "Browser cache + crawl history"
+    authentik:
+      app_name: "Crawl4AI"
+      provider: "Caddy Forward Auth Provider for Crawl4AI"
+      user_group: "razzfazz.ai Crawl4AI Users"
+    env_vars:
+      - name: CRAWL4AI_VERSION
+        default: "0.8.9"
+        secret: false
+        description: "crawl4ai Docker image tag"
+      - name: CRAWL4AI_PORT
+        default: "8201"
+        secret: false
+        description: "Host-side loopback port"
+      - name: CRAWL4AI_DOMAIN
+        default: "crawl4ai.${MAIN_DOMAIN}"
+        secret: false
+        description: "Caddy subdomain for the playground / API"
+      - name: CRAWL4AI_CLIENT_SECRET
+        default: ""
+        secret: true
+        description: "Authentik forward-auth client secret"
+    long_description: |
+      Crawl4AI is an open-source web crawler purpose-built for RAG and
+      AI-grounding workflows. It runs Chromium headless under Playwright,
+      executes JavaScript, and emits clean Markdown / structured JSON suitable
+      for direct ingestion into LightRAG, Cognee, Onyx, or Dify knowledge
+      bases. Unlike SearXNG (which retrieves URLs), Crawl4AI fetches and
+      distills the actual page content.
+
+      Surfaces: REST API at /crawl, /scrape, /llm; OpenAPI at /docs; an
+      operator playground at /playground; a monitoring dashboard at
+      /dashboard. All paths gate through Authentik forward_auth except the
+      Docker healthcheck (/monitor/health) and the OpenAPI spec.
+
+      Use cases: ingesting curated URLs into a knowledge base on a schedule;
+      ad-hoc operator queries to test extraction recipes; on-demand page
+      distillation requested from chat ("read this URL and summarise"). Pairs
+      with SearXNG (URL discovery) and Dify (workflow orchestration).
+
+  stts:
+    name: "Speech (STT/TTS)"
+    category: "Speech"
+    maturity: production
+    origin: US
+    license: MIT
+    github: "https://github.com/speaches-ai/speaches"
+    description: "Speech-to-text and text-to-speech via Speaches (Whisper STT + Kokoro/Piper TTS)"
+    has_ui: false
+    containers:
+      - name: speaches
+        image: "ghcr.io/speaches-ai/speaches:latest-cpu"
+        check_updates: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 500
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts STT + TTS services. Downloads Whisper model (~500 MB) on first start."
+    disable_impact: "Voice features in Chat stop working."
+    stack_impact: none
+    risk_on_toggle: safe
+    compose_file: "stts/compose.yml"
+    compose_depends_on: []
+    networking:
+      caddy_routes: []
+      internal_connections:
+        - from: openwebui
+          to: "speaches:8000"
+          purpose: "Speech-to-text transcription (Whisper) + text-to-speech (Kokoro/Piper)"
+    storage:
+      volumes:
+        - name: speaches-data
+          purpose: "Cached Whisper models from HuggingFace"
+    env_vars:
+      - name: SPEACHES_PORT
+        default: "5003"
+        secret: false
+        description: "Internal port for Speaches STT+TTS service"
+      - name: SPEACHES_VERSION
+        default: "latest-cpu"
+        secret: false
+        description: "Speaches Docker image tag"
+    long_description: |
+      Provides speech-to-text (STT) via Speaches (OpenAI Whisper) and
+      text-to-speech (TTS) via Microsoft Edge TTS. Both services run as
+      internal APIs consumed by Open WebUI for voice input and output in
+      chat conversations. Speaches downloads the Whisper model (~500 MB) on
+      first start and caches it in a persistent volume.
+
+      Use cases: voice dictation in AI chat, audio transcription, TTS
+      read-back of AI responses, accessibility features.
+
+  gotenberg:
+    name: "Document Conversion (Gotenberg)"
+    category: "Documents"
+    maturity: production
+    origin: FR
+    license: MIT
+    github: "https://github.com/gotenberg/gotenberg"
+    description: "PDF and document conversion API — used by Paperless-ngx and other services"
+    has_ui: false
+    containers:
+      - name: gotenberg
+        image: "gotenberg/gotenberg:8"
+        check_updates: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 200
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Gotenberg. Required by Paperless-ngx for document conversion."
+    disable_impact: "Paperless-ngx loses document conversion capability."
+    stack_impact: none
+    risk_on_toggle: safe
+    compose_file: "doc-processing/gotenberg/compose.yml"
+    compose_depends_on: []
+    networking:
+      caddy_routes: []
+      internal_connections:
+        - from: paperless-ngx
+          to: "gotenberg:3000"
+          purpose: "Office document to PDF conversion"
+    storage:
+      volumes: []
+    env_vars:
+      - name: GOTENBERG_PORT
+        default: "3005"
+        secret: false
+        description: "Internal port for Gotenberg API"
+      - name: GOTENBERG_VERSION
+        default: "8"
+        secret: false
+        description: "Gotenberg Docker image major version tag"
+    long_description: |
+      Gotenberg is a Docker-based API for converting HTML, Markdown, Office
+      documents (DOCX, XLSX, PPTX), and more to PDF. It uses Chromium and
+      LibreOffice under the hood. In this stack it serves as a backend for
+      Paperless-ngx document conversion and can be used by Dify workflows
+      for document processing.
+
+      Use cases: PDF generation from templates, Office-to-PDF conversion
+      for document archival, HTML rendering for reports.
+
+  # ==========================================================================
+  # STABLE PROFILES
+  # ==========================================================================
+  gitea:
+    name: "Git (Gitea)"
+    category: "Git"
+    maturity: production
+    origin: CN
+    license: MIT
+    github: "https://github.com/go-gitea/gitea"
+    description: "Self-hosted Git service with web UI, issue tracking, and CI/CD"
+    has_ui: true
+    app_icon: "razzfazz-ai_git_icon.png"
+    containers:
+      - name: gitea
+        image: "gitea/gitea:latest"
+        check_updates: true
+    urls:
+      - subdomain: git
+        label: "Gitea"
+    databases:
+      - gitea_db
+    ram_estimate_mb: 300
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Gitea, creates database. SSH on port 2222."
+    disable_impact: "Git hosting and web UI unavailable."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "gitea/compose.yml"
+    compose_depends_on: ["postgres", "valkey"]
+    networking:
+      caddy_routes:
+        - subdomain: git
+          target: "gitea:3000"
+      internal_connections:
+        - from: gitea
+          to: "postgres:5432"
+          purpose: "Application database (gitea_db)"
+        - from: gitea
+          to: "valkey:6379"
+          purpose: "Session, cache, and task queue (Redis DB 2/3/4)"
+        - from: gitea
+          to: "smtp-relay:587"
+          purpose: "Email notifications via internal SMTP relay"
+    storage:
+      volumes:
+        - name: gitea-data
+          purpose: "Git repositories, LFS objects, avatars, configuration"
+    authentik:
+      app_name: "Git Repository"
+      provider: "Caddy Forward Auth Provider for Gitea"
+      user_group: "razzfazz.ai Git Users"
+    env_vars:
+      - name: GITEA_DOMAIN
+        default: "git.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for Gitea web UI and Git URLs"
+      - name: GITEA_SSH_PORT
+        default: "2222"
+        secret: false
+        description: "External SSH port for Git clone/push operations"
+      - name: GITEA_SECRET_KEY
+        secret: true
+        description: "Secret key for Gitea session encryption"
+      - name: GITEA_ADMIN_PASSWORD
+        default: "Run4Quality!"
+        secret: true
+        description: "Initial admin account password"
+    long_description: |
+      Gitea is a lightweight, self-hosted Git service with a web interface for
+      repository management, issue tracking, pull requests, and CI/CD via
+      Gitea Actions. It uses the shared PostgreSQL database and Valkey for
+      caching and session storage. SSH access is available on port 2222 for
+      Git clone/push operations.
+
+      Use cases: private code repositories, team collaboration, code review,
+      CI/CD pipelines, integration with OpenHands and coding-tools agents.
+
+  # ==========================================================================
+  # EXPERIMENTAL PROFILES
+  # ==========================================================================
+  lightrag:
+    name: "LightRAG"
+    category: "Knowledge"
+    maturity: experimental
+    origin: CN
+    license: MIT
+    github: "https://github.com/HKUDS/LightRAG"
+    description: "Graph-based RAG knowledge base for structured document retrieval"
+    long_description: |
+      LightRAG implements dual-level retrieval by combining entity-level and
+      relationship-level knowledge graphs for more accurate document retrieval
+      than flat vector search alone. It integrates with GPUStack for embedding
+      generation and LLM-powered graph construction. Documents are decomposed
+      into entities and relationships, enabling structured queries that traverse
+      the knowledge graph.
+
+      Use cases: knowledge base Q&A over large document collections, structured
+      retrieval for AI agents, research literature exploration.
+    has_ui: true
+    app_icon: "razzfazz-ai_rag_icon.png"
+    containers:
+      - name: lightrag
+        image: "ghcr.io/hkuds/lightrag:latest"
+        check_updates: true
+    urls:
+      - subdomain: rag
+        label: "LightRAG"
+    databases: []
+    ram_estimate_mb: 400
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+    mutual_exclusion: []
+    enable_impact: "Starts LightRAG. Requires LLM for embeddings."
+    disable_impact: "Knowledge base unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  cognee:
+    name: "Cognee (GraphRAG)"
+    category: "Knowledge"
+    maturity: experimental
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/topoteretes/cognee"
+    description: "GraphRAG knowledge engine with AI memory — builds structured knowledge graphs"
+    long_description: |
+      Cognee builds structured knowledge graphs from unstructured data using
+      an embedded Kuzu graph database — no separate graph container to run or
+      back up. It performs entity extraction,
+      relationship mapping, and contextual reasoning to create a persistent
+      memory layer for AI agents. The knowledge graph enables multi-hop queries
+      that connect information across documents and conversations.
+
+      Use cases: AI agent memory and context retention, knowledge graph
+      construction from documents, contextual reasoning over company data.
+    has_ui: true
+    app_icon: "razzfazz-ai_cognee_icon.png"
+    containers:
+      # rc2 (Cognee 1.0.1) dropped the FalkorDB sidecar and switched to an
+      # embedded Kuzu graph — do not re-add a falkordb entry here or the
+      # "enable profile" apply-dialog will call `docker compose up
+      # cognee falkordb` and crash with "no such service: falkordb".
+      - name: cognee
+        image: "razzfazz-cognee:latest"
+        check_updates: false
+      # #538: these three were missing, so enabling cognee from the portal
+      # started the API only — no UI, no MCP endpoint — and reported success.
+      # Seen on a customer box 2026-08-20.
+      - name: cognee-frontend
+        image: "razzfazz-stack-cognee-frontend:latest"
+        check_updates: false
+      - name: cognee-mcp
+        image: "cognee/cognee-mcp:1.4.0"
+        check_updates: false
+      - name: cognee-authshim-image-builder
+        image: "razzfazz-mcp-cognee-authshim:latest"
+        check_updates: false
+    urls:
+      - subdomain: cognee
+        label: "Cognee"
+    databases: []
+    ram_estimate_mb: 500
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+    mutual_exclusion: []
+    enable_impact: "Starts Cognee (one container; the graph database is embedded)."
+    disable_impact: "GraphRAG knowledge engine unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  tika:
+    name: "Apache Tika"
+    category: "Documents"
+    maturity: experimental
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/apache/tika"
+    description: "Document text and metadata extraction REST API"
+    long_description: |
+      Apache Tika detects and extracts text, metadata, and language from over
+      1000 file formats (PDF, Office, email, images, archives, and more) via a
+      simple REST API. In this stack it serves as a backend for Paperless-ngx,
+      providing advanced text extraction beyond what the built-in OCR engine
+      handles. The full image includes all parser dependencies.
+
+      Use cases: document text extraction for Paperless-ngx, metadata harvesting
+      from heterogeneous file collections, language detection.
+    has_ui: false
+    containers:
+      - name: tika
+        image: "apache/tika:latest-full"
+        check_updates: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 300
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Tika. Used by Paperless-ngx for text extraction."
+    disable_impact: "Paperless-ngx loses advanced text extraction."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  docling:
+    name: "Docling"
+    category: "Documents"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: "https://github.com/docling-project/docling"
+    description: "Document conversion API with Gradio UI — supports PDF, DOCX, images via VLM"
+    long_description: |
+      Docling converts PDF, DOCX, PPTX, images, and HTML into structured
+      Markdown or JSON with advanced layout analysis that preserves tables,
+      headings, and reading order. It exposes both a REST API and a Gradio web
+      UI for interactive use. Optionally, the GPUStack granite-docling VLM model
+      can be deployed for vision-language understanding of complex document
+      layouts.
+
+      Use cases: PDF-to-Markdown conversion for RAG ingestion, structured
+      extraction from scanned documents, batch document processing pipelines.
+    has_ui: true
+    app_icon: "razzfazz-ai_docling_icon.png"
+    containers:
+      - name: docling
+        image: "ghcr.io/docling-project/docling-serve-cpu:latest"
+        check_updates: true
+      # #538: the RQ worker never started on a portal-enabled docling, so
+      # conversions queued on valkey and nothing drained them. check_updates
+      # is false because it shares the upstream repo tracked above.
+      # deploy.replicas service: no container_name, so Docker names the
+      # containers <project>-docling-rq-worker-N. `replicated: true` tells
+      # get_container_status to resolve it by the compose-service label instead
+      # of an exact name that never exists (#538 follow-up).
+      - name: docling-rq-worker
+        image: "ghcr.io/docling-project/docling-serve-cpu:v1.27.0"
+        check_updates: false
+        replicated: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 400
+    dependencies:
+      required: ["core"]
+      optional: ["llm"]
+    mutual_exclusion: []
+    enable_impact: "Starts Docling serve. Downloads models on first use."
+    disable_impact: "Document conversion API unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  presidio:
+    name: "Presidio (PII Detection)"
+    category: "Documents"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: "https://github.com/microsoft/presidio"
+    description: "PII detection (Analyzer), anonymization, and image redaction REST APIs"
+    long_description: |
+      Microsoft Presidio provides three REST APIs: the Analyzer detects 30+
+      PII entity types (names, emails, credit cards, SSNs, etc.) in text, the
+      Anonymizer replaces or masks detected entities, and the Image Redactor
+      blacks out PII regions in images. All processing runs locally with no
+      data leaving the server.
+
+      Use cases: anonymizing documents before sharing, PII scanning in AI
+      pipelines, GDPR compliance checks, redacting sensitive data in images.
+    has_ui: false
+    containers:
+      - name: presidio-analyzer
+        image: "mcr.microsoft.com/presidio-analyzer:latest"
+        check_updates: true
+      - name: presidio-anonymizer
+        image: "mcr.microsoft.com/presidio-anonymizer:latest"
+        check_updates: true
+      - name: presidio-image-redactor
+        image: "mcr.microsoft.com/presidio-image-redactor:latest"
+        check_updates: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 400
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts 3 Presidio containers for PII detection."
+    disable_impact: "PII detection and redaction APIs unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  stirling-pdf:
+    name: "Stirling-PDF"
+    category: "Documents"
+    maturity: experimental
+    origin: GB
+    license: MIT
+    github: "https://github.com/Stirling-Tools/Stirling-PDF"
+    description: "Full-featured PDF manipulation web UI with 50+ operations"
+    long_description: |
+      Stirling-PDF provides a self-hosted web UI for over 50 PDF operations
+      including merge, split, rotate, OCR, compress, convert (images, Office),
+      add watermarks, fill forms, sign, and redact. All processing happens
+      server-side with no data leaving the instance. The interface supports
+      multi-file batch operations and dark mode.
+
+      Use cases: merging invoices, splitting large PDFs, OCR-ing scanned
+      documents, compressing files for email, watermarking confidential docs.
+    has_ui: true
+    app_icon: "razzfazz-ai_pdf_icon.png"
+    containers:
+      - name: stirling-pdf
+        image: "stirlingtools/stirling-pdf:latest"
+        check_updates: true
+    urls: []
+    databases: []
+    ram_estimate_mb: 300
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Stirling-PDF web UI."
+    disable_impact: "PDF manipulation UI unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  paperclip:
+    name: "Paperclip"
+    category: "Agents"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: null
+    description: "AI company orchestration — hire AI agents, set goals, automate workflows"
+    long_description: |
+      Paperclip is an experimental AI company orchestration platform where you
+      hire AI agents, assign them roles and goals, and let them collaborate on
+      automated workflows. Agents can be given specific responsibilities and
+      work together toward defined objectives. The platform is early-stage and
+      under active development.
+
+      Use cases: multi-agent task automation, goal-driven AI workflows,
+      experimenting with autonomous agent coordination.
+    has_ui: true
+    app_icon: "razzfazz-ai_paperclip_icon.png"
+    containers:
+      - name: paperclip
+        image: "razzfazz-paperclip:latest"
+        check_updates: false
+    urls:
+      - subdomain: paperclip
+        label: "Paperclip"
+    databases: []
+    ram_estimate_mb: 300
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+    mutual_exclusion: []
+    enable_impact: "Starts Paperclip agent platform."
+    disable_impact: "Agent orchestration unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+
+  agents:
+    name: "MCP & Agent Manager"
+    category: "Agents"
+    maturity: experimental
+    origin: AT
+    license: Proprietary
+    github: null
+    # #36/#61: renamed from "Personal Agent Manager". This is the single
+    # user-facing combined app — per-user agents AND per-user MCP integrations
+    # surface from ONE dashboard (agents.<domain>/dashboard), ONE Authentik
+    # app ("MCP & Agent Manager", slug my-agents), ONE group
+    # ("razzfazz.ai AI Agents Users"), ONE start-portal tile. Enabling this is
+    # the agent half; enable the companion `mcp` profile for the MCP-integration
+    # half (they are presented as one combined surface — see the `mcp` profile).
+    description: "Per-user agents (Hermes, Moltis, OpenHands, Coding Tools) + personal MCP integrations — one combined dashboard"
+    long_description: |
+      The Personal Agent Manager is the orchestrator for per-user agent instances.
+      When enabled, authenticated users can launch their own isolated agent
+      containers (Hermes, Moltis, OpenHands, Coding Tools) with quota-based
+      resource governance. Each instance gets its own subdomain under
+      agents.<domain>, dynamic Caddy routing, idle detection with automatic
+      shutdown, and stale instance cleanup. Administrators configure available
+      agent types, global limits, and quota tiers via the Config UI.
+
+      Use cases: multi-user AI agent platform, per-user isolated coding
+      environments, personal assistant provisioning with resource governance.
+    has_ui: true
+    app_icon: null
+    containers:
+      - name: agent-manager
+        image: "razzfazz-agent-manager:latest"
+        check_updates: false
+      # #538: the seven one-shot image builders. They exit after building, and
+      # get_profile_health() already ignores exited one-shots — but listing them
+      # keeps each custom image REFERENCED, which is what stops the nightly
+      # `docker image prune -a` (#539) from deleting images an offline box
+      # cannot rebuild. Without them a provisioned agent could never start.
+      - name: hermes-agent-image-builder
+        image: "razzfazz-stack-hermes-agent:${HERMES_AGENT_VERSION:-v2026.7.1}"
+        check_updates: false
+      - name: moltis-image-builder
+        image: "razzfazz-stack-moltis:${MOLTIS_VERSION:-20260719.01}"
+        check_updates: false
+      - name: paperclip-image-builder
+        image: "razzfazz-stack-paperclip:latest"
+        check_updates: false
+      - name: coding-tools-image-builder
+        image: "razzfazz-coding-tools:latest"
+        check_updates: false
+      - name: coding-agent-codex-image-builder
+        image: "razzfazz-coding-agent-codex:latest"
+        check_updates: false
+      - name: coding-agent-opencode-image-builder
+        image: "razzfazz-coding-agent-opencode:latest"
+        check_updates: false
+      - name: coding-agent-user-defined-image-builder
+        image: "razzfazz-coding-agent-user-defined:latest"
+        check_updates: false
+    urls:
+      - subdomain: agents
+        label: "Agent Manager"
+    databases:
+      - agent_manager_db
+    ram_estimate_mb: 512
+    ram_dynamic: true
+    ram_notes: |
+      Base overhead is ~200 MB for the manager itself. Each per-user agent
+      instance adds 256–2048 MB depending on agent type (lightweight vs heavy).
+      Total memory scales with active instance count.
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+      # `openhands` is the only remaining compose profile of these — hermes,
+      # moltis, and coding-tools were removed in M020 S07 and are now
+      # provisioned per-user via agent-manager itself (see catalog.py).
+      optional: ["openhands"]
+    mutual_exclusion: []
+    enable_impact: "Builds agent-manager image (~200 MB), creates database, starts orchestrator. Docker socket access required."
+    disable_impact: "All per-user agent instances are stopped. Instance data preserved in volumes."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "agents/compose.yml"
+    compose_depends_on: ["postgres"]
+    networking:
+      caddy_routes:
+        - subdomain: agents
+          target: "agent-manager:5000"
+      internal_connections:
+        - from: agent-manager
+          to: "postgres:5432"
+          purpose: "Instance registry and quota database (agent_manager_db)"
+        - from: agent-manager
+          to: "caddy:2019"
+          purpose: "Dynamic route registration for per-user agent subdomains"
+        - from: agent-manager
+          to: "/var/run/docker.sock"
+          purpose: "Container lifecycle management for per-user instances"
+    storage:
+      volumes: []
+    authentik:
+      # #36/#61: the single combined user-facing app.
+      app_name: "MCP & Agent Manager"
+      provider: "Caddy Forward Auth Provider for Agent Manager"
+      user_group: "razzfazz.ai AI Agents Users"
+    env_vars:
+      - name: AGENT_MANAGER_PORT
+        default: "5110"
+        secret: false
+        description: "Host port for Agent Manager (mapped to internal 5000)"
+      - name: AGENT_MAX_INSTANCES
+        default: "20"
+        secret: false
+        description: "Maximum concurrent agent instances across all users"
+      - name: AGENT_IDLE_TIMEOUT_LIGHTWEIGHT
+        default: "1800"
+        secret: false
+        description: "Idle timeout in seconds for lightweight agents (Hermes, Moltis)"
+      - name: AGENT_IDLE_TIMEOUT_HEAVY
+        default: "7200"
+        secret: false
+        description: "Idle timeout in seconds for heavy agents (OpenHands)"
+      - name: AGENT_CLEANUP_AFTER_DAYS
+        default: "30"
+        secret: false
+        description: "Delete stale instance records after this many days"
+      - name: AGENTS_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret for Agent Manager"
+
+  mcp:
+    name: "MCP Integrations (part of MCP & Agent Manager)"
+    category: "Agents"
+    maturity: experimental
+    origin: AT
+    license: Proprietary
+    github: null
+    # #36/#61: this is the MCP half of the combined "MCP & Agent Manager".
+    # It is NOT a separate user-facing app — enabling it adds per-user MCP
+    # integrations to the SAME combined dashboard (agents.<domain>/dashboard),
+    # gated by the SAME group ("razzfazz.ai AI Agents Users"). There is no
+    # separate tile: the MCP dashboard is reached via the "MCP Integrations"
+    # link on the combined dashboard. Enable together with `agents`.
+    description: "MCP half of MCP & Agent Manager — connect your own Moco/SEQITracker, Pipedrive, GitHub, Google tools to your agents (no separate app/tile)"
+    long_description: |
+      The Personal MCP Manager lets each authenticated user connect their own
+      external tools (Moco/SEQITracker, Pipedrive, GitHub, Google, …) to their
+      AI agents. The user supplies their own credentials (personal access token
+      or OAuth); the manager stores them ENCRYPTED AT REST (AES-256-GCM) and
+      provisions a per-user MCP-proxy sidecar that holds only THAT user's
+      credentials and exposes an SSO-gated HTTP MCP endpoint, wired into the
+      user's own Hermes / Moltis / OpenCode instances.
+
+      Use cases: per-user CRM/time-tracking access for agents, personal OAuth
+      integrations without sharing credentials, multi-user tool federation.
+
+      SECURITY: this module stores every user's external credentials. Access is
+      strictly only-own (identity from Authentik). Talks to docker via
+      docker-socket-proxy with the same constrained grants as the Agent Manager.
+    has_ui: true
+    app_icon: null
+    containers:
+      - name: mcp-manager
+        image: "razzfazz-mcp-manager:latest"
+        check_updates: false
+      # #538: one-shot image builder. Listing it keeps its image referenced,
+      # which is what stops the nightly `docker image prune -a` (#539) from
+      # deleting a custom-built image an offline box cannot rebuild.
+      - name: mcp-test-echo-image-builder
+        image: "razzfazz-mcp-test-echo:latest"
+        check_updates: false
+    urls:
+      - subdomain: mcp
+        label: "MCP Manager"
+    databases:
+      - mcp_manager_db
+    ram_estimate_mb: 512
+    ram_dynamic: true
+    ram_notes: |
+      Base overhead is ~150 MB for the manager. Each per-user MCP proxy adds
+      ~64–256 MB. Total memory scales with active proxy count.
+    dependencies:
+      # #36/#61: `agents` is now REQUIRED — the MCP dashboard's only user-facing
+      # entry point is the "MCP Integrations" link on the combined dashboard that
+      # ships with the `agents` module. Without `agents` there is no tile/app to
+      # reach it (the standalone MCP tile was retired).
+      required: ["core", "agents"]
+      recommended: []
+      optional: []
+    mutual_exclusion: []
+    enable_impact: "Builds mcp-manager + test-echo images, creates database, starts orchestrator. Adds the MCP Integrations section to the combined MCP & Agent Manager dashboard. Docker-socket-proxy access required."
+    disable_impact: "All per-user MCP proxies are stopped. Encrypted credentials preserved in the database."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "mcp-manager/compose.yml"
+    compose_depends_on: ["postgres"]
+    networking:
+      caddy_routes:
+        - subdomain: mcp
+          target: "mcp-manager:5000"
+      internal_connections:
+        - from: mcp-manager
+          to: "postgres:5432"
+          purpose: "Instance registry + encrypted credential vault (mcp_manager_db)"
+        - from: mcp-manager
+          to: "caddy:2019"
+          purpose: "Dynamic route registration for per-user MCP-proxy subdomains"
+        - from: mcp-manager
+          to: "docker-socket-proxy:2375"
+          purpose: "Container lifecycle for per-user MCP proxies (constrained grants)"
+    storage:
+      volumes: []
+    authentik:
+      # #36/#61: backend-only forward-auth (slug `mcp`, hidden/tile-less app).
+      # The user-facing app is "MCP & Agent Manager" (slug my-agents).
+      app_name: "MCP Manager (backend)"
+      provider: "Caddy Forward Auth Provider for MCP"
+      user_group: "razzfazz.ai AI Agents Users"
+    env_vars:
+      - name: MCP_MANAGER_PORT
+        default: "5120"
+        secret: false
+        description: "Host port for MCP Manager (mapped to internal 5000)"
+      - name: MCP_MAX_INSTANCES
+        default: "50"
+        secret: false
+        description: "Maximum concurrent per-user MCP proxies box-wide"
+      - name: MCP_MANAGER_SECRET_KEY
+        secret: true
+        description: "AES-256-GCM master key (base64 32 bytes) for the credential vault"
+      - name: MCP_MANAGER_DB_PASSWORD
+        secret: true
+        description: "PostgreSQL password for the mcp_manager_db service user"
+      - name: MCP_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret for MCP Manager"
+      - name: OAUTH_GITHUB_CLIENT_SECRET
+        secret: true
+        description: "GitHub OAuth client secret (server-side; empty until operator registers an app)"
+      - name: OAUTH_GOOGLE_CLIENT_SECRET
+        secret: true
+        description: "Google OAuth client secret (server-side; empty until operator registers an app)"
+
+  matrix:
+    name: "Matrix (Synapse + Element)"
+    category: "Communication"
+    maturity: experimental
+    origin: GB
+    license: AGPL-3.0
+    github: "https://github.com/element-hq/synapse"
+    description: "Matrix homeserver (Synapse) + Element Web browser client with Authentik OIDC login"
+    has_ui: true
+    app_icon: "razzfazz-ai_matrix_icon.png"
+    containers:
+      - name: synapse
+        image: "matrixdotorg/synapse:v1.129.0"
+        check_updates: true
+      - name: element-web
+        image: "vectorim/element-web:latest"
+        check_updates: true
+    urls:
+      - subdomain: matrix
+        label: "Matrix (Synapse)"
+      - subdomain: element
+        label: "Element Web"
+    databases: []
+    ram_estimate_mb: 400
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Matrix homeserver + Element client. Creates Synapse database."
+    disable_impact: "Matrix messaging unavailable."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "apps/matrix/compose.yml"
+    compose_depends_on: ["postgres", "authentik-server"]
+    networking:
+      caddy_routes:
+        - subdomain: matrix
+          target: "synapse:8008"
+        - subdomain: element
+          target: "element-web:80"
+      internal_connections:
+        - from: synapse
+          to: "postgres:5432"
+          purpose: "Synapse homeserver database (synapse_db)"
+        - from: synapse
+          to: "authentik-server:9000"
+          purpose: "OIDC authentication for Matrix login"
+    storage:
+      volumes:
+        - name: synapse-data
+          purpose: "Matrix homeserver state, media uploads, signing keys"
+    authentik:
+      app_name: "Matrix"
+      provider: "Caddy Forward Auth Provider for Element Web"
+      oidc_provider: "Synapse Matrix OIDC Provider"
+      user_group: null
+    env_vars:
+      - name: MATRIX_DOMAIN
+        default: "matrix.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for the Matrix homeserver"
+      - name: ELEMENT_WEB_DOMAIN
+        default: "element.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for the Element Web client"
+      - name: SYNAPSE_CLIENT_SECRET
+        secret: true
+        description: "OIDC client secret for Synapse-Authentik integration"
+      - name: SYNAPSE_REGISTRATION_SHARED_SECRET
+        secret: true
+        description: "Shared secret for Matrix user registration API"
+    long_description: |
+      Self-hosted Matrix homeserver (Synapse) with Element Web browser client
+      for encrypted team messaging, rooms, and direct messages. Authentik OIDC
+      provides single sign-on. Matrix federation is disabled by default.
+      The SYNAPSE_SERVER_NAME is permanent and determines Matrix user IDs
+      (@user:domain).
+
+      Use cases: internal team chat, encrypted messaging, bot integration
+      via Moltis agent, bridging to Telegram/Discord/Slack.
+
+  paperless-ngx:
+    name: "Paperless-ngx"
+    category: "Documents"
+    maturity: experimental
+    origin: US
+    license: GPL-3.0
+    github: "https://github.com/paperless-ngx/paperless-ngx"
+    description: "Document management — scan, OCR, archive, and search paper documents"
+    has_ui: true
+    app_icon: "razzfazz-ai_documents_icon.png"
+    containers:
+      - name: paperless-ngx
+        image: "ghcr.io/paperless-ngx/paperless-ngx:latest"
+        check_updates: true
+    urls:
+      - subdomain: paperless
+        label: "Paperless-ngx"
+    databases: []
+    ram_estimate_mb: 500
+    dependencies:
+      required: ["core"]
+      recommended: ["gotenberg", "tika"]
+    mutual_exclusion: []
+    enable_impact: "Starts Paperless-ngx. Works best with Gotenberg + Tika enabled."
+    disable_impact: "Document management unavailable."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "doc-processing/paperless-ngx/compose.yml"
+    compose_depends_on: ["postgres", "valkey"]
+    networking:
+      caddy_routes:
+        - subdomain: paperless
+          target: "paperless-ngx:8000"
+      internal_connections:
+        - from: paperless-ngx
+          to: "postgres:5432"
+          purpose: "Application database (paperless_db)"
+        - from: paperless-ngx
+          to: "valkey:6379"
+          purpose: "Task broker (Redis DB 8)"
+        - from: paperless-ngx
+          to: "gotenberg:3000"
+          purpose: "Office document to PDF conversion"
+        - from: paperless-ngx
+          to: "tika:9998"
+          purpose: "Document text and metadata extraction"
+        - from: paperless-ngx
+          to: "smtp-relay:587"
+          purpose: "Email notifications via internal SMTP relay"
+    storage:
+      volumes:
+        - name: paperless-data
+          purpose: "Application data, search index, thumbnails"
+        - name: paperless-media
+          purpose: "Original and archived document files"
+    authentik:
+      app_name: "Documents"
+      provider: "Caddy Forward Auth Provider for Paperless-ngx"
+      user_group: "razzfazz.ai Paperless Users"
+    env_vars:
+      - name: PAPERLESS_DOMAIN
+        default: "paperless.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for the Paperless-ngx web UI"
+      - name: PAPERLESS_SECRET_KEY
+        secret: true
+        description: "Django secret key for session encryption"
+      - name: PAPERLESS_OCR_LANGUAGE
+        default: "eng+deu"
+        secret: false
+        description: "Tesseract OCR language codes (plus-separated)"
+      - name: PAPERLESS_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret"
+    long_description: |
+      Paperless-ngx is a document management system that scans, OCRs, archives,
+      and indexes paper documents into a searchable web archive. It integrates
+      with Gotenberg for Office-to-PDF conversion and Apache Tika for advanced
+      text extraction. Authentik SSO provides access control via the
+      X-Authentik-Username header.
+
+      Use cases: paperless office, invoice archival, receipt management,
+      full-text search across scanned documents, automated filing by tags.
+
+  vaultwarden:
+    name: "Vaultwarden"
+    category: "Security"
+    maturity: experimental
+    origin: EU
+    license: AGPL-3.0
+    github: "https://github.com/dani-garcia/vaultwarden"
+    description: "Self-hosted Bitwarden-compatible password manager with Authentik OIDC SSO"
+    long_description: |
+      Vaultwarden is a lightweight, Rust-based reimplementation of the Bitwarden
+      server API. It is fully compatible with official Bitwarden browser
+      extensions, desktop apps, and mobile clients. Authentik OIDC SSO provides
+      single sign-on so users log in with their stack credentials. The server
+      uses only ~100 MB RAM and stores vaults in a local SQLite database.
+
+      Use cases: team password management, secure credential sharing, browser
+      auto-fill via Bitwarden extension, API key storage for developers.
+    has_ui: true
+    app_icon: "razzfazz-ai_vault_icon.png"
+    containers:
+      - name: vaultwarden
+        image: "vaultwarden/server:latest"
+        check_updates: true
+    urls:
+      - subdomain: vault
+        label: "Vaultwarden"
+    databases: []
+    ram_estimate_mb: 100
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Vaultwarden. Lightweight (~100 MB RAM)."
+    disable_impact: "Password manager unavailable."
+    stack_impact: none
+    risk_on_toggle: caution
+
+  infisical:
+    name: "Infisical"
+    category: "Security"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: "https://github.com/Infisical/infisical"
+    description: "Self-hosted secrets management for developers and AI coding agents"
+    long_description: |
+      Infisical is a developer-focused secrets management platform that stores
+      API keys, database credentials, and configuration secrets with project
+      and environment scoping (dev/staging/prod). It provides a web dashboard,
+      CLI, and REST API for secret retrieval. AI coding agents like OpenHands
+      can pull secrets at runtime via the API. Authentik SSO provides access
+      control.
+
+      Use cases: centralized secret storage for development teams, runtime
+      secret injection for AI agents, environment-scoped configuration.
+    has_ui: true
+    app_icon: "razzfazz-ai_secrets_icon.png"
+    containers:
+      - name: infisical
+        image: "infisical/infisical:latest-postgres"
+        check_updates: true
+    urls:
+      - subdomain: infisical
+        label: "Infisical"
+    databases: []
+    ram_estimate_mb: 500
+    dependencies:
+      required: ["core"]
+    mutual_exclusion: []
+    enable_impact: "Starts Infisical secrets management."
+    disable_impact: "Secrets management platform unavailable."
+    stack_impact: none
+    risk_on_toggle: caution
+
+  onyx:
+    name: "Onyx (Enterprise Search)"
+    category: "Enterprise Search"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: "https://github.com/onyx-dot-app/onyx"
+    description: "AI enterprise search — connects to 40+ data sources, semantic search with LLM answers"
+    has_ui: true
+    app_icon: "razzfazz-ai_search_icon.png"
+    containers:
+      - name: onyx-api
+        image: "onyxdotapp/onyx-backend:latest"
+        check_updates: true
+      - name: onyx-background
+        image: "onyxdotapp/onyx-backend:latest"
+        check_updates: false
+      - name: onyx-web
+        image: "onyxdotapp/onyx-web-server:latest"
+        check_updates: true
+      - name: onyx-model-server
+        image: "onyxdotapp/onyx-model-server:latest"
+        check_updates: true
+      - name: onyx-model-indexer
+        image: "onyxdotapp/onyx-model-server:latest"
+        check_updates: false
+      - name: onyx-vespa
+        image: "vespaengine/vespa:8.609.39"
+        check_updates: true
+    urls:
+      - subdomain: onyx
+        label: "Onyx Search"
+    databases: []
+    ram_estimate_mb: 5200
+    ram_dynamic: false
+    ram_notes: |
+      Onyx runs 6 containers including a Vespa search engine which alone
+      needs ~3 GB. This is one of the heaviest modules in the stack.
+      Not recommended on boxes with less than 32 GB total RAM.
+    ram_breakdown:
+      - component: "Vespa search engine"
+        mb: 3000
+      - component: "API + background workers"
+        mb: 1200
+      - component: "Model server + indexer"
+        mb: 1000
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+    mutual_exclusion: []
+    enable_impact: "Starts 6 containers (~5.2 GB RAM). Heavy module."
+    disable_impact: "Enterprise search unavailable."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "apps/onyx/compose.yml"
+    compose_depends_on: ["postgres", "valkey", "onyx-vespa", "onyx-model-server", "onyx-model-indexer"]
+    networking:
+      caddy_routes:
+        - subdomain: onyx
+          target: "onyx-web:3000"
+        - subdomain: onyx
+          path: "/api/*"
+          target: "onyx-api:8080"
+      internal_connections:
+        - from: onyx-api
+          to: "postgres:5432"
+          purpose: "Application database (onyx_db) and file store"
+        - from: onyx-api
+          to: "valkey:6379"
+          purpose: "Task queue and cache (Redis DB 7)"
+        - from: onyx-api
+          to: "onyx-vespa:19071"
+          purpose: "Vector and keyword search index"
+        - from: onyx-api
+          to: "onyx-model-server:9000"
+          purpose: "Embedding model inference"
+        - from: onyx-background
+          to: "gitea:3000"
+          purpose: "GitHub-compatible connector for repo indexing"
+        - from: onyx-web
+          to: "onyx-api:8080"
+          purpose: "Next.js frontend to API backend"
+    storage:
+      volumes:
+        - name: onyx-vespa-data
+          purpose: "Vespa search index data"
+        - name: onyx-model-cache
+          purpose: "Cached embedding models for inference"
+        - name: onyx-indexer-model-cache
+          purpose: "Cached embedding models for document indexing"
+    authentik:
+      app_name: "Search"
+      provider: "Caddy Forward Auth Provider for Onyx"
+      user_group: null
+    env_vars:
+      - name: ONYX_DOMAIN
+        default: "onyx.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for the Onyx search UI"
+      - name: ONYX_SECRET
+        secret: true
+        description: "User auth secret for Onyx internal authentication"
+      - name: ONYX_DB
+        default: "onyx_db"
+        secret: false
+        description: "PostgreSQL database name for Onyx"
+      - name: ONYX_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret"
+    long_description: |
+      Onyx is an AI-powered enterprise search platform that connects to 40+
+      data sources (Gitea repos, Paperless-ngx documents, web pages) and
+      provides semantic search with LLM-generated answers. It runs its own
+      Vespa search engine, embedding model servers, and a Next.js frontend.
+      One of the heaviest modules in the stack (~5 GB RAM).
+
+      Use cases: unified search across code and documents, AI-powered Q&A
+      over internal knowledge, connector-based indexing of team resources.
+
+  openhands:
+    name: "OpenHands"
+    category: "Agents"
+    maturity: experimental
+    origin: US
+    license: MIT
+    github: "https://github.com/All-Hands-AI/OpenHands"
+    description: "Autonomous AI software development agent — writes, runs, and debugs code"
+    has_ui: true
+    app_icon: "razzfazz-ai_openhands_icon.png"
+    containers:
+      - name: openhands
+        image: "ghcr.io/openhands/openhands:1.6.0"
+        check_updates: true
+    urls:
+      - subdomain: openhands
+        label: "OpenHands"
+    databases: []
+    ram_estimate_mb: 400
+    ram_dynamic: true
+    ram_notes: |
+      Base container uses ~400 MB. Spawns runtime sandbox containers
+      that consume additional memory during task execution.
+    dependencies:
+      required: ["core"]
+      recommended: ["llm"]
+    mutual_exclusion: []
+    enable_impact: "Starts OpenHands. Requires Docker socket for runtime containers."
+    disable_impact: "AI coding agent unavailable."
+    stack_impact: none
+    risk_on_toggle: safe
+    compose_file: "apps/openhands/compose.yml"
+    compose_depends_on: []
+    networking:
+      caddy_routes:
+        - subdomain: openhands
+          target: "openhands:3000"
+      internal_connections:
+        - from: openhands
+          to: "gpustack:9090"
+          purpose: "LLM inference API for coding agent"
+        - from: openhands
+          to: "gitea:3000"
+          purpose: "Git repository access via Gitea API"
+        - from: openhands
+          to: "infisical:8080"
+          purpose: "Secret retrieval for agent tasks"
+        - from: openhands
+          to: "/var/run/docker.sock"
+          purpose: "Spawn per-task runtime sandbox containers"
+    storage:
+      volumes:
+        - name: openhands-workspace
+          purpose: "Persistent workspace shared with coding agents"
+    authentik:
+      app_name: "OpenHands"
+      provider: "Caddy Forward Auth Provider for OpenHands"
+      user_group: null
+    env_vars:
+      - name: OPENHANDS_DOMAIN
+        default: "openhands.${MAIN_DOMAIN}"
+        secret: false
+        description: "Public subdomain for the OpenHands web UI"
+      - name: OPENHANDS_PORT
+        default: "3005"
+        secret: false
+        description: "Internal port for OpenHands web server"
+      - name: OPENHANDS_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret"
+    long_description: |
+      OpenHands is an autonomous AI software development agent that can write,
+      run, test, and debug code. It spawns per-task runtime sandbox containers
+      via the Docker socket, uses GPUStack for LLM inference, and integrates
+      with Gitea for repository access and PR creation. Requires Docker socket
+      access (root-equivalent) gated by Authentik SSO.
+
+      Use cases: automated code generation, bug fixing, PR creation, code
+      review assistance, prototyping, test writing.
+
+  observability:
+    name: "Observability"
+    category: "Monitoring"
+    maturity: experimental
+    origin: US
+    license: Apache-2.0
+    github: "https://github.com/openlit/openlit"
+    description: "Stack-wide LLM observability: cost, latency, tokens, prompt analysis."
+    long_description: |
+      OpenLIT captures every LLM call that flows through Open WebUI's pipe layer
+      (Dify, GPUStack, hermes, moltis, opencode) and indexes them in ClickHouse
+      for cost / latency / token / prompt-quality dashboards. 30-day retention
+      with auto-prune.
+
+      Surfaced via the global filter pipeline (chat/pipelines/openlit_filter.py).
+      Direct backend → GPUStack calls (e.g. agent-internal autonomous turns)
+      bypass the WebUI and are not captured by this profile alone — see M019
+      docs for the per-backend SDK instrumentation follow-up.
+
+      Memory-capped at 2.5 GB total (ClickHouse 2g + OpenLIT 512m).
+    has_ui: true
+    app_icon: "razzfazz-ai_admin_icon.png"
+    containers:
+      - name: openlit
+        image: "ghcr.io/openlit/openlit"
+        check_updates: true
+      - name: otel-collector
+        image: "otel/opentelemetry-collector-contrib"
+        check_updates: true
+      - name: clickhouse
+        image: "clickhouse/clickhouse-server"
+        check_updates: true
+    urls:
+      - subdomain: observability
+        label: "OpenLIT UI"
+    databases: []
+    ram_estimate_mb: 3072
+    dependencies:
+      required: ["core"]
+      recommended: ["chat"]
+      optional: []
+    mutual_exclusion: []
+    enable_impact: "Pulls ~600 MB images, starts ClickHouse + OpenLIT + otel-collector in ~90s. Reserves ~3 GB RAM."
+    disable_impact: "Stops trace capture; historical data preserved in clickhouse-data volume."
+    stack_impact: none
+    risk_on_toggle: caution
+    compose_file: "observability/compose.yml"
+    compose_depends_on: []
+    networking:
+      caddy_routes:
+        - subdomain: observability
+          target: "openlit:3000"
+      internal_connections:
+        - from: openlit
+          to: "clickhouse:8123"
+          purpose: "Dashboard reads spans from the trace store (HTTP)"
+        - from: pipelines
+          to: "otel-collector:4318"
+          purpose: "OTLP HTTP receiver — global filter emits chat traces here (#193)"
+        - from: otel-collector
+          to: "clickhouse:9000"
+          purpose: "ClickHouse exporter writes otel_traces/logs/metrics (native)"
+    storage:
+      volumes:
+        - name: observability-data
+          purpose: "OpenLIT UI session/state"
+        - name: clickhouse-data
+          purpose: "ClickHouse data files (span/trace store)"
+        - name: clickhouse-backup
+          purpose: "Native ClickHouse BACKUP TO Disk target — swept into nightly tar.gz"
+    authentik:
+      app_name: "Observability"
+      provider: "Caddy Forward Auth Provider for Observability"
+      user_group: "razzfazz.ai Observability Users"
+    env_vars:
+      - name: OBSERVABILITY_VERSION
+        default: "1.22.0"
+        secret: false
+        description: "OpenLIT container image tag"
+      - name: OBSERVABILITY_PORT
+        default: "8200"
+        secret: false
+        description: "Loopback host port for OpenLIT UI (Caddy reverse-proxies from observability.<DOMAIN>)"
+      - name: OBSERVABILITY_DOMAIN
+        secret: false
+        description: "Caddy subdomain (typically observability.<MAIN_DOMAIN>)"
+      - name: OBSERVABILITY_CLIENT_SECRET
+        secret: true
+        description: "Authentik forward-auth client secret"
+      - name: OBSERVABILITY_RETENTION_DAYS
+        default: "30"
+        secret: false
+        description: "ClickHouse TTL for OpenLIT span tables (auto-prune older data)"
+      - name: CLICKHOUSE_VERSION
+        default: "25.8.25.37"
+        secret: false
+        description: "ClickHouse container image tag"
+      - name: CLICKHOUSE_USER
+        default: "default"
+        secret: false
+        description: "ClickHouse admin username"
+      - name: CLICKHOUSE_PASSWORD
+        secret: true
+        description: "ClickHouse admin password (generated by razzfazz-init.sh)"
+      - name: OTEL_COLLECTOR_VERSION
+        default: "0.130.1"
+        secret: false
+        description: "otel/opentelemetry-collector-contrib image tag (the real OTLP collector — #193)"
+      - name: OTEL_LOG_EXPORT_ENABLED
+        default: "false"
+        secret: false
+        description: "#197: opt-in — ship ALL container logs to an external OTLP target (off by default)"
+      - name: OTEL_COLLECTOR_LOGS_OVERLAY
+        default: "otel-collector-logs-disabled.yaml"
+        secret: false
+        description: "Mechanical switch: which logs overlay the collector merges (disabled=no-op, export=#197)"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        secret: false
+        description: "Customer OTLP target host:port (gRPC) or URL. Required only when log export is enabled"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        default: "grpc"
+        secret: false
+        description: "grpc | http/protobuf — external log-export exporter protocol"
+      - name: OTEL_EXPORTER_OTLP_HEADERS
+        secret: true
+        description: "Auth header VALUE sent as `Authorization: <this>` to the OTLP target (secret; never logged)"
+      - name: OTEL_EXPORTER_OTLP_INSECURE
+        default: "false"
+        secret: false
+        description: "TLS to the OTLP target: false=verify system CA roots, true=plaintext (trusted network only)"

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block page_title %}All Modules{% endblock %}
+
+{% block page_content %}
+<div class="page-header">
+    <h1>All Modules</h1>
+    <p class="page-subtitle">{{ modules | length }} modules in the stack</p>
+</div>
+
+{# M029-S04: quick link to the LLM Runtime stable/experimental toggle. #}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    <strong>LLM Runtime:</strong>
+    Switch between stable GPUStack v0.7.1 and experimental v2.1.x.
+    <a href="{{ url_for('modules.llm_runtime') }}" class="btn btn-sm btn-secondary" style="margin-left:0.5rem">
+        Manage LLM runtime →
+    </a>
+</div>
+
+{# #185: deep-link to the start-portal shortcuts admin. The admin CRUD lives
+   in the portal (it owns the shortcuts table); the Config UI only links out,
+   so it takes on no Postgres dependency. Super-Admin-gated on both ends. #}
+{% if main_domain %}
+<div class="info-banner" style="margin-bottom:1rem;padding:0.75rem;background:rgba(205,23,25,0.06);border-left:3px solid var(--accent, #CD1719);border-radius:4px">
+    <strong>Shortcuts:</strong>
+    Curated one-click AI tiles for your users — define once, scope to Authentik groups.
+    <a href="https://start.{{ main_domain }}/admin/shortcuts" target="_blank" rel="noopener"
+       class="btn btn-sm btn-secondary" style="margin-left:0.5rem">
+        Manage shortcuts →
+    </a>
+</div>
+{% endif %}
+
+<!-- Filters -->
+<div class="filter-bar">
+    <form method="GET" class="filter-form">
+        <input type="text" name="q" placeholder="Search modules..." value="{{ search_query }}" class="filter-search">
+        <select name="category" class="filter-select" onchange="this.form.submit()">
+            <option value="">All categories</option>
+            {% for cat in categories %}
+            <option value="{{ cat }}" {% if cat == filter_category %}selected{% endif %}>{{ cat }}</option>
+            {% endfor %}
+        </select>
+        <select name="status" class="filter-select" onchange="this.form.submit()">
+            <option value="">All status</option>
+            <option value="enabled" {% if filter_status == 'enabled' %}selected{% endif %}>Enabled</option>
+            <option value="disabled" {% if filter_status == 'disabled' %}selected{% endif %}>Disabled</option>
+            <option value="updates" {% if filter_status == 'updates' %}selected{% endif %}>Updates available</option>
+        </select>
+        <select name="maturity" class="filter-select" onchange="this.form.submit()">
+            <option value="">All maturity</option>
+            {# rc6.7 #5: maturity options derived from live profiles.yaml
+               via the modules blueprint (was hardcoded
+               production/stable/experimental — `stable` matched zero
+               modules and `deprecated` was missing entirely). #}
+            {% for m in maturities %}
+            <option value="{{ m }}" {% if filter_maturity == m %}selected{% endif %}>{{ m|capitalize }}</option>
+            {% endfor %}
+        </select>
+        <select name="sort" class="filter-select" onchange="this.form.submit()">
+            <option value="">Sort: Default</option>
+            <option value="name" {% if filter_sort == 'name' %}selected{% endif %}>Name</option>
+            <option value="memory" {% if filter_sort == 'memory' %}selected{% endif %}>Memory (high→low)</option>
+            <option value="category" {% if filter_sort == 'category' %}selected{% endif %}>Category</option>
+            <option value="enabled" {% if filter_sort == 'enabled' %}selected{% endif %}>Enabled first</option>
+        </select>
+        <button type="submit" class="filter-btn">Filter</button>
+    </form>
+</div>
+
+<!-- Module Grid -->
+<div class="module-grid">
+    {% for module in modules %}
+    <a href="{{ url_for('modules.detail', profile_id=module.id) }}" class="module-card {% if not module.enabled %}module-disabled{% endif %}">
+        <div class="module-card-header">
+            {% if module.app_icon %}
+            <img src="{{ url_for('static', filename='media/' + module.app_icon) }}" alt="" class="module-icon">
+            {% else %}
+            <span class="status-dot status-{{ module.health }}"></span>
+            {% endif %}
+            <span class="module-name">{{ module.name }}</span>
+            {% if module.id != 'core' %}
+            <button class="toggle-btn {{ 'enabled' if module.enabled else 'disabled-state' }}"
+                    data-toggle-profile="{{ module.id }}"
+                    data-enabled="{{ 'true' if module.enabled else 'false' }}">
+                {{ 'On' if module.enabled else 'Off' }}
+            </button>
+            {% endif %}
+        </div>
+        <p class="module-description">{{ module.description }}</p>
+        <div class="module-meta">
+            <span class="badge badge-{{ module.maturity }}">{{ module.maturity }}</span>
+            {% if module.has_updates %}
+            <span class="badge badge-update" title="{{ module.update_count }} update(s) available">{{ module.update_count }} update{{ 's' if module.update_count != 1 else '' }}</span>
+            {% endif %}
+            {% if module.origin %}
+            <span class="origin-flag" title="{{ module.origin }}">{{ module.origin | flag }}</span>
+            {% endif %}
+            {% if module.actual_memory_mb %}
+            <span class="module-ram">{{ module.actual_memory_mb }} MB</span>
+            {% elif module.ram_estimate_mb %}
+            <span class="module-ram">~{{ module.ram_estimate_mb }} MB</span>
+            {% endif %}
+        </div>
+        <div class="module-containers">
+            {{ module.containers | length }} container{{ 's' if module.containers | length != 1 else '' }}
+            {% if not module.has_ui %}<span class="badge badge-origin" style="margin-left: 0.25rem;">Background service</span>{% endif %}
+        </div>
+    </a>
+    {% endfor %}
+</div>
+
+{% if not modules %}
+<div class="empty-state">
+    <p>No modules match your filters.</p>
+</div>
+{% endif %}
+{% endblock %}

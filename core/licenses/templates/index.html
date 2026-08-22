@@ -1,0 +1,68 @@
+{# M026 S09 #1: extends the shared razz_base.html shell (S08).
+
+   Block usage:
+     title       — page title
+     extra_css   — licenses-overrides.css (12px card radius, gradient footer,
+                   page background image, .section-title / .license-type /
+                   .component-name selectors that S06 left out of the shared
+                   baseline)
+     header      — .razz-header with license icon + page heading
+     content     — license cards (rendered into the .razz-container the base
+                   already wraps around this block)
+     footer      — page footer (white text on the background image)
+
+   The razzfazz-base.css link is owned by razz_base.html — do not re-link.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}razzfazz.ai Licence & Attribution Overview{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='licenses-overrides.css') }}">
+{% endblock %}
+
+{% block header %}
+<div class="razz-header">
+    <img src="{{ url_for('static', filename='media/razzfazz-ai_license_icon.png') }}" alt="License Icon">
+    <h1>razzfazz.ai Licence &amp; Attribution Overview</h1>
+    <p style="max-width:60rem;margin:0.5rem auto 0;font-size:0.95rem;line-height:1.4;">
+        Open-core model: the <strong>Community</strong> tier is Open Source
+        (Apache-2.0); the <strong>rzfz.ai Subscription</strong> tier is
+        <strong>source-available</strong> (Business Source License 1.1 — not OSI
+        open source), converting to Apache-2.0 on its rolling Change Date; bundled
+        upstream components keep their own licences. See the repository
+        <code>LICENSE</code>, <code>NOTICE</code> and <code>docs/LICENSING.md</code>.
+    </p>
+</div>
+{% endblock %}
+
+{% block content %}
+    {# rc6.7 #10: blueprint now passes `sections` as an ordered list of
+       (title, items) pairs. New sections defined in app.py render
+       automatically; no template change needed when modules are added. #}
+    {% for title, items in sections %}
+    <div class="license-card">
+        <h2 class="section-title">{{ title }}</h2>
+        <table>
+            {% for name, license, link in items %}
+            <tr>
+                <td width="50%" class="component-name">
+                    {{ name }}
+                </td>
+                <td>
+                    <a href="{{ link }}" target="_blank" class="license-type-link">
+                        <span class="license-type">{{ license }}</span>
+                    </a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    {% endfor %}
+{% endblock %}
+
+{% block footer %}
+<div class="footer">
+    &copy; 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group · Community: Apache-2.0 (open source) · rzfz.ai Subscription: BSL 1.1 (source-available) · licensing@razzfazz.ai
+</div>
+{% endblock %}

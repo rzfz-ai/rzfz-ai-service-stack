@@ -1,0 +1,184 @@
+{# M026 S09 #3: extends shared razz_base.html. See index.html for the
+   direct-extends decision rationale (no local base.html). The
+   `body class="settings-page"` from S07 #3 is preserved via body_attrs
+   for the narrower 800px reading width. #}
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai Backup Settings{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='backup-overrides.css') }}">
+{% endblock %}
+
+{% block body_attrs %} class="settings-page"{% endblock %}
+
+{% block header %}
+<div class="header">
+    <img src="{{ url_for('static', filename='media/razzfazz-ai_backup_icon.png') }}" alt="Backup Icon">
+    <h1>Backup Settings</h1>
+    <nav>
+        <a href="{{ url_for('index') }}">← Back to Backups</a>
+    </nav>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-message {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <div class="panel">
+        <h2>⚙️ Backup Schedule Configuration</h2>
+
+        <div class="info-box">
+            <h4>💡 About Backup Scheduling</h4>
+            <p>Configure when automatic backups should run. The backup service uses a cron schedule to perform regular backups of all configured volumes.</p>
+        </div>
+
+        <div class="current-schedule">
+            <strong>Current Schedule:</strong>
+            <code>{{ config.cron_expression }}</code>
+            {% if config.parsed %}
+                <br><small>Runs at {{ config.parsed.hour }}:{{ config.parsed.minute }}
+                {% if config.parsed.frequency == 'daily' %}every day
+                {% elif config.parsed.frequency == 'weekly_sunday' %}every Sunday
+                {% elif config.parsed.frequency == 'weekly_monday' %}every Monday
+                {% elif config.parsed.frequency == 'monthly' %}on the 1st of each month
+                {% else %}(custom schedule)
+                {% endif %}
+                </small>
+            {% endif %}
+        </div>
+
+        <form method="POST">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label for="frequency">Backup Frequency</label>
+                <select name="frequency" id="frequency">
+                    <option value="hourly" {% if config.parsed and config.parsed.frequency == 'hourly' %}selected{% endif %}>Hourly</option>
+                    <option value="daily" {% if config.parsed and config.parsed.frequency == 'daily' %}selected{% endif %}>Daily</option>
+                    <option value="weekly_monday" {% if config.parsed and config.parsed.frequency == 'weekly_monday' %}selected{% endif %}>Weekly (Monday)</option>
+                    <option value="weekly_sunday" {% if config.parsed and config.parsed.frequency == 'weekly_sunday' %}selected{% endif %}>Weekly (Sunday)</option>
+                    <option value="monthly" {% if config.parsed and config.parsed.frequency == 'monthly' %}selected{% endif %}>Monthly (1st)</option>
+                </select>
+                <p class="help-text">How often should backups be created automatically?</p>
+            </div>
+
+            <div class="form-group">
+                <label>Backup Time</label>
+                <div class="time-inputs">
+                    <select name="hour" id="hour">
+                        {% for h in range(24) %}
+                        <option value="{{ h }}" {% if config.parsed and config.parsed.hour == h|string %}selected{% endif %}>{{ '%02d'|format(h) }}</option>
+                        {% endfor %}
+                    </select>
+                    <span>:</span>
+                    <select name="minute" id="minute">
+                        {% for m in range(0, 60, 5) %}
+                        <option value="{{ m }}" {% if config.parsed and config.parsed.minute == m|string %}selected{% endif %}>{{ '%02d'|format(m) }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <p class="help-text">What time should the backup run? (24-hour format, server timezone)</p>
+            </div>
+
+            <div class="form-group">
+                <label for="retention">Retention Period (Days)</label>
+                <select name="retention" id="retention">
+                    <option value="3" {% if config.retention_days == '3' %}selected{% endif %}>3 days</option>
+                    <option value="7" {% if config.retention_days == '7' %}selected{% endif %}>7 days (1 week)</option>
+                    <option value="14" {% if config.retention_days == '14' %}selected{% endif %}>14 days (2 weeks)</option>
+                    <option value="30" {% if config.retention_days == '30' %}selected{% endif %}>30 days (1 month)</option>
+                    <option value="60" {% if config.retention_days == '60' %}selected{% endif %}>60 days (2 months)</option>
+                    <option value="90" {% if config.retention_days == '90' %}selected{% endif %}>90 days (3 months)</option>
+                </select>
+                <p class="help-text">How long should old backups be kept before automatic deletion?</p>
+            </div>
+
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                    <input type="checkbox" name="include_models" id="include_models"
+                           {% if config.include_model_files %}checked{% endif %}
+                           style="width: auto; min-width: 20px; height: 20px; cursor: pointer;">
+                    <span>Include LLM/TTS Model Files in Backup</span>
+                </label>
+                <p class="help-text" style="margin-top: 8px;">
+                    When enabled, GPUStack and Speaches model files (<code>gpustack-data</code>, <code>speaches-data</code>)
+                    are included in every backup. These files can be very large (multiple GB) and are
+                    re-downloaded automatically when needed.
+                </p>
+                <div class="warning-box" style="margin-top: 10px; margin-bottom: 0;">
+                    <h4>⚠️ Disk Space Warning</h4>
+                    <p>Enabling this option can significantly increase backup size and disk usage, especially with daily backups.
+                    Only enable this if you have sufficient storage or slow/metered internet for re-downloads.</p>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <h3 style="color: var(--razz-red); border-bottom: 1px solid #ddd; padding-bottom: 8px; margin-top: 30px;">🔒 Environment File Encryption</h3>
+                <div class="info-box">
+                    <h4>💡 About .env Encryption</h4>
+                    <p>Your <code>.env</code> and <code>.env.dify</code> configuration files (containing all secrets and passwords)
+                    are automatically encrypted and included in every backup. During a restore, they are decrypted and restored automatically.</p>
+                </div>
+
+                <div class="current-schedule" style="margin-top: 15px;">
+                    <strong>Current Status:</strong>
+                    {% if config.encryption_password_set %}
+                        🔑 Using <strong style="color: var(--razz-red);">custom encryption password</strong>
+                    {% else %}
+                        🔑 Using <strong>admin password</strong> (AUTHENTIK_BOOTSTRAP_PASSWORD)
+                    {% endif %}
+                </div>
+
+                <div style="margin-top: 15px;">
+                    <label>Encryption Password Override</label>
+                    <select name="encryption_action" id="encryption_action" onchange="toggleEncryptionInput()" style="margin-bottom: 10px;">
+                        <option value="keep">Keep current setting</option>
+                        <option value="set">Set custom encryption password</option>
+                        <option value="clear">Reset to admin password</option>
+                    </select>
+                </div>
+
+                <div id="encryptionPasswordGroup" style="display: none; margin-top: 10px;">
+                    <input type="password" name="encryption_password" id="encryption_password"
+                           placeholder="Enter custom encryption password" autocomplete="new-password">
+                    <p class="help-text">This password will be used instead of the admin password to encrypt .env files in backups.</p>
+                </div>
+
+                <div class="warning-box" style="margin-top: 15px; margin-bottom: 0;">
+                    <h4>⚠️ Important: Remember Your Password</h4>
+                    <p>Without the correct encryption password, the .env files in backups cannot be restored.
+                    If you set a custom password, store it securely outside of this system.</p>
+                </div>
+            </div>
+
+            <div style="margin-top: 30px;">
+                <button type="submit">💾 Save Settings</button>
+                <a href="{{ url_for('index') }}" class="button-secondary" style="text-decoration: none; padding: 12px 30px; border-radius: 6px; color: white; display: inline-block;">Cancel</a>
+            </div>
+        </form>
+
+        <div class="warning-box">
+            <h4>⚠️ Important</h4>
+            <p>After saving settings, you need to restart the backup-service container for changes to take effect:</p>
+            <p style="margin-top: 10px;"><code>docker compose restart backup-service</code></p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleEncryptionInput() {
+    var action = document.getElementById('encryption_action').value;
+    document.getElementById('encryptionPasswordGroup').style.display = (action === 'set') ? 'block' : 'none';
+}
+</script>
+{% endblock %}

@@ -1,0 +1,81 @@
+# ==============================================================================
+# PII DETECTION & REDACTION MODULE (Presidio)
+# ==============================================================================
+# Profile: presidio
+# Three stateless, internal-only containers:
+#   - presidio-analyzer:       Text PII entity detection  (port 3000 → host 5100)
+#   - presidio-anonymizer:     Text PII anonymization     (port 3000 → host 5300)
+#   - presidio-image-redactor: Image PII redaction        (port 3000 → host 5200)
+#
+# Typical workflow:
+#   1. POST presidio-analyzer:3000/analyze   → list of entity spans
+#   2. POST presidio-anonymizer:3000/anonymize → redacted text (using spans from step 1)
+#   (Optional) POST presidio-anonymizer:3000/deanonymize → restore via AES decrypt
+#
+# No Caddy, no Authentik. Access via Docker DNS service names.
+# All three are MIT-licensed (microsoft/presidio on GitHub).
+# ==============================================================================
+services:
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:2.2.362
+    profiles: ["presidio"]
+    container_name: presidio-analyzer
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    # autoheal opt-in (2026-05-25): on prod 8.246 the analyzer's gunicorn worker
+    # hung at startup — /health probes >15s, container went `unhealthy`, but
+    # `restart: unless-stopped` won't restart a wedged (non-exited) process. Took
+    # a manual `docker restart`. autoheal (core/compose.yml) does that within ~30s
+    # of the 3rd failed probe. Safe here: stateless gunicorn, fast restart, no
+    # model-load storm (unlike gpustack, where autoheal cascade-kills — never add).
+    labels:
+      autoheal: "true"
+    ports:
+      - "127.0.0.1:${PRESIDIO_ANALYZER_PORT:-5100}:3000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  presidio-anonymizer:
+    image: mcr.microsoft.com/presidio-anonymizer:2.2.362
+    profiles: ["presidio"]
+    container_name: presidio-anonymizer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PRESIDIO_ANONYMIZER_PORT:-5300}:3000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  presidio-image-redactor:
+    image: mcr.microsoft.com/presidio-image-redactor:0.0.58
+    profiles: ["presidio"]
+    container_name: presidio-image-redactor
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${PRESIDIO_IMAGE_REDACTOR_PORT:-5200}:3000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge

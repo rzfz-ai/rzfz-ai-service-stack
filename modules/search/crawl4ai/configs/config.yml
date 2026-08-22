@@ -1,0 +1,17 @@
+# crawl4ai server config — bind-mounted read-only at /app/config.yml
+# Reference: https://docs.crawl4ai.com/core/docker-deployment/
+#
+# This file is the operator's escape hatch for tuning crawler defaults
+# without rebuilding the image. The container ships with sane defaults;
+# everything below is optional.
+#
+# Common tunables:
+#   browser.headless    : true | false   (default true)
+#   browser.shared      : true | false   (single browser instance shared)
+#   crawler.timeout_ms  : int            (default 60000)
+#   crawler.max_threads : int            (default 4)
+#   storage.cache_path  : str            (default /app/.cache)
+#
+# TODO: drop the actual config here. The empty document below loads fine and
+# falls back to the image's built-in defaults.
+{}

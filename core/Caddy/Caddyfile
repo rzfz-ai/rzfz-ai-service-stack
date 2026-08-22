@@ -1,0 +1,1484 @@
+# ==============================================================================
+# CADDY CONFIGURATION (Reverse & Forward Proxy)
+# ==============================================================================
+# This Caddyfile configures the entry point for the entire service stack.
+# It handles:
+# 1. Reverse Proxying: Routing external traffic to internal Docker services.
+# 2. Authentication: Integrating with Authentik for SSO.
+# 3. Security: Adding security headers and TLS termination.
+# 4. Internal Utilities: Forward Proxy (SSRF protection) and API Adapters.
+#
+# Environment variables like {$DOMAIN} are injected from .env at runtime.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# GLOBAL OPTIONS
+# ------------------------------------------------------------------------------
+# F-B7: rate_limit plugin (github.com/mholt/caddy-ratelimit) is compiled in via
+# core/Caddy/Dockerfile. Applied to the Authentik login flow and Gitea login in
+# their respective site blocks below (10 req/min per client IP).
+# ------------------------------------------------------------------------------
+{
+    # #60: ACME account email. Derived by core/Caddy/entrypoint.sh into
+    # ACME_EMAIL_DIRECTIVE — it expands to `email <addr>` only when ACME is
+    # actually in use (TLS_MODE empty/letsencrypt) AND LETSENCRYPT_EMAIL is
+    # non-empty; otherwise it's empty. A hard-coded email directive with a bare
+    # LETSENCRYPT_EMAIL would expand to `email` with no argument whenever the
+    # address is legitimately empty (TLS_MODE=certificate / internal), failing
+    # Caddyfile adaptation and crash-looping Caddy.
+    {$ACME_EMAIL_DIRECTIVE:}
+    # Admin API — enabled for Agent Manager dynamic route registration
+    # Only accessible from Docker network (not published to host)
+    admin 0.0.0.0:2019
+    # Define order of handlers
+    order forward_proxy before reverse_proxy
+    # F-B7: rate_limit must run before reverse_proxy so 429s go out fast.
+    order rate_limit before reverse_proxy
+
+    # Disable HTTP/3 to reduce UDP buffer contention and improve network stability
+    servers {
+        protocols h1 h2
+    }
+
+    # On-demand TLS guard for the *.AGENTS_DOMAIN wildcard block.
+    # Caddy hits agent-manager's /api/tls/ask before issuing a per-name LE
+    # cert; the endpoint returns 200 only for hostnames that resolve to a
+    # registered agent instance (token-based subdomain). This blocks the
+    # cert-flood DoS vector. Required for the wildcard's `tls { on_demand }`
+    # in section 27b below.
+    on_demand_tls {
+        ask http://agent-manager:5000/api/tls/ask
+    }
+}
+
+# ------------------------------------------------------------------------------
+# SNIPPETS (Reusable Blocks)
+# ------------------------------------------------------------------------------
+
+(security_headers) {
+    header {
+        X-XSS-Protection "1; mode=block"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # F-043: Additional security headers
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Camera/mic/geolocation disabled for ALL sites by default (least privilege).
+        # The Open WebUI site alone imports (security_headers_owui) below, which grants
+        # microphone to same-origin only (voice input / dictation, RZFZAI-644 / #199).
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+}
+
+# Identical to (security_headers) EXCEPT microphone=(self) — imported ONLY by the Open
+# WebUI site so browser voice input / dictation works there (RZFZAI-644 / #199), while
+# every other subdomain keeps the microphone fully disabled. Camera stays off everywhere
+# (no stack feature needs it). Keep the non-Permissions-Policy headers in sync with
+# (security_headers) above.
+(security_headers_owui) {
+    header {
+        X-XSS-Protection "1; mode=block"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+        -Server
+    }
+}
+
+# Branding assets — serves razzfazz.ai media from authentik-media volume.
+# Path lineage:
+#   pre-2025.12:  files at volume root (/data/<file>)        → root /srv/authentik-media
+#   2025.12 hop:  files at /data/media/<file>                 → root /srv/authentik-media/media
+#   2026.2:       files at /data/media/public/<file>          → root /srv/authentik-media/media/public
+# Authentik 2026.2 itself serves protected brand assets via signed JWT URLs
+# (/files/media/public/<file>?token=...) handled by authentik-server, NOT
+# Caddy. /branding/* is the LEGACY public-asset route used by Application
+# meta_icon URLs configured in our blueprints (icons stored alongside the
+# brand assets). It's effectively the same physical files; we just don't
+# require Authentik's signed token for application icons (they're public).
+(branding_static) {
+    handle /branding/* {
+        uri strip_prefix /branding
+        root * /srv/authentik-media/media/public
+        file_server
+    }
+}
+
+(authentik_upstream_config) {
+    uri /outpost.goauthentik.io/auth/caddy
+    # F-062: The full Authentik JWT is forwarded to all upstream services via X-Authentik-Jwt.
+    # This is a known characteristic of Caddy forward-auth with Authentik — most services
+    # ignore the JWT body. Stripping it would break services that rely on it for user identity.
+    copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Uid X-Authentik-Jwt X-Authentik-Meta-Jwk X-Authentik-Meta-Outpost X-Authentik-Meta-Provider X-Authentik-Meta-App X-Authentik-Meta-Version
+}
+
+# SECURITY (C1 bypass fix, PR #84 re-review): the sandbox coding-agent
+# containers share the `coding-agents` docker network with agent-manager, so a
+# malicious user who controls their own sandbox could otherwise dial
+# agent-manager:5000 directly with a forged `Host:` + `X-Authentik-Username:`
+# and hijack a victim's shell — bypassing Caddy, the ONLY component that
+# validates the Authentik session. The "came through Caddy" anchor is a
+# SOURCE-IP check at the manager (proxy.py `_proxy_proof_ok`: request.remote_addr
+# must be Caddy's IP) — NOT an injected header. A header proof was tried first
+# but Caddy's per-instance `forward_auth` does not reliably propagate a
+# route-injected request header to the upstream (it delivered the X-Authentik-*
+# copy_headers but dropped the proof), which 403'd the real owner. A sandbox
+# cannot spoof Caddy's source IP (cap_drop ALL → no NET_RAW), so no snippet is
+# needed here.
+
+# TLS_DIRECTIVE is set by razzfazz-init.sh:
+#   "tls internal" for self-signed certs (local/dev)
+#   "" (empty) for automatic Let's Encrypt (production)
+(tls_config) {
+    {$TLS_DIRECTIVE:}
+}
+
+# Health check response snippet — used by all /healthz handlers that
+# respond directly from Caddy (for services without a native /healthz).
+(health_respond) {
+    header Content-Type "application/json"
+    respond `{"status":"ok","service":"{args[0]}"}` 200
+}
+
+# ==============================================================================
+# REVERSE PROXY SECTION (External -> Internal)
+# ==============================================================================
+
+
+# 1. Dify (LLM App Builder)
+{$DIFY_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # CSP — REPORT-ONLY for now. Compensating control for the upstream
+    # echarts DOM-XSS GHSA-qqjx-5h5w-x5vj which has no upstream patch as
+    # of 2026-05-09. We're observing first to learn what Dify's frontend
+    # legitimately needs (Next.js inline hydration scripts, monaco web-
+    # workers, blob: URIs for charts, etc.) before promoting to enforce.
+    # Default-src 'none' forces an explicit allowlist for everything;
+    # 'unsafe-inline'/'unsafe-eval' on script-src kept until we wire
+    # nonces (Next 16 supports them but Dify config doesn't opt in by
+    # default). 'data:'/'blob:' on img-src + connect-src are needed for
+    # echarts SVG rendering and OPFS sandbox storage. report-uri sends
+    # JSON violation reports to /csp-report which Caddy 204s — review
+    # access logs to find what the policy would block before flipping
+    # to enforcing. Remove report-only / flip the header name to
+    # 'Content-Security-Policy' once the report stream is clean.
+    header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-ancestors 'self'; worker-src 'self' blob:; base-uri 'self'; form-action 'self'; report-uri /csp-report"
+
+    # CSP violation sink — return 204 so the browser doesn't retry; the
+    # JSON body lands in Caddy's access log for review.
+    handle /csp-report {
+        respond 204
+    }
+
+    # F-034: API path exemptions — Dify has its own JWT auth for all API endpoints.
+    # /console/api/* — Dify console backend (JWT auth, prevents CORS issues when Authentik session expires)
+    # /v1/*          — Dify external API (API key auth)
+    # /files/*       — File serving (Dify session auth)
+    # /api/*         — Dify app API (API key auth)
+    # /triggers/*    — Webhook triggers (Dify signature verification)
+    # /sslog/*, /_next/*, /favicon.ico, /logo.png — static assets, no auth needed
+    #
+    # RZFZAI-1308: PUBLIC web-app (published-app share) routes MUST bypass the
+    # Authentik forward-auth gate — otherwise a truly-public visitor to a
+    # published Dify app is bounced to SSO login. In Dify 1.15.0 the frontend
+    # serves shared apps from the (shareLayout) segment; those routes are
+    # /chat/<token>, /completion/<token>, /workflow/<token>, /chatbot/<token>
+    # (embed) and /agent/<token>, plus the web-app auth pages /webapp-signin
+    # and /webapp-reset-password. Their data calls go to /api/* (already
+    # exempted above) so no console JWT is needed. Community Edition has
+    # webapp_auth disabled, so a published app with its site enabled is
+    # reachable without any Dify login once Authentik stops gating these paths.
+    @dify_protected {
+        not path /healthz
+        not path /console/api/*
+        not path /v1/*
+        not path /files/*
+        not path /app/*
+        not path /api/*
+        not path /triggers/*
+        not path /sslog/*
+        not path /_next/*
+        not path /favicon.ico
+        not path /logo.png
+        not path /csp-report
+        # RZFZAI-1308 — public published-app (shareLayout) routes, no SSO gate
+        not path /chat/*
+        not path /completion/*
+        not path /workflow/*
+        not path /chatbot/*
+        not path /agent/*
+        not path /webapp-signin
+        not path /webapp-signin/*
+        not path /webapp-reset-password
+        not path /webapp-reset-password/*
+        not method OPTIONS
+    }
+
+    forward_auth @dify_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Health check: proxied to Dify API's native /health endpoint
+    handle /healthz {
+        rewrite * /health
+        reverse_proxy dify-api:5001
+    }
+
+    handle /console/api/* {
+        reverse_proxy dify-api:5001
+    }
+
+    handle /api/* {
+        reverse_proxy dify-api:5001
+    }
+    
+    handle /v1/* {
+        reverse_proxy dify-api:5001
+    }
+
+    handle /files/* {
+        reverse_proxy dify-api:5001
+    }
+
+    handle /triggers/* {
+        reverse_proxy dify-api:5001
+    }
+
+    handle {
+        reverse_proxy dify-web:3000
+    }
+}
+
+# 2. OpenWebUI (Chat Interface)
+{$OPENWEBUI_DOMAIN} {
+    import tls_config
+    import security_headers_owui
+
+    # F-034: API path exemptions — OpenWebUI has its own session/API key auth.
+    # /api/*    — OpenWebUI REST API (session cookie or API key auth)
+    # /ollama/* — Ollama-compatible API proxy (API key auth)
+    # /v1/*     — OpenAI-compatible API (API key auth)
+    # /static/*, /assets/*, /manifest.json, /favicon.ico — static assets
+    @openwebui_protected {
+        not path /healthz
+        not path /api/*
+        not path /ws/*
+        not path /ollama/*
+        not path /v1/*
+        not path /static/*
+        not path /assets/*
+        not path /manifest.json
+        not path /favicon.ico
+        not method OPTIONS
+    }
+
+    forward_auth @openwebui_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Health check: proxied to OpenWebUI's native /health endpoint
+    handle /healthz {
+        rewrite * /health
+        reverse_proxy openwebui:8080
+    }
+
+    reverse_proxy openwebui:8080 {
+        flush_interval -1
+    }
+}
+
+# 3. GPUStack (LLM Backend Manager)
+{$GPUSTACK_DOMAIN} {
+    import tls_config
+    import security_headers
+    
+    # F-035: Authentik bypass is path-based + format-restricted header.
+    # Originally rc4 had a blanket "any Authorization header skips forward-auth"
+    # bypass; F-035 (2026-04-29 audit) removed it. 2026.05-ga then dropped it
+    # entirely — broke GPUStack v0.7.1 master/worker comms.
+    #
+    # F-PROD-7 fix re-enabled the bypass with TWO format-restricted regexes:
+    #
+    #   1. `^Bearer [a-f0-9]{32}$` — covers code paths that pass the master
+    #      token as an api_key (e.g. CLI / reset-admin-password).
+    #   2. `^Basic c3lzdGVtL3dvcmtlci8\S+$` — the actual workhorse path. v0.7.1
+    #      `gpustack/worker/worker.py` constructs ClientSet with
+    #      username=f"system/worker/{worker_ip}" + password=cfg.token, so the
+    #      header is `Authorization: Basic base64("system/worker/<ip>:<token>")`.
+    #      base64 of "system/worker/" always starts with `c3lzdGVtL3dvcmtlci8`,
+    #      and no admin user name begins with `system/worker/`, so this prefix
+    #      uniquely identifies worker traffic. \S+ requires at least one more
+    #      base64 char (the IP + ":" + token tail).
+    #
+    # GPUStack admin Bearer keys have format `gpustack_<16hex>_<32hex>`
+    # (longer, contains `_`) and admin Basic credentials are user-supplied
+    # names — neither matches either regex. So forward-auth still protects
+    # all UI / admin paths against forged Authorization headers (F-035 spirit).
+    #
+    # Bypasses (forward-auth skipped when ANY of these match):
+    #   OPTIONS                                  — CORS preflight
+    #   /healthz                                 — health check
+    #   /v1-openai*                              — OpenAI-compat API
+    #   Authorization: Bearer <32 hex>           — worker token via api_key path
+    #   Authorization: Basic c3lzdGVtL3dvcmtlci8…— worker via username/password
+    @gpustack_protected {
+        not method OPTIONS
+        not path /healthz
+        not path /v1-openai*
+        not header_regexp Authorization "^(Bearer [a-f0-9]{32}|Basic c3lzdGVtL3dvcmtlci8\S+)$"
+    }
+
+    forward_auth @gpustack_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # #19: box-wide LLM backpressure limiter ("option C").
+    #
+    # Caps the rate of OpenAI-compat inference requests admitted to gpustack
+    # across ALL clients that reach it through this public ingress, returning
+    # 429 + Retry-After once the cap is exceeded — instead of letting an
+    # overload pile onto gpustack until it OOMs / storms. Complements the
+    # per-app Dify `max_active_requests` guard (#30) with a shared cap.
+    #
+    # Box-wide, not per-IP: `key llm` is a STATIC constant, so every client
+    # shares ONE bucket (mholt/caddy-ratelimit zones are global by name). A
+    # `{remote_ip}` key would instead give each source its own N — no box cap.
+    #
+    # Scope: only `/v1-openai*` (chat/completions, embeddings, rerank — the
+    # calls that actually load the runner). /healthz, the UI, and the
+    # master/worker Basic-auth comms are deliberately NOT throttled, so this
+    # cannot regress the #1 keepalive/retry health-check fix below.
+    #
+    # Tunable + OFF by default: LLM_MAX_CONCURRENT is the number of inference
+    # requests admitted per LLM_MAX_CONCURRENT_WINDOW. The .env default
+    # (100000 / 1s) is effectively unlimited so existing installs are never
+    # throttled; an operator opts in by setting a real cap (e.g. 8) in .env.
+    #
+    # CAVEAT (documented in the PR): consumers that dial the `gpustack:9090`
+    # Docker-DNS name directly (OWUI, cognee, lightrag, the agents, …) bypass
+    # Caddy and are NOT covered here — this guards the llm.<domain> ingress +
+    # anything routed through it. A truly stack-wide cap that also covers the
+    # direct-DNS consumers is a larger follow-up (route them via Caddy too).
+    @llm_inference path /v1-openai*
+    rate_limit @llm_inference {
+        zone llm_backpressure {
+            key llm
+            events {$LLM_MAX_CONCURRENT:100000}
+            window {$LLM_MAX_CONCURRENT_WINDOW:1s}
+        }
+    }
+
+    # Health check: proxied to GPUStack's native /healthz endpoint.
+    # #1: retry on a keep-alive conn-reset — when gpustack closes an idle
+    # connection Caddy reused, the request resets; without a retry window that
+    # surfaces as a recurring /healthz 502 blip. lb_try_duration retries the
+    # (idempotent) request on a fresh connection within the window.
+    handle /healthz {
+        reverse_proxy gpustack:9090 {
+            lb_try_duration 5s
+            lb_try_interval 250ms
+        }
+    }
+
+    reverse_proxy gpustack:9090 {
+        flush_interval -1
+        # #1: retry idempotent requests on a gpustack keep-alive connection reset
+        # instead of returning 502.
+        lb_try_duration 5s
+        lb_try_interval 250ms
+        transport http {
+            versions 1.1
+        }
+    }
+}
+
+# 4. Komodo (Infrastructure Monitoring)
+{$KOMODO_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # Health check: Komodo has no native health API endpoint (SPA fallback).
+    # We rewrite to root and check that the server responds with 200.
+    handle /healthz {
+        rewrite * /
+        reverse_proxy komodo-core:8180
+    }
+
+    @komodo_protected {
+        not path /healthz
+    }
+
+    forward_auth @komodo_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+    
+    reverse_proxy komodo-core:8180
+}
+
+# 5. Authentik (Identity Provider)
+{$AUTHENTIK_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # GHSA-qvxx-mfm6-626f (Critical, Authenticated RCE in Policy/Property Mapping
+    # test endpoint, CVSS 9.1) is unpatched on the 2026.2.x line as of 2026.2.2;
+    # patches only landed on 2025.8.6 / 2025.10.4 / 2025.12.4. In our deployment
+    # only `akadmin` (is_superuser) holds the `view_policy` / `view_propertymapping`
+    # perms — no razzfazz.ai user group grants either — so the practical risk is
+    # LOW (akadmin-credential-compromise scenario only). Even so, block at the
+    # edge: there's no legitimate need to hit /test/ from a production box during
+    # normal operation; admin-UI "Test" buttons inside Authentik can be reached
+    # by temporarily commenting this if needed. Remove when 2026.2.3 lands.
+    # See .gsd/notes/authentik-ghsa-qvxx-2026-05-09.md for the full RBAC analysis.
+    @ghsa_qvxx path_regexp ghsa ^/api/v3/(policies|propertymappings)/all/[^/]+/test/?$
+    respond @ghsa_qvxx 403
+
+    # F-B7: rate-limit the authentication (login) flow only — brute-force protection
+    # on credential entry. Scope to the default-authentication-flow executor so the
+    # OIDC authorization/consent flow (default-provider-authorization-*) shared by
+    # every SSO sign-in (Vaultwarden, Chat, Dify, …) is NOT throttled — that broad
+    # /api/v3/flows/executor/* match was 429-ing legitimate reverse-SSO logins.
+    # 30/min per client IP still stops any real brute-force.
+    @auth_flow path /flows/-/default/authentication/* /api/v3/flows/executor/default-authentication-flow/*
+    rate_limit @auth_flow {
+        zone authentik_login {
+            key {remote_ip}
+            events 30
+            window 1m
+        }
+    }
+
+    # Health check: proxied to Authentik's native health endpoint
+    handle /healthz {
+        rewrite * /-/health/live/
+        reverse_proxy authentik-server:9000
+    }
+
+    # CORS headers for OAuth flows from all subdomains.
+    # Uses dynamic origin matching so any *.MAIN_DOMAIN subdomain is allowed,
+    # preventing CORS errors when sessions expire on Dify, Chat, etc.
+    @cors_origin header_regexp origin Origin ^https://([a-zA-Z0-9-]+\.)?{$MAIN_DOMAIN}$
+
+    @cors_preflight {
+        method OPTIONS
+        header_regexp origin Origin ^https://([a-zA-Z0-9-]+\.)?{$MAIN_DOMAIN}$
+    }
+    handle @cors_preflight {
+        header Access-Control-Allow-Origin "{http.request.header.Origin}"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        header Access-Control-Allow-Headers "Content-Type, Authorization"
+        header Access-Control-Allow-Credentials "true"
+        header Vary "Origin"
+        respond "" 204
+    }
+
+    header @cors_origin Access-Control-Allow-Origin "{http.request.header.Origin}"
+    header @cors_origin Access-Control-Allow-Credentials "true"
+    header @cors_origin Vary "Origin"
+
+    import branding_static
+
+    # /media/* — legacy public-asset route. Authentik 2026.2+ doesn't actually
+    # request brand assets at this URL (it uses /files/media/public/<file>?
+    # token=<JWT> internally — see authentik-server's own routing). Kept here
+    # for any third-party integration / dashboard that hard-codes /media/
+    # URLs. Same physical files as /branding/* above.
+    handle /media/* {
+        uri strip_prefix /media
+        root * /srv/authentik-media/media/public
+        file_server
+    }
+
+    # M028 — post-login redirect (narrowed per ARCH-1).
+    # Direct visits to auth.<domain>/ (the bare host) and to
+    # /if/user/library/ (Authentik's default post-login landing) get
+    # redirected to start.<domain>. Direct OIDC inbound goes through
+    # /application/o/authorize/... and Authentik's post-callback redirect
+    # goes back to the originating subdomain — neither of those paths
+    # match this rule, so deep links into chat.<domain> etc. continue
+    # to land at the originally-requested app.
+    @start_redirect_paths {
+        path / /if/user/library/ /if/user/library
+    }
+    redir @start_redirect_paths https://{$START_DOMAIN}/ 302
+
+    reverse_proxy authentik-server:9000 {
+        flush_interval -1
+    }
+}
+
+# 6. Backup Management
+{$BACKUP_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # Health check: bypasses Authentik, proxied to app's /healthz
+    handle /healthz {
+        reverse_proxy razzfazz-backup-management:5000
+    }
+
+    @backup_protected {
+        not path /healthz
+    }
+
+    forward_auth @backup_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    reverse_proxy razzfazz-backup-management:5000
+}
+
+# 6b. Start Portal — M028 (post-login launcher)
+{$START_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # Health check: bypasses Authentik, proxied to app's /healthz
+    handle /healthz {
+        reverse_proxy razzfazz-start-portal:5000
+    }
+
+    @start_protected {
+        not path /healthz
+        not path /outpost.goauthentik.io/*
+    }
+
+    forward_auth @start_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Authentik outpost endpoints (auth callback + sign_out) must reach
+    # Authentik directly, not the portal app. Required for forward-auth
+    # logout via /outpost.goauthentik.io/sign_out (clears the proxy session).
+    handle /outpost.goauthentik.io/* {
+        reverse_proxy authentik-server:9000
+    }
+
+    reverse_proxy razzfazz-start-portal:5000
+}
+
+# 7. License Overview
+{$LICENSE_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # Health check: bypasses Authentik, proxied to app's /healthz
+    handle /healthz {
+        reverse_proxy razzfazz-licenses:5000
+    }
+
+    @licenses_protected {
+        not path /healthz
+    }
+
+    forward_auth @licenses_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    reverse_proxy razzfazz-licenses:5000
+}
+
+# 8. Help Center
+{$HELP_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # Health check: bypasses Authentik, proxied to app's /healthz
+    handle /healthz {
+        reverse_proxy razzfazz-help:5000
+    }
+
+    @help_protected {
+        not path /healthz
+    }
+
+    forward_auth @help_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    reverse_proxy razzfazz-help:5000
+}
+
+# 9. (#22) The Setup UI (setup.<domain>) was removed in 2026.07. Its
+#    functions live in the Configuration Portal (config.<domain>, §9b) and
+#    the host-side `rzfz setup` CLI.
+
+# 9b. Configuration UI (M008 — config-dev profile)
+{$CONFIG_DOMAIN} {
+    import tls_config
+    import security_headers
+    # NOTE: do NOT `import branding_static` here. razzfazz-config's Flask app
+    # has its own static_url_path=/branding serving /app/app/static/* (logo,
+    # module icons). Caddy's branding_static handler would shadow that and
+    # try to serve from /srv/authentik-media/media/public/ which doesn't have
+    # the config-portal-specific assets. F-PROD-8 (prod 2026.05 cutover):
+    # operator reported "config login razzfazz logo still broken" — caused by
+    # the now-removed import. Note same applies to AGENTS_DOMAIN (still has
+    # the import; fix when agent-manager logo is reported broken).
+
+    # Health check: bypasses Authentik
+    handle /healthz {
+        reverse_proxy razzfazz-config:5000
+    }
+
+    @config_protected {
+        not path /healthz
+        # razzfazz-config's Flask app serves /branding/* as static assets
+        # (logo, module icons, favicons). Without this bypass, every <img
+        # src="/branding/media/X.png"> inside the Release Notes / What's
+        # New popup triggers Caddy → Authentik forward_auth → 302 OIDC
+        # redirect for each image, which browsers don't follow as
+        # subresources → all icons render broken. Branding assets aren't
+        # sensitive; same pattern is used elsewhere in this Caddyfile for
+        # public static surfaces. Filed as v2026.05-ga.4 hotfix.
+        not path /branding/*
+    }
+
+    forward_auth @config_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    reverse_proxy razzfazz-config:5000
+}
+
+# 9c. Redirects from old admin URLs to config UI (activate on M008 cutover)
+# Uncomment these blocks and remove the original service blocks when cutting over.
+#
+# {$HELP_DOMAIN} {
+#     import tls_config
+#     redir https://{$CONFIG_DOMAIN}/docs/{uri} 301
+# }
+# {$BACKUP_DOMAIN} {
+#     import tls_config
+#     redir https://{$CONFIG_DOMAIN}/backup/{uri} 301
+# }
+# {$LICENSE_DOMAIN} {
+#     import tls_config
+#     redir https://{$CONFIG_DOMAIN}/licenses/{uri} 301
+# }
+
+# 10. Gitea (Git Service)
+{$GITEA_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # F-B7: rate-limit the Gitea interactive login (10/min per client IP).
+    # Git clone/push use token/ssh and are excluded by specific path.
+    @gitea_login path /user/login /user/login/*
+    rate_limit @gitea_login {
+        zone gitea_login {
+            key {remote_ip}
+            events 10
+            window 1m
+        }
+    }
+
+    # Git operations (clone, push, pull) should not require Authentik auth
+    # They use Gitea's own authentication (SSH keys, access tokens, HTTP basic)
+    # Patterns need both /*.git/* (bare repo) and /*/*.git/* (org/repo) forms
+    # because Caddy's * wildcard does not match path separators (/)
+    @git_operations {
+        path /*.git/*
+        path /*/*.git/*
+        path /*/info/*
+        path /*/*/info/*
+        path /*/git-*
+        path /*/*/git-*
+    }
+    
+    # API endpoints for Git LFS and other programmatic access
+    @api_paths {
+        path /api/*
+        path /v2/*
+        path /user/*
+        path /login/oauth/*
+    }
+    
+    # Web UI paths that should be protected by Authentik
+    @web_ui {
+        not path /healthz
+        not path /*.git/*
+        not path /*/*.git/*
+        not path /*/info/*
+        not path /*/*/info/*
+        not path /*/git-*
+        not path /*/*/git-*
+        not path /api/*
+        not path /v2/*
+        not path /user/*
+        not path /login/oauth/*
+        not path /assets/*
+        not path /avatars/*
+        not path /repo-avatars/*
+        not path /favicon.ico
+        not method OPTIONS
+    }
+    
+    forward_auth @web_ui authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Health check: proxied to Gitea's native /api/healthz endpoint
+    handle /healthz {
+        rewrite * /api/healthz
+        reverse_proxy gitea:3000
+    }
+
+    reverse_proxy gitea:3000
+}
+
+# 11. Cognee (GraphRAG Knowledge Engine) [EXPERIMENTAL]
+# rc6.7 #57: split frontend/backend.
+#   /api/*, /docs*, /openapi.json, /redoc, /health* → cognee backend (FastAPI :8000)
+#   everything else                                 → cognee-frontend (Next.js :3000)
+# Both routes share the same Authentik forward_auth gate, with API/health/docs
+# exempt because Cognee's own JWT (fastapi-users) auths them.
+{$COGNEE_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # F-034: API path exemptions — Cognee has its own JWT auth (fastapi-users).
+    # /api/*        — Cognee REST API (JWT bearer token auth)
+    # /health*      — Health check endpoints
+    # /openapi.json, /docs*, /redoc — OpenAPI documentation (read-only, no sensitive data)
+    @cognee_protected {
+        not path /healthz
+        not path /health
+        not path /health/*
+        not path /api/*
+        not path /openapi.json
+        not path /docs
+        not path /docs/*
+        not path /redoc
+        not method OPTIONS
+    }
+
+    forward_auth @cognee_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # rc6.7 #68: bypass the cognee-frontend onboarding wizard. Upstream's
+    # /onboarding flow is hardwired for Cognee Cloud (Step 1 asks the user
+    # for a sk-cog-* token, sets COGNEE_CLOUD_AUTH_TOKEN in .env, then
+    # polls /api/v1/sync waiting for cloud sync to succeed). For a
+    # self-hosted deployment with no Cognee Cloud account the wizard hangs
+    # at Step 1 forever and Step 2 surfaces the failure as "Uploading
+    # files: Failed / No connection to the server". The "Skip onboarding"
+    # link only sets a per-session sessionStorage key and resets every new
+    # tab. There is no env-var feature flag in cognee-frontend v1.0.1 to
+    # disable the wizard, and no DB-level is_onboarded column. Sending
+    # everyone straight to /dashboard is the smallest blast-radius fix
+    # that survives upstream cognee-frontend updates.
+    redir /onboarding /dashboard 302
+    redir /onboarding/* /dashboard 302
+
+    # Backend routes — FastAPI on cognee:8000.
+    # /api/* preserves the full path (no rewrite); cognee mounts under /api/v1/...
+    handle /api/* {
+        reverse_proxy cognee:8000
+    }
+    handle /healthz {
+        reverse_proxy cognee:8000
+    }
+    handle /health* {
+        reverse_proxy cognee:8000
+    }
+    handle /openapi.json {
+        reverse_proxy cognee:8000
+    }
+    handle /docs* {
+        reverse_proxy cognee:8000
+    }
+    handle /redoc {
+        reverse_proxy cognee:8000
+    }
+
+    # Everything else → Next.js UI on cognee-frontend:3000.
+    handle {
+        reverse_proxy cognee-frontend:3000
+    }
+}
+
+# 12. LightRAG (RAG Knowledge Base) [EXPERIMENTAL]
+{$LIGHTRAG_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # F-034: API path exemptions — LightRAG uses X-API-Key header authentication.
+    # Tightened from broad exemptions to only essential API paths:
+    # /api/*        — LightRAG REST API (X-API-Key auth)
+    # /query*       — Query endpoints (X-API-Key auth)
+    # /documents/*  — Document management (X-API-Key auth)
+    # /graph/*      — Graph visualization (X-API-Key auth)
+    # /login, /auth-status — LightRAG's own auth flow
+    # /docs*, /openapi.json — OpenAPI documentation (read-only)
+    # /assets/*, /favicon.ico — static assets
+    @lightrag_protected {
+        not path /healthz
+        not path /health
+        not path /api/*
+        not path /query
+        not path /query/*
+        not path /documents/*
+        not path /graph/*
+        not path /login
+        not path /auth-status
+        not path /docs
+        not path /docs/*
+        not path /openapi.json
+        not path /assets/*
+        not path /favicon.ico
+        not method OPTIONS
+    }
+
+    forward_auth @lightrag_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Health check: proxied to LightRAG's native /health endpoint
+    handle /healthz {
+        rewrite * /health
+        reverse_proxy lightrag:9621
+    }
+
+    reverse_proxy lightrag:9621
+}
+
+# 13. Docling Serve (Document Converter) [EXPERIMENTAL]
+docling.{$MAIN_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @docling_protected {
+        not path /healthz
+        not path /health
+        not path /docs
+        not path /docs/*
+        not path /redoc
+        not path /openapi.json
+        not path /ui
+        not path /ui/*
+        not method OPTIONS
+    }
+
+    forward_auth @docling_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Health check endpoint
+    handle /healthz {
+        reverse_proxy docling:5001
+    }
+
+    reverse_proxy docling:5001
+}
+
+# 14. Stirling-PDF (PDF Processing Suite) [EXPERIMENTAL]
+pdf.{$MAIN_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @stirling_protected {
+        not path /healthz
+        not path /api/v1/info/status
+        not method OPTIONS
+    }
+
+    forward_auth @stirling_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # Health check endpoint
+    handle /healthz {
+        reverse_proxy stirling-pdf:8080
+    }
+
+    reverse_proxy stirling-pdf:8080
+}
+
+# ==============================================================================
+# 17. PAPERCLIP — AI Company Orchestration (Profile: paperclip) [EXPERIMENTAL]
+# ==============================================================================
+{$PAPERCLIP_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @paperclip_protected {
+        not path /api/health
+        not method OPTIONS
+    }
+
+    forward_auth @paperclip_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /api/health {
+        reverse_proxy paperclip:3100
+    }
+
+    reverse_proxy paperclip:3100
+}
+
+# ==============================================================================
+# 18-19. (M020 S07) MOLTIS + HERMES global site blocks removed —
+# both agent types are now per-user via agent-manager. Per-user
+# subdomains are dynamically registered as
+# {type}-{user_slug}.agents.{$MAIN_DOMAIN} via the Caddy admin API.
+
+# ==============================================================================
+# 20. MATRIX — Synapse homeserver (Profile: matrix) [EXPERIMENTAL]
+# ==============================================================================
+# Handles Matrix federation API and Authentik OIDC callback.
+# No Authentik forward-auth — Synapse handles auth internally via OIDC.
+# .well-known delegation allows Matrix IDs to use the root domain (@user:MAIN_DOMAIN).
+{$MATRIX_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # F-064 (accepted risk): Matrix .well-known requires wildcard CORS per Matrix spec.
+    # Clients from any origin must be able to discover the homeserver URL.
+    # Matrix .well-known delegation (root domain → matrix subdomain)
+    handle /.well-known/matrix/client {
+        header Content-Type application/json
+        header Access-Control-Allow-Origin *
+        respond `{"m.homeserver":{"base_url":"https://{$MATRIX_DOMAIN}"},"m.identity_server":{"base_url":"https://vector.im"}}` 200
+    }
+    handle /.well-known/matrix/server {
+        header Content-Type application/json
+        respond `{"m.server":"{$MATRIX_DOMAIN}:443"}` 200
+    }
+
+    # F-042: Block Synapse admin APIs from external access — these are powerful
+    # server management endpoints that should only be accessed locally.
+    handle /_synapse/admin/* {
+        respond "Forbidden" 403
+    }
+
+    reverse_proxy synapse:8008
+}
+
+# ==============================================================================
+# 21. ELEMENT WEB — Matrix Browser Client (Profile: matrix) [EXPERIMENTAL]
+# ==============================================================================
+{$ELEMENT_WEB_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @element_protected {
+        not path /health
+        not method OPTIONS
+    }
+
+    forward_auth @element_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    reverse_proxy element-web:80
+}
+
+# ==============================================================================
+# 22. ROOT DOMAIN — Matrix .well-known delegation (Profile: matrix) [EXPERIMENTAL]
+# ==============================================================================
+# Serves /.well-known/matrix/* from the root domain so that Matrix clients can
+# discover the homeserver via default_server_name (e.g. @user:razzfazz-dev.ai).
+# Without this, Element Web cannot auto-discover the homeserver URL.
+{$MAIN_DOMAIN} {
+    import tls_config
+
+    # F-064 (accepted risk): Matrix .well-known requires wildcard CORS per Matrix spec.
+    handle /.well-known/matrix/client {
+        header Content-Type application/json
+        header Access-Control-Allow-Origin *
+        respond `{"m.homeserver":{"base_url":"https://{$MATRIX_DOMAIN}"},"m.identity_server":{"base_url":"https://vector.im"}}` 200
+    }
+    handle /.well-known/matrix/server {
+        header Content-Type application/json
+        respond `{"m.server":"{$MATRIX_DOMAIN}:443"}` 200
+    }
+
+    # Caddy internal CA certificate — download and install in your browser/OS
+    # to trust all self-signed *.razzfazz-dev.ai subdomains without per-domain warnings.
+    handle /caddy-ca.crt {
+        root * /data/caddy/pki/authorities/local
+        rewrite * /root.crt
+        file_server
+        header Content-Type application/x-x509-ca-cert
+        header Content-Disposition `attachment; filename="razzfazz-ca.crt"`
+    }
+
+    # Everything else on the root domain: redirect to the start portal
+    # (#22 — was the now-removed setup.<domain>).
+    handle {
+        redir https://{$START_DOMAIN}{uri} 302
+    }
+}
+
+# ==============================================================================
+# 21. PAPERLESS-NGX — Document Management (Profile: paperless-ngx) [EXPERIMENTAL]
+# ==============================================================================
+{$PAPERLESS_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @paperless_protected {
+        not path /accounts/login/
+        not path /accounts/logout/
+        not path /outpost.goauthentik.io/*
+        not method OPTIONS
+    }
+
+    forward_auth @paperless_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /outpost.goauthentik.io/* {
+        reverse_proxy authentik-server:9000
+    }
+
+    reverse_proxy paperless-ngx:8000
+}
+
+# ==============================================================================
+# 22. VAULTWARDEN — Password Manager (Profile: vaultwarden) [EXPERIMENTAL]
+# ==============================================================================
+# Vaultwarden handles auth natively via Authentik OIDC — no forward-auth needed.
+# WebSocket support enabled for real-time notifications (push).
+# ==============================================================================
+# Vaultwarden manages its OWN clickjacking protection via CSP frame-ancestors
+# (which correctly allow-lists the browser-extension origins). Injecting
+# X-Frame-Options on top breaks the desktop client's SSO/2FA connector (endless
+# spinner + "2FA token not provided"; web/mobile unaffected). So this is
+# (security_headers) WITHOUT X-Frame-Options, imported ONLY by the Vaultwarden
+# site. Ref: dani-garcia/vaultwarden#2111.
+(security_headers_vaultwarden) {
+    header {
+        X-XSS-Protection "1; mode=block"
+        X-Content-Type-Options "nosniff"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+}
+
+{$VAULTWARDEN_DOMAIN} {
+    import tls_config
+    import security_headers_vaultwarden
+
+    # F-045: Gate /admin with Authentik forward-auth as defense-in-depth.
+    # Vaultwarden admin panel is also protected by ADMIN_TOKEN, but adding
+    # SSO ensures only authenticated administrators can reach it.
+    handle /admin* {
+        forward_auth authentik-server:9000 {
+            import authentik_upstream_config
+        }
+        reverse_proxy vaultwarden:80
+    }
+
+    # WebSocket notifications endpoint
+    handle /notifications/hub {
+        reverse_proxy vaultwarden:3012
+    }
+
+    reverse_proxy vaultwarden:80
+}
+
+# ==============================================================================
+# 23. INFISICAL — Secrets Management (Profile: infisical) [EXPERIMENTAL]
+# ==============================================================================
+{$INFISICAL_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @infisical_protected {
+        not path /api/status
+        not method OPTIONS
+    }
+
+    forward_auth @infisical_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /api/status {
+        reverse_proxy infisical:8080
+    }
+
+    reverse_proxy infisical:8080
+}
+
+# ==============================================================================
+# 24. ONYX — AI Enterprise Search (Profile: onyx) [EXPERIMENTAL]
+# ==============================================================================
+# Proxies to the onyx-web Next.js frontend which internally calls onyx-api.
+# Authentik forward-auth gates the whole domain.
+# ==============================================================================
+{$ONYX_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # F-034: API path exemptions — Onyx API has its own auth (session/API key).
+    # /api/*     — Onyx backend API (proxied to onyx-api:8080, has session/key auth)
+    # /outpost.goauthentik.io/* — Authentik outpost callback
+    # /_next/*, /favicon.ico, /images/* — static assets
+    @onyx_protected {
+        not path /outpost.goauthentik.io/*
+        not path /_next/static/*
+        not path /_next/image*
+        not path /favicon.ico
+        not path /images/*
+        not path /api/*
+        not method OPTIONS
+    }
+
+    forward_auth @onyx_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /outpost.goauthentik.io/* {
+        reverse_proxy authentik-server:9000
+    }
+
+    # /api/* → onyx-api:8080 (strip /api prefix)
+    # Next.js proxy route is disabled in production; Caddy must handle this directly
+    handle /api/* {
+        uri strip_prefix /api
+        reverse_proxy onyx-api:8080
+    }
+
+    # Everything else → Next.js frontend
+    reverse_proxy onyx-web:3000
+}
+
+# ==============================================================================
+# 25. OPENHANDS — AI Software Development Agent (Profile: openhands) [EXPERIMENTAL]
+# ==============================================================================
+# OpenHands spawns per-task agent-server containers via Docker socket.
+# Authentik forward-auth gates the entire domain.
+# /api/options is exempted for health checks only.
+# ==============================================================================
+{$OPENHANDS_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @openhands_protected {
+        not path /api/options
+        not method OPTIONS
+    }
+
+    forward_auth @openhands_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    # rc6.7 #89: sandbox-path-proxy for OpenHands runtimes
+    # (ga-readiness #1, option A). OpenHands spawns oh-agent-server-*
+    # containers on Docker's default `bridge` and publishes random host
+    # ports. Browser tries to open WSS to those random ports; Caddy
+    # only fronts :443 → "Starting" hangs forever. Workaround: tell
+    # OpenHands to advertise `https://<this-domain>/sandbox/{port}/`
+    # via OH_SANDBOX_CONTAINER_URL_PATTERN, then route /sandbox/<port>/*
+    # here back to host.docker.internal:<port>/* so the browser stays
+    # on :443. The host-gateway alias on caddy (compose.yml) +
+    # `bridge` network attachment together make host.docker.internal
+    # routable to docker0 NAT, which DNATs into the sandbox.
+    #
+    # Caddy's reverse_proxy supports placeholder substitution in the
+    # upstream `to` clause when the value is set via `vars` in the
+    # subroute. The path_regexp matcher captures port + remainder.
+    @sandbox path_regexp sb ^/sandbox/(\d+)(/.*)?$
+    handle @sandbox {
+        rewrite * {http.regexp.sb.2}
+        reverse_proxy host.docker.internal:{http.regexp.sb.1} {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    reverse_proxy openhands:3000
+}
+
+# 26. (M020 S07) CODING TOOLS global site block removed — coding-tools is
+# now per-user via agent-manager. Per-user gsd --web is at
+# coding-tools-{user_slug}.{$AGENTS_DOMAIN} (registered dynamically via
+# Caddy admin API). opencode serve is internal-only on the same
+# per-user container at port 4096 — accessed by chat/functions/opencode_pipe.py
+# via Docker DNS, not exposed via Caddy.
+
+# 27. AGENT MANAGER — Per-User Agent Instances (Profile: agents) [EXPERIMENTAL]
+# ==============================================================================
+# User dashboard for launching, stopping, and managing personal agent containers.
+# REST API for instance lifecycle + Caddy admin API for dynamic per-instance routing.
+# ==============================================================================
+{$AGENTS_DOMAIN} {
+    import tls_config
+    import security_headers
+    import branding_static
+
+    handle /healthz {
+        reverse_proxy agent-manager:5000
+    }
+
+    @agents_protected {
+        not path /outpost.goauthentik.io/*
+        not path /branding/*
+        not path /healthz
+        not method OPTIONS
+    }
+    forward_auth @agents_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /outpost.goauthentik.io/* {
+        reverse_proxy authentik-server:9000
+    }
+
+    reverse_proxy agent-manager:5000
+}
+
+# 27b. Agent Instance Subdomains (wildcard, on-demand TLS)
+# Dynamic per-instance routes are prepended via Caddy admin API; this
+# wildcard MUST be the last route so specific-host routes win.
+#
+# TLS strategy:
+#   * In production (TLS_MODE empty → Let's Encrypt) we use ON-DEMAND TLS.
+#     Wildcard certs need DNS-01, which we don't ship a plugin for. Instead,
+#     each per-user subdomain (e.g. hermes-a3f8c2.agents.<domain>) gets its
+#     own per-name LE cert at first visit via HTTP-01. agent-manager exposes
+#     /api/tls/ask which Caddy queries before issuing — only registered
+#     instance hostnames are allowed, blocking cert-flood DoS.
+#   * In dev (TLS_MODE=internal → tls_config = "tls internal") the import
+#     overrides on_demand and Caddy issues from its internal CA, no LE
+#     dependency.
+*.{$AGENTS_DOMAIN} {
+    tls {
+        on_demand
+    }
+    import tls_config
+    import security_headers
+
+    # SECURITY (C1 layer-1, PR #84 adversarial review): the per-instance agent
+    # subdomains serve a live shell (coding-agent web terminal) and per-user
+    # UIs — they MUST be Authentik-gated exactly like the base {$AGENTS_DOMAIN}
+    # site. Without this forward_auth an unauthenticated request that falls
+    # through to this wildcard (e.g. a not-yet-registered / just-lost dynamic
+    # route) reached agent-manager — and, for the admin-API dynamic routes,
+    # the agent container — with NO auth. The dynamically-registered
+    # specific-host routes now ALSO inject their own forward_auth handler
+    # (caddy_client.register_route), and the container enforces owner identity
+    # itself (defence-in-depth).
+    @agents_wild_protected {
+        not path /outpost.goauthentik.io/*
+        not path /branding/*
+        not path /healthz
+        not method OPTIONS
+    }
+    forward_auth @agents_wild_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /outpost.goauthentik.io/* {
+        reverse_proxy authentik-server:9000
+    }
+
+    # C1 bypass fix — "came through Caddy" is anchored by a SOURCE-IP check at
+    # agent-manager (proxy.py), not an injected header (see the removed
+    # (manager_proxy_proof) snippet note above). agent-manager 403s any request
+    # whose peer IP isn't Caddy's.
+    reverse_proxy agent-manager:5000
+}
+
+# 27c. Personal MCP Manager UI (Profile: mcp) [EXPERIMENTAL] (#36)
+# Per-user MCP-proxy provisioning + encrypted credential vault. SSO-gated via
+# Authentik forward-auth, mirroring the Start Portal / Config Portal pattern.
+# Internal service-to-service endpoints (/internal/*) are reached directly at
+# mcp-manager:5000 on the docker network (agent-manager pull-at-launch) and are
+# NEVER exposed here — this site forward-auths every external path except the
+# healthcheck and the Authentik outpost callback.
+{$MCP_DOMAIN} {
+    import tls_config
+    import security_headers
+    import branding_static
+
+    handle /healthz {
+        reverse_proxy mcp-manager:5000
+    }
+
+    @mcp_protected {
+        not path /outpost.goauthentik.io/*
+        not path /branding/*
+        not path /healthz
+        not method OPTIONS
+    }
+    forward_auth @mcp_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /outpost.goauthentik.io/* {
+        reverse_proxy authentik-server:9000
+    }
+
+    reverse_proxy mcp-manager:5000
+}
+
+# 27d. Personal MCP per-user proxy subdomains (wildcard) (#36)
+# Each provisioned per-user MCP proxy gets an opaque-token subdomain
+# ({mcp_id}-{token}.{$MCP_DOMAIN}) registered as a SPECIFIC-HOST route via the
+# Caddy admin API by mcp-manager's caddy_client at provision time (those routes
+# reverse-proxy straight to the per-user proxy container, which authenticates
+# the agent->proxy call with its own bearer token; they are removed at stop and
+# reconciled on boot). Those admin-API routes are host-specific and `terminal`,
+# so they always win over this static catch-all.
+#
+# SECURITY (commit-review CRITICAL #1): this static wildcard MUST NOT expose the
+# MCP MANAGER (mcp-manager:5000 — credential vault + UI + internal endpoints).
+# The manager is reachable ONLY via the SSO-gated exact-host {$MCP_DOMAIN} block
+# above. Any *.{$MCP_DOMAIN} host that does NOT match a registered per-proxy
+# admin-API route is unknown and is refused here (404) — it must never fall
+# through to the manager unauthenticated. TLS for the per-proxy subdomains is
+# automated by the per-route internal-CA tls policy the admin API installs
+# (mirrors agent-manager's caddy_client), so no blanket on_demand is needed.
+*.{$MCP_DOMAIN} {
+    import tls_config
+    respond "Not found" 404
+}
+
+# 28. Observability — OpenLIT (Profile: observability) [EXPERIMENTAL]
+{$OBSERVABILITY_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    @observability_protected {
+        not path /healthz
+        not path /health
+        not method OPTIONS
+    }
+
+    forward_auth @observability_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /healthz {
+        reverse_proxy openlit:3000
+    }
+
+    reverse_proxy openlit:3000
+}
+
+# 29. Crawl4AI — RAG-friendly web crawler (Profile: crawl4ai) [EXPERIMENTAL]
+{$CRAWL4AI_DOMAIN} {
+    import tls_config
+    import security_headers
+
+    # Auth exemptions:
+    #   /monitor/health — used by Docker healthcheck (must be public)
+    #   /docs, /openapi.json — OpenAPI spec; harmless without auth, useful for clients
+    #   API endpoints (/crawl, /scrape, /llm) — operator-protected via API key when
+    #     called server-to-server (Dify / OpenWebUI). For now we keep them behind
+    #     forward_auth; if cross-container API access is needed, switch to a
+    #     dedicated path matcher with an API-key auth layer.
+    @crawl4ai_protected {
+        not path /monitor/health
+        not path /docs
+        not path /docs/*
+        not path /openapi.json
+        not method OPTIONS
+    }
+
+    forward_auth @crawl4ai_protected authentik-server:9000 {
+        import authentik_upstream_config
+    }
+
+    handle /monitor/health {
+        reverse_proxy crawl4ai:11235
+    }
+
+    reverse_proxy crawl4ai:11235
+}
+
+# ==============================================================================
+# INTERNAL ADAPTERS & FORWARD PROXY (Internal Use Only)
+# ==============================================================================
+
+# F-037: Internal adapters are unauthenticated by design — they are only reachable
+# from within the Docker network (other containers address them as caddy:8989, etc.).
+# They cannot be bound to 127.0.0.1 because that would prevent inter-container access
+# via Docker DNS. These ports are NOT published to the host (no `ports:` mapping in
+# core/compose.yml for Caddy's internal ports), so they are not reachable from outside
+# the Docker network. Trust model: any container on the default Docker bridge network
+# can reach these endpoints. This is acceptable because all containers are operator-
+# controlled and the adapters serve as protocol translators, not data stores.
+
+# 1. GPUStack API Adapter (:8989)
+# Translates OpenAI /v1/* requests to GPUStack /v1-openai/* format.
+# Used by Dify and other services that expect standard OpenAI API paths.
+:8989 {
+    log {
+        output stdout
+        format json
+    }
+    handle_path /v1/* {
+        rewrite * /v1-openai{uri}
+        reverse_proxy gpustack:9090 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote}
+        }
+    }
+    handle /health {
+        respond "GPUStack Adapter Active" 200
+    }
+}
+
+# 2. Dify Marketplace Proxy (:8196)
+# Proxies requests to the external Dify plugin marketplace.
+# Required because Dify containers cannot reach the internet directly.
+:8196 {
+    reverse_proxy https://marketplace.dify.ai {
+        header_up Host "marketplace.dify.ai"
+        header_up User-Agent "Mozilla/5.0"
+    }
+}
+
+# 3. Dify SSRF Protection & Forward Proxy (:8195)
+# Dify's HTTP Request workflow node routes outbound calls through this proxy via
+# SSRF_PROXY_HTTP_URL / SSRF_PROXY_HTTPS_URL. The ACL denies RFC1918 + loopback +
+# link-local so user-authored workflows cannot reach internal services (postgres,
+# valkey, authentik, etc.), and allows all public destinations so legitimate
+# external REST APIs work. Sandbox isolation is handled separately by the
+# internal-only ssrf_proxy_network — the sandbox has no route to the internet
+# regardless of this ACL.
+:8195 {
+    log
+    route {
+        header User-Agent "Mozilla/5.0"
+
+        forward_proxy {
+            hide_ip
+            hide_via
+            acl {
+                # ga.6: scoped SSRF exception. A Dify workflow that orchestrates
+                # internal document tools (PDF→JSON: docling / tika / presidio)
+                # needs the forward proxy to permit those specific hosts, which the
+                # RFC1918 deny below would otherwise block. Evaluated FIRST
+                # (first-match-wins) → ONLY the named hosts in
+                # $DIFY_DOC_TOOLS_SSRF_ALLOW are allowed; every other private
+                # address stays denied. The closed default is the non-resolving
+                # sentinel "disabled.invalid" (set in .env / .env.example) — NOT an
+                # empty string: Caddy's {$VAR:default} only applies the default when
+                # the var is UNSET, so a set-but-empty value expands to a bare
+                # `allow` and crashes Caddy on startup. Enable via .env:
+                # DIFY_DOC_TOOLS_SSRF_ALLOW="docling tika presidio-analyzer
+                # presidio-anonymizer" (security-relevant — record in the assessment).
+                allow {$DIFY_DOC_TOOLS_SSRF_ALLOW:disabled.invalid}
+                deny 10.0.0.0/8
+                deny 172.16.0.0/12
+                deny 192.168.0.0/16
+                deny 127.0.0.0/8
+                deny 169.254.0.0/16
+                allow all
+            }
+        }
+    }
+}

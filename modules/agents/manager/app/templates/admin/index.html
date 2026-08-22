@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Manager Admin</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+<div class="container">
+    <header>
+        <a href="{{ url_for('dashboard.index') }}">&larr; User Dashboard</a>
+        <h1>Agent Manager Admin</h1>
+    </header>
+
+    <section class="admin-stats">
+        <h2>System Overview</h2>
+        <p>Total instances: {{ total }} / {{ max_instances }}</p>
+        <p>Agent types: {{ agent_types|length }}</p>
+        <p>Quota tiers: {{ tiers|length }}</p>
+        <a href="{{ url_for('admin.audit_log') }}">View Audit Log</a>
+    </section>
+
+    <section>
+        <h2>All Instances</h2>
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Agent</th>
+                    <th>State</th>
+                    <th>Container</th>
+                    <th>Created</th>
+                    <th>Last Accessed</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for inst in instances %}
+                <tr>
+                    <td>{{ inst.user_slug }}</td>
+                    <td>{{ inst.type_display_name }}</td>
+                    <td><span class="badge {{ inst.state }}">{{ inst.state }}</span></td>
+                    <td><code>{{ inst.container_name }}</code></td>
+                    <td>{{ inst.created_at.strftime('%Y-%m-%d %H:%M') if inst.created_at else '-' }}</td>
+                    <td>{{ inst.last_accessed.strftime('%Y-%m-%d %H:%M') if inst.last_accessed else '-' }}</td>
+                    <td>
+                        {% if inst.state == 'running' %}
+                        <button class="btn btn-sm" onclick="adminAction('force-stop', '{{ inst.id }}')">Stop</button>
+                        {% endif %}
+                        <button class="btn btn-sm btn-danger" onclick="if(confirm('Force delete?')) adminAction('force-delete', '{{ inst.id }}')">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>Quota Tiers</h2>
+        <table class="admin-table">
+            <thead>
+                <tr><th>Tier</th><th>Max/Type</th><th>Max Heavy</th><th>Allowed Types</th><th>Priority</th></tr>
+            </thead>
+            <tbody>
+                {% for t in tiers %}
+                <tr>
+                    <td>{{ t.display_name }} <code>({{ t.id }})</code></td>
+                    <td>{{ t.max_per_type }}</td>
+                    <td>{{ t.max_heavy }}</td>
+                    <td>{{ t.allowed_types|join(', ') if t.allowed_types else 'all' }}</td>
+                    <td>{{ t.priority }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+</div>
+
+<script>
+function adminAction(action, instanceId) {
+    fetch('/admin/api/' + action + '/' + instanceId, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => { if (data.error) alert(data.error); else location.reload(); });
+}
+</script>
+</body>
+</html>
