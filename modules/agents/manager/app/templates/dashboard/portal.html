@@ -1,0 +1,1915 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Portal - razzfazz.ai</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v={{ stack_version|default('0') }}">
+    {# Vendored, never a CDN — the appliance ships air-gapped and customer boxes
+       sit behind corporate proxies. A CDN <script> here is a silently blank
+       terminal on exactly the boxes we ship. #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm.min.css') }}?v={{ stack_version|default('0') }}">
+    <style>
+        /* The shell is deliberately its own layout, not `.container`: the portal
+           fills the viewport and only the pane scrolls. A page-scrolling shell
+           makes a terminal pane unusable (the page scrolls instead of the PTY). */
+        /* #600: the portal speaks the LLM-Manager console language.
+           #959 Task 1.4: these are now thin ALIASES onto the shared #296
+           tokens promoted into static/styles.css (Task 1.1) — one source of
+           truth for the brand palette instead of a second hardcoded copy.
+           --p-rail/--p-rail-ink/--p-rail-muted/--p-term have no shared-token
+           equivalent (rail-specific dark chrome the other 3 apps don't need
+           on their own pages) and stay their own hex values. */
+        body.portal {
+            --p-bg: var(--bg); --p-card: var(--bg-card); --p-soft: var(--bg-soft);
+            --p-line: var(--border); --p-line-soft: var(--border-soft);
+            --p-rail: #201D22; --p-rail-ink: #ECEAE8; --p-rail-muted: #9A9298;
+            --p-red: var(--razz-red); --p-red-soft: rgba(205,23,25,.10);
+            --p-term: #161418;
+        }
+        /* #959 Task 1.4 — spark brand mark (same SVG path + wordmark as the
+           LLM Manager Shell.tsx and the approved prototype). */
+        .brand { display: flex; align-items: center; gap: 9px; }
+        .brand-spark { fill: var(--p-red); flex-shrink: 0; }
+        .brand-name { font-weight: 700; color: #fff; letter-spacing: -.01em; }
+        .brand-sub { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+            color: var(--p-rail-muted); font-weight: 700; }
+        /* #959 Task 1.6 — rail nav (Workspace/Agents/MCP/Settings). */
+        .rnav { display: flex; flex-direction: column; gap: 3px; padding: 4px 6px 10px; }
+        .rnav a { display: flex; align-items: center; gap: 10px; color: var(--p-rail-muted);
+            text-decoration: none; padding: 8px 11px; border-radius: 8px; font-weight: 500;
+            cursor: pointer; }
+        .rnav a .ico { width: 16px; text-align: center; opacity: .9; }
+        .rnav a:hover { background: rgba(255,255,255,.06); color: var(--p-rail-ink); }
+        .rnav a.on { background: rgba(205,23,25,.18); color: #fff; font-weight: 600;
+            box-shadow: inset 2px 0 0 var(--p-red); }
+        body.portal { margin: 0; height: 100vh; overflow: hidden;
+            background: var(--p-bg); }
+        .portal-shell { display: flex; height: 100vh; }
+
+        /* #959 restructure — narrow icon-rail: the APP nav (Workspace/Agents/
+           MCP/Settings), same visual language as base_shell.html's .rail
+           (spark + icon nav + avatar foot). Never carries the agent tree —
+           see .agents-col below for that, a SEPARATE pane to its right. */
+        .icon-rail {
+            width: 60px; flex: 0 0 60px; display: flex; flex-direction: column;
+            align-items: center; padding: 12px 0; gap: 4px;
+            background: var(--p-rail); color: var(--p-rail-ink); overflow: hidden;
+            transition: width .18s ease, flex-basis .18s ease;
+        }
+        .icon-rail .brand { justify-content: center; margin-bottom: 4px; }
+        .icon-rail .brand-name { display: none; }
+        .icon-rail .rnav { padding: 0; gap: 4px; width: 100%; align-items: center; }
+        .icon-rail .rnav a { justify-content: center; padding: 10px; border-radius: 10px; }
+        .icon-rail .rnav a span:not(.ico) { display: none; }
+        .icon-rail .rnav a .ico { width: auto; font-size: 1.05rem; }
+        .icon-rail-foot { margin-top: auto; display: flex; flex-direction: column;
+            align-items: center; gap: 8px; min-width: 0; }
+        .icon-rail-foot .avatar { width: 30px; height: 30px; border-radius: 50%;
+            background: var(--p-red); color: #fff; display: grid; place-items: center;
+            font-weight: 700; font-size: .8rem; flex-shrink: 0; }
+        .icon-rail-foot .who { display: none; font-size: .8rem; color: var(--p-rail-muted);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* #1186 (finding 1) — the collapse toggle folds THIS rail, the app
+           nav, between its icon-only strip (default, the approved #959
+           prototype) and a labelled column in the LLM-Manager console idiom
+           (spark + wordmark, icon + label per item, avatar + name). This is
+           what #959 Task 1.5 always described; the workspace split had left
+           the toggle on the agents column instead, whose folded state was a
+           58px strip of status dots — useless, per the operator. The agents
+           column no longer folds at all. Icon: ☰ while icon-only (click to
+           expand), « while labelled (click to fold). */
+        .rail-fold { border: 0; background: transparent; color: var(--p-rail-muted);
+            cursor: pointer; font-size: 1.05rem; padding: 6px 10px; border-radius: 8px;
+            line-height: 1; margin-bottom: 2px; }
+        .rail-fold:hover { background: rgba(255,255,255,.08); color: var(--p-rail-ink); }
+        .icon-rail.wide { width: 200px; flex: 0 0 200px; align-items: stretch;
+            padding: 12px 8px; }
+        .icon-rail.wide .brand { justify-content: flex-start; padding: 2px 10px 4px; }
+        .icon-rail.wide .brand-name { display: inline; }
+        .icon-rail.wide .rail-fold { align-self: flex-end; }
+        .icon-rail.wide .rnav { align-items: stretch; }
+        .icon-rail.wide .rnav a { justify-content: flex-start; padding: 8px 11px;
+            border-radius: 8px; }
+        .icon-rail.wide .rnav a span:not(.ico) { display: inline; }
+        .icon-rail.wide .rnav a .ico { width: 18px; font-size: 1rem; }
+        .icon-rail.wide .icon-rail-foot { flex-direction: row; justify-content: flex-start;
+            gap: 10px; padding: 0 6px; }
+        .icon-rail.wide .icon-rail-foot .who { display: inline; }
+
+        /* #959 restructure — agents column: "Your agents" (tree + capacity/
+           quota/Activity) as its own DISTINCT pane, not sharing the app-nav
+           strip above. AGU-2: this pane used to ALSO carry `.rail`,
+           which is static/styles.css's 60px base_shell icon rail — same
+           specificity, so that rule's `align-items: center; padding: 12px 0;
+           gap: 4px` leaked in and centred/shrank this column. `.agents-col`
+           is now the only class; the JS/guard hook is `id="rail"`, which is
+           unchanged.
+           #1186 (finding 3): ONE fixed width, no folded state (see .rail-fold
+           above), 248px instead of 230 so the head row (section label +
+           "New Agent") and the By-type / My-folders segmented control sit
+           comfortably instead of squeezed. */
+        .agents-col {
+            width: 248px; flex: 0 0 248px; display: flex; flex-direction: column;
+            background: var(--p-rail); color: var(--p-rail-ink); overflow: hidden;
+            border-left: 1px solid rgba(255,255,255,.08);
+        }
+        /* #1186 (finding 3): the head row carries the section label AND the
+           launch control side by side. Before, the row held a lone burger
+           over a flush-left, unpadded "AGENTS" over a sub-row with the
+           button — three cramped rows for two things. No `.rail-head .btn`
+           override any more: it would have neutralised the red primary. */
+        .rail-head {
+            display: flex; align-items: center; gap: 10px; min-height: 50px;
+            padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.10);
+        }
+        .rail-head strong { color: #fff; }
+        .rail-head .spacer { flex: 1; }
+        .rail-head .rail-new { white-space: nowrap; flex-shrink: 0; }
+        .rail-body { overflow-y: auto; flex: 1; padding: 8px; }
+        .rail-foot {
+            padding: 10px 14px; border-top: 1px solid rgba(255,255,255,.10);
+            font-size: 0.8rem; color: var(--p-rail-muted);
+            display: flex; align-items: center; gap: 8px;
+        }
+        .rail-foot a { color: var(--p-rail-muted); }
+        .rail-foot .spacer { flex: 1; }
+
+        .cap-meter { display: flex; flex-direction: column; gap: 2px; }
+        .cap-bar { height: 6px; background: rgba(255,255,255,.12);
+            border-radius: 3px; overflow: hidden; }
+        .cap-fill { height: 100%; background: var(--p-red); width: 0; }
+        .cap-meter.hot .cap-fill { background: #dc2626;
+            animation: cap-hot-pulse 1.4s ease-in-out infinite; }
+        .cap-meter.hot .cap-label { color: #f0a9a7; }
+        /* #601 review nit (operator-approved follow-up): normal fill (brand
+           red) vs hot (#dc2626) is indistinguishable at a glance — hot
+           pulses. Motion is the SIGNAL here, so honor reduced-motion by
+           falling back to the static semantic color. */
+        @keyframes cap-hot-pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+        @media (prefers-reduced-motion: reduce) {
+            .cap-meter.hot .cap-fill { animation: none; }
+        }
+        .cap-label { font-size: 11px; }
+        .tree-node .badge-attn { margin-left: 4px; font-size: 11px; }
+        .badge-oom { color: #dc2626; font-weight: 600; margin-left: 6px;
+            font-size: 11.5px; }
+        /* W3 mobile (#244 item 7 + operator swipe feature): rail becomes a
+           drawer, grid forces single pane, key bar docks above the keyboard */
+        #rail-toggle { display: none; }
+        @media (max-width: 768px) {
+            /* #959 restructure: the icon-rail and agents-col slide in
+               together as one combined drawer (icon-rail pinned at the
+               left edge, agents-col picking up right after it). */
+            .icon-rail { position: fixed; inset: 0 auto 0 0; z-index: 51;
+                transform: translateX(-100%); transition: transform .15s;
+                box-shadow: 4px 0 24px rgba(0,0,0,.35); }
+            .agents-col { position: fixed; inset: 0 30% 0 60px; z-index: 50;
+                background: var(--p-rail); transform: translateX(-100%);
+                transition: transform .15s; box-shadow: 4px 0 24px rgba(0,0,0,.35); }
+            body.rail-open .agents-col, body.rail-open .icon-rail { transform: none; }
+            /* #1186: the drawer pins the agents column at left:60px — a
+               labelled 200px nav would sit under it, so the wide state is
+               neutralised here and its toggle hidden; the drawer is the
+               mobile fold. */
+            .icon-rail.wide { width: 60px; flex-basis: 60px; padding: 12px 0;
+                align-items: center; }
+            .icon-rail.wide .brand-name, .icon-rail.wide .rnav a span:not(.ico),
+            .icon-rail.wide .icon-rail-foot .who { display: none; }
+            .rail-fold { display: none; }
+            #rail-toggle { display: inline-block; }
+            .grid.layout-2, .grid.layout-3, .grid.layout-4 { grid-template: 1fr / 1fr; }
+            .layout-switch { display: none; }
+            .keybar { display: flex !important; }
+        }
+        .keybar { display: none; gap: 6px; padding: 6px 8px; overflow-x: auto;
+            border-top: 1px solid var(--p-line);
+            background: var(--p-soft); }
+        .keybar button { min-width: 40px; padding: 6px 10px; border-radius: 7px;
+            border: 1px solid var(--p-line); background: var(--p-card);
+            font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .keybar button.armed { background: var(--p-red); border-color: var(--p-red);
+            color: #fff; }
+        .grid-head { display: flex; align-items: center; gap: 8px; padding: 8px 20px;
+            background: var(--p-card); border-bottom: 1px solid var(--p-line); }
+        /* #959 restructure: anchor the layout-switch to the right of the
+           toolbar row (⌘K / mobile ☰ stay left as "context") instead of
+           relying on an unstyled .spacer — reads as a normal toolbar, not a
+           centered floating header. */
+        .layout-switch { display: flex; margin-left: auto; }
+        .layout-switch button { border: 1px solid var(--p-line); background: var(--p-card);
+            padding: 3px 10px; cursor: pointer; border-radius: 7px; margin-left: 4px; }
+        .layout-switch button.active { background: var(--p-red-soft);
+            border-color: var(--p-red); color: var(--p-red); }
+        .grid { flex: 1; display: grid; gap: 14px; padding: 14px 20px 20px; min-height: 0; }
+        .grid.layout-1 { grid-template: 1fr / 1fr; }
+        .grid.layout-2 { grid-template: 1fr / 1fr 1fr; }
+        .grid.layout-3 { grid-template: 1fr / 1fr 1fr 1fr; }
+        .grid.layout-4 { grid-template: 1fr 1fr / 1fr 1fr; }
+        .slot { display: flex; flex-direction: column; min-width: 0; min-height: 0;
+            background: var(--p-card); border: 1px solid var(--p-line);
+            border-radius: 10px; overflow: hidden;
+            box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+        .slot.active { border-color: var(--p-red);
+            box-shadow: 0 0 0 1px var(--p-red-soft), 0 1px 3px rgba(0,0,0,.06); }
+        .slot.maxed { position: fixed; inset: 0; z-index: 40;
+            background: var(--p-card); border-radius: 0; }
+        .slot .pane-head { display: flex; align-items: center; gap: 8px;
+            padding: 6px 12px; border-bottom: 1px solid var(--p-line-soft);
+            background: var(--p-soft); }
+        .slot .pane-host { flex: 1; display: flex; flex-direction: column;
+            min-height: 0; position: relative; }
+        .slot .pane-terminal, .slot .pane-web { flex: 1; min-height: 0; }
+        .slot .pane-web { border: 0; width: 100%; height: 100%; }
+        /* #623: author `display` beats the UA [hidden] rule — without this
+           guard every pane class that sets display (pane-empty's flex) stays
+           visible over the active pane. Scoped to the slot so the guard can
+           never leak into third-party web-UI iframe content. */
+        .slot [hidden] { display: none !important; }
+        .slot .pane-empty { flex: 1; display: flex; align-items: center;
+            justify-content: center; color: var(--text-dim, #6b7280);
+            background: var(--p-soft); }
+        /* #959 Task C3: inline empty-slot launcher — replaces handing the
+           user off to the old modal/dashboard. Ported from the approved
+           prototype (#296 tokens: --p-red/--p-red-soft/--p-line/--p-card). */
+        .slot .launcher { flex: 1; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 14px;
+            padding: 20px; text-align: center; }
+        .slot .launcher .lh { font-weight: 700; font-size: .95rem; }
+        .slot .launcher .ls { font-size: .8rem; color: var(--text-dim, #6b7280);
+            max-width: 34ch; }
+        .slot .launcher .lnote { margin: 8px 0 0; font-size: .78rem; line-height: 1.45;
+            color: var(--muted, #6b6560); max-width: 46ch; }
+        .slot .launcher .chips { display: flex; flex-wrap: wrap; gap: 8px;
+            justify-content: center; }
+        /* AGU-8(b): now a real <button>, so it inherits neither the page font
+           nor the flex layout a <span> got — set both explicitly. */
+        .lchip { display: inline-flex; align-items: center; gap: 7px;
+            border: 1px solid var(--p-line); background: var(--p-card);
+            color: inherit; font: inherit;
+            border-radius: 999px; padding: 6px 13px; font-size: .82rem;
+            cursor: pointer; }
+        .lchip:hover:not(:disabled) { border-color: var(--p-red); color: var(--p-red); }
+        .lchip.on { background: var(--p-red-soft); border-color: var(--p-red);
+            color: var(--p-red); font-weight: 600; }
+        .lchip.disabled, .lchip:disabled { opacity: .45; cursor: not-allowed; }
+        .lchip.disabled:hover, .lchip:disabled:hover { border-color: var(--p-line); color: inherit; }
+        /* AGU-7: loading / failure notice inside the agents rail. Rail-dark
+           chrome, so it uses the rail tokens, not the light-ground ones. */
+        .tree-notice { padding: 10px 12px; font-size: 12px; line-height: 1.45;
+            color: var(--p-rail-muted); }
+        .tree-notice-link { color: var(--p-rail-ink); text-decoration: underline; }
+        /* AGU-17: transient status banner (a failed prefs save was silent). */
+        .portal-toast { position: fixed; left: 50%; bottom: 22px; z-index: 400;
+            transform: translateX(-50%); max-width: min(520px, 92vw);
+            background: var(--p-card); color: var(--text-secondary);
+            border: 1px solid var(--p-line); border-left: 3px solid var(--p-red);
+            border-radius: 8px; padding: 10px 14px; font-size: .85rem;
+            box-shadow: 0 6px 20px rgba(0,0,0,.14); }
+        /* #1186 (finding 3): By type / My folders as ONE segmented control
+           (shared border, divider between the halves) instead of two
+           separately-bordered 12px buttons squeezed against each other. */
+        .tree-mode { display: flex; margin: 2px 2px 10px;
+            border: 1px solid rgba(255,255,255,.14); border-radius: 8px; overflow: hidden; }
+        .tree-mode button { flex: 1; border: 0; background: none; padding: 6px 8px;
+            font-size: 12px; cursor: pointer; color: var(--p-rail-muted);
+            font-weight: 600; white-space: nowrap; }
+        .tree-mode button + button { border-left: 1px solid rgba(255,255,255,.14); }
+        .tree-mode button:hover { color: var(--p-rail-ink); }
+        .tree-mode button.active { background: rgba(255,255,255,.10); color: #fff; }
+        .tree-folder { display: flex; align-items: center; gap: 4px;
+            padding: 8px 8px 3px; font-weight: 700; font-size: 11px;
+            letter-spacing: .06em; text-transform: uppercase;
+            color: var(--p-rail-muted); }
+        .tree-folder.muted { opacity: .6; }
+        .folder-act { border: none; background: none; cursor: pointer; opacity: .6;
+            color: var(--p-rail-muted); }
+        .folder-act:hover { opacity: 1; }
+        .slot .pane-logs { flex: 1; margin: 0; padding: 12px; overflow: auto;
+            background: var(--p-term); color: #d4d4d4; font: 12px/1.5 'JetBrains Mono', monospace; }
+        .slot .pane-files { flex: 1; overflow: auto; padding: 10px 14px; }
+        .files-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        .file-row { display: block; padding: 4px 6px; border-radius: 4px;
+            text-decoration: none; color: inherit; }
+        .file-row:hover { background: var(--p-soft); }
+        .files-hint { color: var(--text-dim, #6b7280); font-size: 12px; margin-top: 10px; }
+        body.pane-maxed .agents-col, body.pane-maxed .icon-rail,
+        body.pane-maxed .grid-head { display: none; }
+
+        /* W5 (#620): command palette + activity overlay — LLM-Manager idiom
+           (white card on scrim, pills, brand red only on selection). */
+        .ovl { position: fixed; inset: 0; z-index: 200; display: none;
+            align-items: flex-start; justify-content: center;
+            background: rgba(32,29,34,.45); padding-top: 12vh; }
+        .ovl.open { display: flex; }
+        .ovl-card { width: min(560px, 92vw); background: var(--p-card);
+            border: 1px solid var(--p-line); border-radius: 10px;
+            box-shadow: 0 8px 40px rgba(0,0,0,.25); overflow: hidden;
+            max-height: 70vh; display: flex; flex-direction: column; }
+        #palette-input { border: none; outline: none; width: 100%;
+            padding: 14px 16px; font-size: 1rem;
+            border-bottom: 1px solid var(--p-line-soft); background: var(--p-card); }
+        #palette-list { list-style: none; margin: 0; padding: 6px; overflow: auto; }
+        #palette-list li { display: flex; align-items: center; gap: 10px;
+            padding: 8px 10px; border-radius: 7px; cursor: pointer; }
+        #palette-list li.sel { background: var(--p-red-soft); }
+        #palette-list li .p-label { flex: 1; }
+        #palette-list li .p-hint { font-size: .72rem; color: var(--text-dim, #6B7280); }
+        #palette-list li.sel .p-hint { color: var(--p-red); }
+        .ovl-head { display: flex; align-items: center; gap: 8px;
+            padding: 10px 16px; border-bottom: 1px solid var(--p-line-soft);
+            background: var(--p-soft); font-weight: 600; }
+        .ovl-head .spacer { flex: 1; }
+        #activity-list { margin: 0; padding: 4px 8px; overflow: auto; }
+        .act-row { display: flex; gap: 10px; padding: 7px 8px;
+            border-bottom: 1px solid var(--p-line-soft); font-size: .82rem; }
+        .act-row:last-child { border-bottom: none; }
+        .act-row .act-when { color: var(--text-dim, #6B7280); flex: 0 0 9.5em;
+            font-variant-numeric: tabular-nums; }
+        .act-row .act-what { font-weight: 600; flex: 0 0 6em; }
+        #palette-btn { margin-left: 8px; }
+        
+        .tree-node {
+            display: flex; align-items: center; gap: 8px;
+            padding: 7px 9px; border-radius: 8px; cursor: pointer;
+            font-size: 0.92rem; color: var(--p-rail-muted); font-weight: 500;
+        }
+        .tree-node:hover { background: rgba(255,255,255,.06); color: var(--p-rail-ink); }
+        /* mirrors .nav.active in the LLM-Manager rail: red-tinted ground plus
+           the inset red bar — the one place besides focus ring + cap fill
+           where brand red is allowed to appear */
+        .tree-node.selected {
+            background: rgba(205,23,25,.18); color: #fff; font-weight: 600;
+            box-shadow: inset 2px 0 0 var(--p-red);
+        }
+        .tree-node.absent { color: var(--p-rail-muted); opacity: .55; }
+        .tree-node .name {
+            flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .tree-node .gear {
+            opacity: 0; text-decoration: none; font-size: 0.95rem;
+            color: var(--p-rail-muted);
+        }
+        .tree-node.selected .gear { color: var(--p-rail-ink); }
+        .tree-node:hover .gear, .tree-node.selected .gear { opacity: 1; }
+        .tree-node img.agent-icon { width: 18px; height: 18px; }
+
+        /* The status circle. Colour is the ONLY signal here, so each state also
+           carries a title= so it is legible without colour vision. */
+        .circle {
+            width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px;
+            background: #9ca3af;               /* stopped  — grey */
+            box-shadow: 0 0 0 2px rgba(255,255,255,0.06);
+        }
+        .circle.absent   { background: transparent; border: 1px solid rgba(255,255,255,.35); }
+        .circle.starting { background: #f59e0b; animation: pulse 1.4s infinite; }
+        .circle.running  { background: #f59e0b; animation: pulse 1.4s infinite; }
+        .circle.ready    { background: #16a34a; animation: none; }
+        .circle.error    { background: #dc2626; }
+        @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
+        /* AGU-18: the capacity meter already honours reduced-motion; the status
+           pulse is the same kind of persistent small-amplitude motion and did
+           not. The colour still carries the state, so dropping the animation
+           loses no information. */
+        @media (prefers-reduced-motion: reduce) {
+            .circle.starting, .circle.running { animation: none; }
+        }
+
+        .pane-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .pane-head {
+            display: flex; align-items: center; gap: 10px;
+            padding: 9px 14px; border-bottom: 1px solid var(--p-line-soft);
+            background: var(--p-soft); min-height: 42px;
+        }
+        .pane-head .title { font-weight: 600; }
+        .pane-head .spacer { flex: 1; }
+        .kind-tabs { display: flex; gap: 2px; }
+        .kind-tabs button {
+            border: none; background: transparent; color: var(--text-dim, #6B7280);
+            border-radius: 999px; padding: 4px 11px; cursor: pointer;
+            font-size: 0.8rem; font-weight: 600;
+        }
+        .kind-tabs button.active {
+            background: var(--p-red-soft); color: var(--p-red);
+        }
+        .kind-tabs button[hidden] { display: none; }
+
+        /* AGU-14: the #pane-host / #pane-web / #pane-terminal / #pane-empty
+           id rules from the W1 SINGLE-pane layout were deleted — the current
+           markup has no such elements (panes are per-slot classes stamped from
+           #slot-template), so ~11 lines of never-matching CSS were still
+           sitting here looking authoritative. The .slot-scoped equivalents
+           above are the live ones. */
+        /* AGU-3: this message ("This agent is stopped/in an error state") is
+           appended into `.slot .pane-host`, which inherits the slot's WHITE
+           --p-card ground. The old near-white grey was a leftover from the
+           dark pane era and rendered at ~1.2:1 — invisible. --text-secondary is the
+           shared token and clears AA on the light slot. */
+        .pane-msg { color: var(--text-secondary); padding: 18px; font-family: monospace; }
+    </style>
+</head>
+<body class="portal">
+<div class="portal-shell">
+
+    {# #959 restructure: the app-nav icon-rail (Workspace/Agents/MCP/
+       Settings) — a SEPARATE pane from the agents column below. Same visual
+       language as base_shell.html's .rail (spark + icon nav + avatar foot);
+       see that file. The agent tree does NOT live here — Global Constraint
+       carried over from base_shell.html's own header comment. #}
+    <aside class="icon-rail" id="icon-rail">
+        {# #959 Task 1.4 — spark brand mark (same SVG path + wordmark as the
+           LLM Manager Shell.tsx and the approved prototype), instead of the
+           <img> logo. The wordmark is hidden while the rail is icon-only
+           (the default, matches the prototype) and shown when it is
+           expanded (#1186). #}
+        <div class="brand">
+            <svg class="brand-spark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+                <path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z" />
+            </svg>
+            <span class="brand-name">rzfz.ai</span>
+        </div>
+        {# #1186 (finding 1) / #959 Task 1.5 — the collapse toggle folds THIS
+           rail (icon-only ↔ labelled). It lived in the agents column and
+           folded that instead; see .rail-fold in the CSS above. #}
+        <button id="rail-collapse-btn" class="rail-fold" title="Expand the navigation"
+                aria-label="Expand or collapse the navigation" aria-expanded="false"
+                aria-controls="icon-rail" onclick="toggleRailCollapse()">☰</button>
+        {# #959 Task 1.6 — rail nav. Workspace is this page itself; Agents goes
+           to the combined Catalog+Instances dashboard; MCP is gated on the same
+           mcp_active signal the card dashboard uses; Settings is gated on
+           is_admin (context-processor global, app/__init__.py::inject_user).
+           AGU-21: Workspace self-links (url_for('dashboard.portal')) and carries
+           aria-current, exactly as base_shell.html does for the same item — an
+           <a> with no href is not focusable and exposes no link role, so the
+           current-page item was silently skipped in tab order while all its
+           siblings were not. #}
+        <nav class="rnav">
+            <a class="on" href="{{ url_for('dashboard.portal') }}" aria-current="page"
+               title="Workspace"><span class="ico">▚</span><span>Workspace</span></a>
+            <a href="{{ url_for('dashboard.index') }}" title="Agents"><span class="ico">◱</span><span>Agents</span></a>
+            {% if mcp_active %}
+            <a href="{{ mcp_url }}" target="_blank" rel="noopener" title="MCP"><span class="ico">🜲</span><span>MCP</span></a>
+            {% endif %}
+            {% if is_admin %}
+            <a href="{{ url_for('admin.index') }}" title="Settings"><span class="ico">⚙</span><span>Settings</span></a>
+            {% endif %}
+        </nav>
+        <div class="icon-rail-foot">
+            <div class="avatar">{{ (current_user or 'A')[0]|upper }}</div>
+            <span class="who">{{ current_user }}</span>
+        </div>
+    </aside>
+
+    {# #959 restructure: the agents column — "Your agents" (tree + capacity/
+       quota/Activity/All agents) as its own DISTINCT pane, to the right of
+       the icon-rail and to the left of .pane-wrap. AGU-2: `.agents-col` is
+       the ONLY class now — the former `.rail` collided with styles.css's
+       60px base_shell icon rail. `id="rail"` is untouched: it is what the
+       guard tests key off.
+       #1186 (findings 1+3): this column never folds any more (the toggle
+       moved into the icon-rail, which is what it folds), and the head row
+       carries the section label + the launch control side by side. #}
+    <aside class="agents-col" id="rail">
+        <div class="rail-head">
+            <span class="brand-sub">Agents</span>
+            <span class="spacer"></span>
+            {# "New Agent" — hands off to the card dashboard, which owns the tier
+               gate and the memory picker. One place to keep a safety gate correct. #}
+            <a class="btn btn-primary btn-xs rail-new" href="{{ url_for('dashboard.index') }}"
+               title="Launch a new agent">New Agent</a>
+        </div>
+        <div class="rail-body">
+            {# AGU-7: server-rendered first-paint placeholder — the rail is
+               otherwise blank until the first /api/tree answer lands, and stays
+               blank forever if that call fails. renderTree() replaces it. #}
+            <div id="agent-tree" aria-label="Your agents" aria-busy="true"><div class="tree-notice" role="status">Loading agents&hellip;</div></div>
+        </div>
+        <div class="rail-foot" style="flex-direction: column; align-items: stretch; gap: 4px;">
+            {# W3 (#244 item 2): the capacity meter — enforcement lives in the
+               launch gate; this is the half that lets you SEE the wall before
+               you hit it. #}
+            <div id="capacity" class="cap-meter" hidden>
+                <div class="cap-bar"><div class="cap-fill"></div></div>
+                <span class="cap-label"></span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span id="quota">—</span>
+                <span class="spacer"></span>
+                <a href="#" onclick="openActivity(); return false;">Activity</a>
+                <a href="{{ url_for('dashboard.index') }}">All agents</a>
+            </div>
+        </div>
+    </aside>
+
+    <main class="pane-wrap">
+        <div class="grid-head">
+            <button id="rail-toggle" class="btn btn-secondary btn-xs"
+                    onclick="document.body.classList.toggle('rail-open')">☰</button>
+            {# Rework-W2 (#244 P2) + #959 Task B1: 1 / 2-up / 3-up / 2x2. The
+               grid is an instance-viewport grid (epic item 11) — each slot
+               carries its own tabs. #}
+            {# W5: the palette doubles as the mobile quick-action entry #}
+            <button id="palette-btn" class="btn btn-secondary btn-xs"
+                    title="Command palette (Ctrl-K)" onclick="openPalette()">⌘K</button>
+            {# #959 restructure: layout-switch anchored right (margin-left:
+               auto, see CSS) — a normal toolbar row, not a centered floating
+               header. #}
+            <div class="layout-switch" role="group" aria-label="Pane layout">
+                <button data-layout="1" onclick="setLayout('1')" title="Single pane">□</button>
+                <button data-layout="2" onclick="setLayout('2')" title="Two panes">◫</button>
+                <button data-layout="3" onclick="setLayout('3')" title="Three panes">▥</button>
+                <button data-layout="4" onclick="setLayout('4')" title="2×2 grid">▦</button>
+            </div>
+        </div>
+        <div id="grid" class="grid layout-1"></div>
+        {# W3 mobile key bar (JuiceSSH-style, operator decision 2026-08-23):
+           soft keyboards have no Esc/Tab/Ctrl/arrows — the bar injects the
+           escape sequences into the ACTIVE slot's PTY. Ctrl/Alt are STICKY:
+           tap arms for the next key, tap again disarms. #}
+        <div class="keybar" id="keybar">
+            <button data-key="esc">Esc</button>
+            <button data-key="tab">Tab</button>
+            <button data-mod="ctrl">Ctrl</button>
+            <button data-mod="alt">Alt</button>
+            <button data-key="left">←</button>
+            <button data-key="down">↓</button>
+            <button data-key="up">↑</button>
+            <button data-key="right">→</button>
+            <button data-key="ctrlc">^C</button>
+            <button data-key="slash">/</button>
+            <button data-key="pipe">|</button>
+            <button data-key="dash">-</button>
+        </div>
+    </main>
+
+    {# One slot, stamped per grid cell by JS. Everything W1 built per-pane
+       (kind tabs, terminal, web iframe, logs, files) lives INSIDE the slot. #}
+    <template id="slot-template">
+        {# AGU-8(c): tabindex + a focusin handler (wired in the Slot ctor) make
+           the pane reachable and selectable by keyboard — clicking a tree row
+           opens into the ACTIVE slot, so without this a keyboard user cannot
+           choose which pane receives an agent. Alt+1..4 jumps between them. #}
+        <section class="slot" ondragover="event.preventDefault()" tabindex="0"
+                 title="Drop an agent from the tree here">
+            <div class="pane-head">
+                <span class="title">Drop an agent here</span>
+                <span class="spacer"></span>
+                <div class="kind-tabs">
+                    <button data-pane-kind="terminal" hidden>Terminal</button>
+                    <button data-pane-kind="web" hidden>Web UI</button>
+                    <button data-pane-kind="logs" hidden>Logs</button>
+                    <button data-pane-kind="files" hidden>Files</button>
+                </div>
+                <button class="btn btn-secondary btn-xs slot-max" title="Maximize this pane">⛶</button>
+                <a class="btn btn-secondary btn-xs slot-gear" href="#" hidden>Settings</a>
+            </div>
+            <div class="pane-host">
+                <div class="pane-empty"><div class="inner">
+                    {# #959 Task C3: inline launcher — an empty slot launches
+                       directly into itself instead of handing off to the old
+                       modal/dashboard. Chips are filled by Slot.renderLauncher()
+                       from the SAME /api/tree data (can_launch is already
+                       tier/heavy-quota gated there); "Launch into this pane"
+                       POSTs the SAME /api/launch/<agent_type> route the spawn
+                       modal uses (Slot.launchHere), then attaches the result
+                       via the SAME Slot.open(node) the drag-drop flow uses. #}
+                    <div class="launcher">
+                        <div class="lh">Launch an agent here</div>
+                        <div class="ls">Pick a type to start it directly in this pane —
+                            or drag one in from the tree.</div>
+                        {# AGU-20(b): the chips are native <button>s carrying
+                           aria-pressed, so this is a group, not a listbox. #}
+                        <div class="chips" role="group" aria-label="Agent type"></div>
+                        {# #1904: a disabled control says WHY, where the operator
+                           is looking. The reason used to live in a `title`, which
+                           a touch device never shows and a keyboard user never
+                           reaches — and the primary button below was an inert grey
+                           rectangle with no explanation at all. #}
+                        <div class="lnote" role="status" hidden></div>
+                        {# #1186: `.btn-xs` is a real (compact) size now — this is
+                           the empty pane's primary CTA, so it takes `.btn-sm`. #}
+                        <button type="button" class="btn btn-primary btn-sm launcher-launch"
+                                disabled>Launch into this pane</button>
+                    </div>
+                </div></div>
+                <div class="pane-terminal" hidden></div>
+                {# no sandbox attr — same-origin by construction, see W1 note #}
+                <iframe class="pane-web" hidden referrerpolicy="no-referrer"></iframe>
+                <pre class="pane-logs" hidden></pre>
+                <div class="pane-files" hidden>
+                    <div class="files-bar">
+                        <span class="files-path mono"></span>
+                        <span class="spacer"></span>
+                        {# AGU-19: the input used to be `hidden`, and
+                           `.slot [hidden] { display:none !important }` made that
+                           stick — a display:none input is not focusable and a
+                           <label> is not either, so the upload control could not
+                           be reached or activated by keyboard at all. A real
+                           <button> that clicks the input keeps the styling and
+                           restores both keyboard and screen-reader access. #}
+                        <button type="button" class="btn btn-secondary btn-xs files-upload-btn">Upload&hellip;</button>
+                        <input type="file" class="files-upload" hidden aria-hidden="true" tabindex="-1">
+                    </div>
+                    <div class="files-list"></div>
+                    <p class="files-hint">Files live in this agent's own data volume —
+                       uploads land here (max 200&nbsp;MiB). Nothing touches the host.</p>
+                </div>
+            </div>
+        </section>
+    </template>
+</div>
+
+<script src="{{ url_for('static', filename='vendor/xterm.min.js') }}?v={{ stack_version|default('0') }}"></script>
+<script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}?v={{ stack_version|default('0') }}"></script>
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Tree (#244-Q2)
+// ---------------------------------------------------------------------------
+// Readiness is NOT part of /api/tree — it is an HTTP call into each container
+// with a 2s timeout, so probing N of them server-side inside one poll would
+// make the rail the slowest thing on the page. We overlay it here instead:
+// only for RUNNING nodes, in parallel, and we stop re-probing a node once it
+// has answered ready (it stays ready until its state changes, which the next
+// tree refresh reports anyway).
+let TREE = null;
+let selectedId = null;
+const readyCache = new Map();   // instance_id -> true
+
+// AGU-7: both failure paths in loadTree() used to `return` silently, leaving
+// TREE null — renderTree() was then never called, so #agent-tree stayed an
+// empty <div> with no mode buttons, no message and no spinner, and every empty
+// slot's launcher rendered zero chips behind a permanently disabled button. The
+// 15s poll kept retrying invisibly. A 403 (session lapsed behind Authentik) is
+// the likeliest trigger and is exactly the case the user needs told about.
+function treeNotice(text, opts) {
+    const host = document.getElementById('agent-tree');
+    if (!host) return;
+    // Never blow away a tree we already have — a transient failure mid-session
+    // should not empty a working rail.
+    if (TREE && !(opts && opts.replace)) return;
+    host.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'tree-notice';
+    box.setAttribute('role', 'status');
+    box.textContent = text;
+    if (opts && opts.reload) {
+        const a = document.createElement('a');
+        a.href = location.href;
+        a.textContent = 'Reload';
+        a.className = 'tree-notice-link';
+        box.appendChild(document.createTextNode(' '));
+        box.appendChild(a);
+    }
+    host.appendChild(box);
+}
+
+async function loadTree() {
+    let data;
+    try {
+        const r = await fetch('/api/tree', { credentials: 'same-origin' });
+        if (!r.ok) {
+            const auth = r.status === 401 || r.status === 403;
+            treeNotice(auth
+                ? 'Your session expired — sign in again to see your agents.'
+                : 'Could not load your agents (HTTP ' + r.status + ') — retrying…',
+                { reload: auth });
+            return;
+        }
+        data = await r.json();
+    } catch (e) {
+        treeNotice('Could not load your agents — retrying…');
+        return;
+    }
+    TREE = data;
+    renderTree();
+    probeReadiness();
+    // #959 Task C3: keep every empty slot's inline launcher (chip list +
+    // tier gate) in sync with the latest /api/tree data.
+    slots.forEach(sl => { if (!sl.node) sl.renderLauncher(); });
+}
+
+function allNodes() {
+    if (!TREE) return [];
+    return TREE.groups.reduce((acc, g) => acc.concat(g.nodes), []);
+}
+
+function circleClass(node) {
+    if (node.status === 'running') {
+        // Amber until the readiness probe says it is actually serving. ga.4
+        // exists because "container started" and "app answering" are minutes
+        // apart for some agents, and a green circle that lies is worse than
+        // an amber one that is merely cautious.
+        return readyCache.get(node.instance_id) ? 'ready' : 'running';
+    }
+    return node.status;
+}
+
+const CIRCLE_TITLE = {
+    ready: 'Running — serving',
+    running: 'Starting — not answering yet',
+    starting: 'Starting',
+    stopped: 'Stopped',
+    error: 'Error — check logs',
+    absent: 'Not launched',
+};
+
+// ── W2 folders: user-defined tree grouping + bulk lifecycle ─────────────────
+let treeMode = 'type';           // 'type' | 'folder'
+let FOLDERS = {};                // { folderName: [instance_id, …] }
+
+function folderOf(iid) {
+    for (const [name, ids] of Object.entries(FOLDERS))
+        if (ids.includes(iid)) return name;
+    return null;
+}
+function moveToFolder(node) {
+    const cur = folderOf(node.instance_id);
+    const name = prompt(
+        'Folder for "' + node.label + '" (empty removes it from folders):',
+        cur || '');
+    if (name === null) return;
+    for (const ids of Object.values(FOLDERS)) {
+        const i = ids.indexOf(node.instance_id);
+        if (i >= 0) ids.splice(i, 1);
+    }
+    for (const k of Object.keys(FOLDERS))
+        if (!FOLDERS[k].length) delete FOLDERS[k];
+    // AGU-17: cap the name at the source — an unbounded prompt() could grow the
+    // prefs blob past the server's 64 KiB limit and 413 the whole save.
+    const clean = name.trim().slice(0, FOLDER_NAME_MAX);
+    if (clean) (FOLDERS[clean] ??= []).push(node.instance_id);
+    renderTree(); savePrefsSoon();
+}
+async function bulkLifecycle(ids, action) {
+    // sequential on purpose: parallel starts can OOM a box (the W3 quota is
+    // the systemic answer; until then, at least do not stampede)
+    for (const iid of ids) {
+        try { await fetch('/api/' + action + '/' + iid,
+                          { method: 'POST', credentials: 'same-origin' }); }
+        catch (e) {}
+    }
+    loadTree();
+}
+
+function renderTree() {
+    const host = document.getElementById('agent-tree');
+    host.innerHTML = '';
+    host.removeAttribute('aria-busy');   // AGU-7: the placeholder is gone
+    const modeBar = document.createElement('div');
+    modeBar.className = 'tree-mode';
+    [['type', 'By type'], ['folder', 'My folders']].forEach(([m, label]) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.className = treeMode === m ? 'active' : '';
+        b.onclick = () => { treeMode = m; renderTree(); savePrefsSoon(); };
+        modeBar.appendChild(b);
+    });
+    host.appendChild(modeBar);
+
+    if (treeMode === 'folder') {
+        const assigned = new Set(Object.values(FOLDERS).flat());
+        Object.entries(FOLDERS).forEach(([name, ids]) => {
+            const head = document.createElement('div');
+            head.className = 'tree-folder';
+            const cap = document.createElement('span');
+            cap.textContent = '📁 ' + name;
+            head.appendChild(cap);
+            const sp = document.createElement('span'); sp.className = 'spacer';
+            head.appendChild(sp);
+            [['start', '▶', 'Start all in folder'],
+             ['stop', '⏸', 'Stop all in folder']].forEach(([act, sym, title]) => {
+                const b = document.createElement('button');
+                b.className = 'folder-act'; b.textContent = sym; b.title = title;
+                b.onclick = (e) => { e.stopPropagation();
+                    if (confirm(title + ' \u201e' + name + '\u201c?')) bulkLifecycle(ids, act); };
+                head.appendChild(b);
+            });
+            host.appendChild(head);
+            allNodes().filter(n => ids.includes(n.instance_id))
+                .forEach(n => _renderNode(n, host));
+        });
+        const rest = allNodes().filter(n => n.instance_id && !assigned.has(n.instance_id));
+        if (rest.length) {
+            const head = document.createElement('div');
+            head.className = 'tree-folder muted';
+            head.textContent = '📂 Unfiled';
+            host.appendChild(head);
+            rest.forEach(n => _renderNode(n, host));
+        }
+        updateQuota();
+        updateCapacity();
+        return;
+    }
+    allNodes().forEach(n => _renderNode(n, host));
+    updateQuota();
+    updateCapacity();
+}
+
+function _renderNode(node, host) {
+    {
+        const cls = circleClass(node);
+        const row = document.createElement('div');
+        row.className = 'tree-node' + (node.status === 'absent' ? ' absent' : '')
+                      + (node.instance_id && node.instance_id === selectedId ? ' selected' : '');
+        row.title = node.description || node.label;
+        // AGU-8(a): the agent tree is the Workspace's primary navigation and
+        // was a bare <div> with an onclick — no tabindex, no role, no key
+        // handler, so it could not be reached or operated by keyboard at all.
+        // Same pattern the launch tiles in dashboard/index.html already use.
+        row.tabIndex = 0;
+        row.setAttribute('role', 'option');
+        row.setAttribute('aria-selected',
+            node.instance_id && node.instance_id === selectedId ? 'true' : 'false');
+        const activate = () => {
+            if (!node.instance_id) {
+                location.href = '{{ url_for("dashboard.index") }}?launch='
+                              + encodeURIComponent(node.agent_type);
+                return;
+            }
+            selectedId = node.instance_id;
+            openInActiveSlot(node);
+        };
+        row.onclick = activate;
+        row.onkeydown = (e) => {
+            // only when the ROW itself has focus — Enter on the gear link or
+            // the ⋯ menu inside it must not also open the agent
+            if (e.target !== e.currentTarget) return;
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+        };
+        if (node.instance_id) {
+            // W2: drag an agent from the tree into any grid slot
+            row.draggable = true;
+            row.ondragstart = (e) => {
+                e.dataTransfer.setData('text/instance-id', node.instance_id);
+            };
+        }
+
+        const dot = document.createElement('span');
+        dot.className = 'circle ' + cls;
+        dot.title = CIRCLE_TITLE[cls] || cls;
+        row.appendChild(dot);
+
+        if (node.icon_url) {
+            const img = document.createElement('img');
+            img.className = 'agent-icon';
+            img.src = node.icon_url; img.alt = '';
+            row.appendChild(img);
+        }
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = node.label;
+        row.appendChild(name);
+        const attn = ATTN.get(node.instance_id);
+        if (attn) {
+            const b = document.createElement('span');
+            b.className = 'badge-attn';
+            b.textContent = attn === 'bell' ? '🔔' : '✅';
+            b.title = attn === 'bell' ? 'Wants your input' : 'New output after a quiet spell';
+            row.appendChild(b);
+        }
+
+        if (node.settings_url) {
+            const gear = document.createElement('a');
+            gear.className = 'gear';
+            gear.href = node.settings_url;
+            gear.textContent = '⚙';
+            gear.title = 'Settings';
+            gear.onclick = (e) => e.stopPropagation();
+            row.appendChild(gear);
+        }
+        if (node.instance_id) {
+            const dots = document.createElement('a');
+            dots.className = 'gear'; dots.href = '#'; dots.textContent = '⋯';
+            dots.title = 'Move to folder…';
+            dots.onclick = (e) => { e.preventDefault(); e.stopPropagation();
+                moveToFolder(node); };
+            row.appendChild(dots);
+        }
+        host.appendChild(row);
+    }
+}
+
+// ── W3: capacity meter (visibility half of the launch-gate enforcement) ────
+function updateCapacity() {
+    const cap = TREE && TREE.capacity;
+    const el = document.getElementById('capacity');
+    if (!cap || !cap.budget_mb) { el.hidden = true; return; }
+    el.hidden = false;
+    const pct = Math.min(100, Math.round(100 * cap.in_use_mb / cap.budget_mb));
+    el.querySelector('.cap-fill').style.width = pct + '%';
+    el.classList.toggle('hot', pct >= 90);
+    let label = 'Memory: ' + cap.in_use_mb + ' / ' + cap.budget_mb + ' MB';
+    if (cap.user_cap_mb) label += ' · you: ' + cap.user_in_use_mb + ' / ' + cap.user_cap_mb;
+    el.querySelector('.cap-label').textContent = label;
+}
+
+// ── W3: attention badges — bell = "wants input", output-after-idle = "done".
+// Client-side heuristics on the PTY stream; a badge clears when you focus the
+// agent. State keyed by instance_id so it survives slot moves. ─────────────
+const ATTN = new Map();   // instance_id -> 'bell' | 'done'
+function setAttn(iid, kind) {
+    if (!iid) return;
+    ATTN.set(iid, kind);
+    renderTree();
+}
+function clearAttn(iid) {
+    if (ATTN.delete(iid)) renderTree();
+}
+
+function updateQuota() {
+    const q = TREE && TREE.quota;
+    document.getElementById('quota').textContent =
+        q ? (q.running + (q.max_instances ? ' / ' + q.max_instances : '') + ' running') : '';
+}
+
+function probeReadiness() {
+    allNodes()
+        .filter(n => n.status === 'running' && n.instance_id && !readyCache.get(n.instance_id))
+        .forEach(async (n) => {
+            try {
+                const r = await fetch('/api/ready/' + n.instance_id, { credentials: 'same-origin' });
+                const d = await r.json();
+                if (d.ready) { readyCache.set(n.instance_id, true); renderTree(); }
+            } catch (e) { /* transient — the next tick retries */ }
+        });
+}
+
+// ---------------------------------------------------------------------------
+// Pane (#244-Q3)
+// ---------------------------------------------------------------------------
+// Both pane kinds are same-origin, which is the whole reason Q1 exists: the
+// terminal opens a WebSocket on THIS origin, and the web view iframes
+// /i/<token>/ on THIS origin — so no per-iframe SSO round trip, no
+// frame-ancestors fight with the agent's own headers.
+
+// ---------------------------------------------------------------------------
+// Rework-W2 (#244 P2): the grid. Each Slot OWNS its pane state — terminal,
+// WS, iframe, logs timer, files path — so four agents run side by side
+// without sharing globals (the W1 single-pane code, parameterized).
+// ---------------------------------------------------------------------------
+const SLOT_COUNT = { '1': 1, '2': 2, '3': 3, '4': 4 };
+let layout = '1';
+let slots = [];          // Slot[]
+let activeIdx = 0;
+// #1904 — one sentence per reason, from the server's `restricted_reason`.
+// Kept beside the renderer that shows it, so the wording cannot drift from
+// the branch that produced it.
+function restrictedText(n) {
+    switch (n && n.restricted_reason) {
+        case 'heavy-quota':
+            return 'your tier allows this type, but its quota for heavy agents is 0 — ask an admin to raise it';
+        case 'tier':
+            return 'not included in your tier — contact an admin for access';
+        default:
+            return 'not available to you right now';
+    }
+}
+
+
+class Slot {
+    constructor(el, idx) {
+        this.el = el; this.idx = idx;
+        this.node = null; this.kind = null;
+        this.term = null; this.ws = null; this.fit = null;
+        this.logsTimer = null; this.filesPath = null;
+        this.pendingType = null;  // #959 C3: chip selected in the inline launcher
+        el.addEventListener('mousedown', () => setActive(idx), true);
+        // AGU-8(c): focus (from Tab, Alt+1..4, or a click landing on a control
+        // inside the pane) makes this the active slot too — the pointer path
+        // was the only one before.
+        el.addEventListener('focusin', () => setActive(idx));
+        el.setAttribute('aria-label', 'Pane ' + (idx + 1));
+        el.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const iid = e.dataTransfer.getData('text/instance-id');
+            const node = allNodes().find(n => n.instance_id === iid);
+            if (node) { setActive(idx); this.open(node); }
+        });
+        el.querySelectorAll('.kind-tabs button').forEach(b => {
+            b.onclick = () => this.show(b.dataset.paneKind);
+        });
+        // AGU-5: one owned state — the body class and the slot's own .maxed are
+        // driven from a single boolean, and maximizing one pane un-maximizes
+        // any other, so the two can never disagree.
+        el.querySelector('.slot-max').onclick = () => this.toggleMax();
+        const up = el.querySelector('.files-upload');
+        up.onchange = () => this.uploadFile(up);
+        // AGU-19: the visible control is a real button now — it opens the
+        // (hidden, aria-hidden) file input on click OR keyboard activation.
+        const upBtn = el.querySelector('.files-upload-btn');
+        if (upBtn) upBtn.onclick = () => up.click();
+        // #959 Task C3: inline empty-slot launcher — wired here, not in the
+        // old modal/dashboard handoff.
+        const launchBtn = el.querySelector('.launcher-launch');
+        if (launchBtn) launchBtn.onclick = () => this.launchHere();
+        this.renderLauncher();
+    }
+    q(sel) { return this.el.querySelector(sel); }
+    hidePanes() {
+        ['.pane-empty', '.pane-terminal', '.pane-web', '.pane-logs', '.pane-files']
+            .forEach(c => { this.q(c).hidden = true; });
+        const msg = this.q('.pane-msg'); if (msg) msg.remove();
+    }
+    // #959 Task C3: (re)build the inline launcher's type chips from the SAME
+    // /api/tree data the left rail uses — each not-yet-launched type already
+    // carries `can_launch` (tier + heavy-quota gated server-side in
+    // /api/tree), so this reuses that gate rather than re-deriving one.
+    renderLauncher() {
+        const chipsHost = this.q('.launcher .chips');
+        const btn = this.q('.launcher-launch');
+        if (!chipsHost) return;
+        chipsHost.innerHTML = '';
+        allNodes().filter(n => !n.instance_id).forEach(n => {
+            // AGU-8(b)/AGU-20(b): these were non-focusable <span role="option">
+            // inside a role="listbox" with no aria-activedescendant — announced
+            // but not operable. A native <button> with aria-pressed is
+            // focusable, Enter/Space-activatable and disable-able for free.
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'lchip'
+                + (this.pendingType === n.agent_type ? ' on' : '')
+                + (!n.can_launch ? ' disabled' : '');
+            chip.setAttribute('aria-pressed', this.pendingType === n.agent_type ? 'true' : 'false');
+            if (n.icon_url) {
+                const img = document.createElement('img');
+                img.src = n.icon_url; img.alt = ''; img.width = 14; img.height = 14;
+                chip.appendChild(img);
+            }
+            chip.appendChild(document.createTextNode(n.label));
+            if (n.can_launch) {
+                chip.title = 'Launch ' + n.label + ' into this pane';
+                chip.onclick = () => { this.pendingType = n.agent_type; this.pendingMore = !!n.launch_more; this.renderLauncher(); };
+            } else {
+                // #1904: the reason comes from the server (`restricted_reason`),
+                // it is not guessed here. "Not available on your tier" was wrong
+                // whenever the cause was the heavy quota — the type IS on the
+                // tier then, and the operator checks a list that says so.
+                chip.title = restrictedText(n);
+                chip.disabled = true;
+            }
+            chipsHost.appendChild(chip);
+        });
+        // …and the same sentence VISIBLY, because a title is not an explanation
+        // on a touch device or under a keyboard.
+        const note = this.q('.launcher .lnote');
+        if (note) {
+            const nodes = allNodes().filter(n => !n.instance_id);
+            const blocked = nodes.filter(n => !n.can_launch);
+            if (!nodes.length) {
+                // #1904 rev-B, measured on 0.91: this is the operator's actual
+                // case. The launcher only offers types the user has NO instance
+                // of, so a user who already has one of each gets an EMPTY chip
+                // row and a dead button — `restricted` is false, so the
+                // tier/quota sentence never fires and nothing at all is said.
+                //
+                // The first version of this fix explained the restricted case
+                // and left this one exactly as silent as before.
+                const mine = allNodes().filter(n => n.instance_id);
+                note.textContent = mine.length
+                    ? 'Nothing left to launch here: you already have an instance of '
+                      + 'every agent type available to you. Open one from the tree on '
+                      + 'the left, or remove one in its Settings to make room.'
+                    : 'No agent types are available to you. Contact an admin for access.';
+                note.hidden = false;
+            } else if (blocked.length && blocked.length === nodes.length) {
+                note.textContent = 'Nothing can be launched here: '
+                    + blocked.map(n => n.label + ' — ' + restrictedText(n)).join('; ');
+                note.hidden = false;
+            } else if (blocked.length) {
+                note.textContent = blocked.map(n => n.label + ': ' + restrictedText(n)).join('; ');
+                note.hidden = false;
+            } else {
+                note.textContent = '';
+                note.hidden = true;
+            }
+        }
+        if (btn) {
+            btn.disabled = !this.pendingType;
+            // An inert primary CTA with no words is the thing that made this a
+            // bug report: the operator pressed it and nothing happened.
+            btn.title = this.pendingType ? '' :
+                (note && !note.hidden ? note.textContent : 'Pick a type first');
+        }
+    }
+    // Fires the SAME /api/launch/<agent_type> route the spawn modal's
+    // confirmSpawn() posts to (server tier/memory gate unchanged), then
+    // attaches the new instance into THIS slot via the SAME Slot.open(node)
+    // the drag-drop flow already uses — no reimplemented launch/attach path.
+    async launchHere() {
+        if (!this.pendingType) return;
+        const btn = this.q('.launcher-launch');
+        if (btn) { btn.disabled = true; btn.textContent = 'Launching…'; }
+        const type = this.pendingType;
+        try {
+            // #1988: a "(another)" chip asks for a FURTHER instance of a type the
+            // user already has; without the flag the server opens the first one.
+            const body = this.pendingMore ? JSON.stringify({ new_instance: true }) : undefined;
+            const r = await fetch('/api/launch/' + type, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin', body,
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok || data.error) {
+                alert('Launch failed: ' + (data.message || data.error || ('HTTP ' + r.status)));
+                if (btn) { btn.disabled = false; btn.textContent = 'Launch into this pane'; }
+                return;
+            }
+            this.pendingType = null;
+            this.pendingMore = false;
+            await loadTree();
+            const node = allNodes().find(n => n.instance_id === data.instance_id);
+            if (node) { setActive(this.idx); this.open(node); }
+            else if (btn) { btn.disabled = false; btn.textContent = 'Launch into this pane'; }
+        } catch (e) {
+            alert('Launch failed: ' + e);
+            if (btn) { btn.disabled = false; btn.textContent = 'Launch into this pane'; }
+        }
+    }
+    message(text) {
+        this.closeLive();
+        this.hidePanes();
+        const div = document.createElement('div');
+        div.className = 'pane-msg';
+        div.textContent = text;
+        this.q('.pane-host').appendChild(div);
+    }
+    open(node) {
+        this.node = node;
+        this.q('.title').textContent = node.label;
+        const gear = this.q('.slot-gear');
+        gear.href = node.settings_url || '#';
+        gear.hidden = !node.settings_url;
+        const tabs = this.el;
+        // #1871: the raw terminal is last-resort access, not a top-level
+        // entrypoint — hide the tab whenever the agent has a web UI (reach
+        // the terminal via Settings -> "Open Terminal"). Pure-terminal
+        // agents (no web UI) keep it as their main view.
+        tabs.querySelector('[data-pane-kind="terminal"]').hidden = !node.ui.terminal || node.ui.web;
+        tabs.querySelector('[data-pane-kind="web"]').hidden = !node.ui.web;
+        tabs.querySelector('[data-pane-kind="logs"]').hidden = node.status !== 'running';
+        tabs.querySelector('[data-pane-kind="files"]').hidden =
+            !(node.files && node.status === 'running');
+        renderTree();
+        if (node.status !== 'running') {
+            // AGU-6: `_TREE_STATUS` maps provisioning → 'starting', and the
+            // tree already models that properly (amber circle, "Starting").
+            // Only this copy ignored it — so the instance launchHere() attaches
+            // immediately after provisioning landed here and told the user
+            // their brand-new agent was stopped, and asked them to start it.
+            if (node.status === 'starting') {
+                this.message('Starting… this pane opens as soon as the agent is up.');
+                // the 15s loadTree() poll re-reports the node; re-open when it
+                // flips to running (guarded on this slot still showing it).
+                clearTimeout(this.startPoll);
+                this.startPoll = setTimeout(() => {
+                    this.startPoll = null;
+                    if (!this.node || this.node.instance_id !== node.instance_id) return;
+                    const fresh = allNodes().find(n => n.instance_id === node.instance_id);
+                    if (fresh && fresh.status !== 'starting') this.open(fresh);
+                    else if (fresh) this.open(fresh);   // still starting → re-arm
+                }, 5000);
+            } else {
+                this.message(node.status === 'error'
+                    ? 'This agent is in an error state. Open Settings for its logs.'
+                    : 'This agent is stopped. Start it from Settings or the agent list.');
+            }
+            savePrefsSoon();
+            return;
+        }
+        clearTimeout(this.startPoll); this.startPoll = null;
+        clearAttn(node.instance_id);
+        this.checkOom(node);
+        // #244-Q4: catalog-driven default pane
+        this.show(node.default_pane && node.ui[node.default_pane]
+                  ? node.default_pane
+                  : (node.ui.web ? 'web' : 'terminal'));   // #1871 web-first fallback
+        savePrefsSoon();
+    }
+    show(kind) {
+        const node = this.node;
+        if (!node) return;
+        this.kind = kind;
+        this.el.querySelectorAll('.kind-tabs button').forEach(b => {
+            b.classList.toggle('active', b.dataset.paneKind === kind);
+        });
+        this.hidePanes();
+        if (kind === 'web') {
+            this.closeLive();
+            const f = this.q('.pane-web');
+            if (f.getAttribute('data-src') !== node.pane_url) {
+                f.setAttribute('data-src', node.pane_url);
+                f.src = node.pane_url;
+            }
+            f.hidden = false;
+        } else if (kind === 'logs') {
+            this.closeLive();
+            this.openLogs(node);
+        } else if (kind === 'files') {
+            this.closeLive();
+            this.openFiles(node, null);
+        } else {
+            this.q('.pane-terminal').hidden = false;
+            this.openTerminal(node);
+        }
+        savePrefsSoon();
+    }
+    closeLive() {
+        clearInterval(this.logsTimer); this.logsTimer = null;
+        // AGU-4: disconnect the resize observer with the rest of the live
+        // state, so it does not outlive the pane it was watching.
+        if (this.ro) this.ro.disconnect();
+        // AGU-13: stop the keepalive + any pending reconnect BEFORE closing the
+        // socket, so a deliberate teardown never schedules a re-attach.
+        clearInterval(this.keepalive); this.keepalive = null;
+        clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
+        clearTimeout(this.startPoll); this.startPoll = null;   // AGU-6
+        this._reconnects = 0;
+        if (this.ws) { try { this.ws.close(); } catch (e) {} this.ws = null; }
+        if (this.term) { this.term.dispose(); this.term = null; }
+        this.q('.pane-terminal').innerHTML = '';
+    }
+    close() {
+        this.closeLive();
+        this.node = null; this.kind = null;
+        // AGU-5: maximize is body-level state; a maximized slot that is closed
+        // (or rebuilt by setLayout) used to leave body.pane-maxed set with no
+        // .maxed slot left — icon rail, agents column and toolbar hidden with
+        // no visible control to bring them back short of a page reload.
+        this.unmaximize();
+        // AGU-25: a hidden iframe keeps RUNNING — the agent UI stays live, keeps
+        // its sockets open and keeps polling for a pane the user has closed. For
+        // a session-bearing agent UI that also means the surface outlives the
+        // dismissal. Point it at about:blank and drop the cached src.
+        const f = this.q('.pane-web');
+        if (f) { f.removeAttribute('data-src'); f.src = 'about:blank'; }
+        this.hidePanes();
+        this.q('.pane-empty').hidden = false;
+        this.q('.title').textContent = 'Drop an agent here';
+        this.pendingType = null;
+        this.renderLauncher();
+    }
+    // AGU-5: single owner for the maximize state — both halves always move
+    // together (body class + the slot's own .maxed).
+    unmaximize() {
+        if (this.el.classList.contains('maxed')) {
+            this.el.classList.remove('maxed');
+            document.body.classList.remove('pane-maxed');
+        }
+    }
+    toggleMax() {
+        const want = !this.el.classList.contains('maxed');
+        slots.forEach(sl => sl.el.classList.remove('maxed'));
+        this.el.classList.toggle('maxed', want);
+        document.body.classList.toggle('pane-maxed', want);
+        const btn = this.q('.slot-max');
+        if (btn) {
+            btn.setAttribute('aria-pressed', want ? 'true' : 'false');
+            btn.title = want ? 'Restore this pane' : 'Maximize this pane';
+        }
+        this.refit();
+    }
+    refit() { if (this.fit && this.term) { try { this.fit.fit(); } catch (e) {} } }
+    checkOom(node) {
+        // W3 (#238 follow-through): cgroup OOM kills processes INSIDE the
+        // container while PID 1 survives — oom_kills>0 is the only signal.
+        fetch('/api/stats/' + node.instance_id, { credentials: 'same-origin' })
+            .then(r => r.json())
+            .then(d => {
+                const k = (d.stats || {}).oom_kills || 0;
+                let b = this.q('.badge-oom');
+                if (k > 0) {
+                    if (!b) {
+                        b = document.createElement('span');
+                        b.className = 'badge-oom';
+                        this.q('.pane-head').insertBefore(b, this.q('.kind-tabs'));
+                    }
+                    b.textContent = '⚠ ' + k + '× OOM-killed';
+                    b.title = 'Processes inside this agent were OOM-killed — '
+                            + 'raise its memory limit in Settings.';
+                } else if (b) b.remove();
+            }).catch(() => {});
+    }
+    openTerminal(node) {
+        this.closeLive();
+        const host = this.q('.pane-terminal');
+        this.term = new Terminal({
+            cursorBlink: true, fontSize: 13,
+            fontFamily: "'JetBrains Mono', Menlo, monospace",
+            theme: { background: '#1e1e1e' },
+        });
+        this.fit = new FitAddon.FitAddon();
+        this.term.loadAddon(this.fit);
+        this.term.open(host);
+        this.fit.fit();
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(proto + '//' + location.host + node.terminal_url);
+        this.ws = ws;
+        const term = this.term, fit = this.fit;
+        ws.onopen = () => {
+            this._reconnects = 0;   // AGU-13: a good attach resets the backoff
+            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        };
+        ws.onmessage = (ev) => term.write(ev.data);
+        // AGU-13: no onerror at all, and [disconnected] was a dead end — the
+        // only recovery was clicking the already-active Terminal tab, which is
+        // undiscoverable. tmux keeps the session, so a re-attach is lossless
+        // (that is the stated "resurrect rule"): back off and reconnect, and
+        // say so. Same [connection error] copy the detail page writes.
+        ws.onerror = () => { try { term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n'); } catch (e) {} };
+        ws.onclose = () => {
+            if (this.ws !== ws) return;              // superseded / torn down on purpose
+            try { term.write('\r\n\x1b[33m[disconnected]\x1b[0m\r\n'); } catch (e) {}
+            this._reconnects = (this._reconnects || 0) + 1;
+            if (this._reconnects > 5) {
+                try { term.write('\x1b[33m[giving up — switch tabs or reload to retry]\x1b[0m\r\n'); } catch (e) {}
+                return;
+            }
+            const wait = Math.min(15000, 1000 * Math.pow(2, this._reconnects - 1));
+            try { term.write('\x1b[90m[reconnecting in ' + Math.round(wait / 1000) + 's…]\x1b[0m\r\n'); } catch (e) {}
+            this.reconnectTimer = setTimeout(() => {
+                this.reconnectTimer = null;
+                // still the same agent, still on the terminal tab?
+                if (this.node === node && this.kind === 'terminal') this.openTerminal(node);
+            }, wait);
+        };
+        // AGU-13: the server explicitly supports a {type:'ping'} keepalive
+        // (blueprints/terminal.py) and the DETAIL-page terminal already sends
+        // one every 45s. The manager itself will not drop an idle session, but
+        // any intermediary will — and two terminals in one app behaving
+        // differently is a latent divergence. Cleared in closeLive().
+        this.keepalive = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+            else { clearInterval(this.keepalive); this.keepalive = null; }
+        }, 45000);
+        // the PTY protocol is JSON-framed on the input side (the server
+        // demuxes input vs resize) — raw send() would feed JSON-less bytes
+        // the bridge does not understand. Mirrors the pre-grid code exactly.
+        term.onData(d => {
+            if (slots[activeIdx] === this) d = applyArmed(d);
+            if (ws.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify({ type: 'input', data: d }));
+            this._lastInput = Date.now();
+        });
+        // W3 attention: bell = the program asked for attention; output after
+        // >20s of silence with no local typing = a long task finished.
+        term.onBell?.(() => {
+            if (this.node && slots[activeIdx] !== this) setAttn(this.node.instance_id, 'bell');
+        });
+        this._lastOutput = Date.now();
+        ws.addEventListener('message', () => {
+            const now = Date.now();
+            const idle = now - (this._lastOutput || now);
+            const sinceInput = now - (this._lastInput || 0);
+            if (idle > 20000 && sinceInput > 20000 && this.node
+                && slots[activeIdx] !== this)
+                setAttn(this.node.instance_id, 'done');
+            this._lastOutput = now;
+        });
+        term.onResize(({ cols, rows }) => {
+            if (ws.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+        });
+        // AGU-4: the observer used to be created per open() and never stored or
+        // disconnected. A live observer with an observed target is kept alive by
+        // the UA, so every tab switch back to Terminal, every setLayout re-open,
+        // every mobile swipe and every restorePrefs added one more — each
+        // holding a detached .pane-terminal node and its disposed xterm. Owned
+        // by the Slot, created once, re-pointed at the current host.
+        if (!this.ro) this.ro = new ResizeObserver(() => this.refit());
+        this.ro.disconnect();
+        this.ro.observe(host);
+    }
+    openLogs(node) {
+        const pre = this.q('.pane-logs');
+        pre.hidden = false; pre.textContent = 'Loading…';
+        const load = () => fetch('/api/logs/' + node.instance_id + '?tail=400',
+                                 { credentials: 'same-origin' })
+            .then(r => r.json())
+            .then(d => {
+                const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+                pre.textContent = d.logs || '(no output)';
+                if (atEnd) pre.scrollTop = pre.scrollHeight;
+            }).catch(() => {});
+        load();
+        clearInterval(this.logsTimer);
+        this.logsTimer = setInterval(load, 3000);
+    }
+    openFiles(node, path) {
+        const box = this.q('.pane-files');
+        box.hidden = false;
+        const url = '/api/files/' + node.instance_id + '/list'
+                  + (path ? '?path=' + encodeURIComponent(path) : '');
+        fetch(url, { credentials: 'same-origin' }).then(r => r.json()).then(d => {
+            const list = this.q('.files-list');
+            if (d.error) { list.textContent = d.error; return; }
+            this.filesPath = d.path;
+            this.q('.files-path').textContent = d.path;
+            list.innerHTML = '';
+            const root = (d.roots || [])[0];
+            if (d.path !== root) {
+                const up = document.createElement('a');
+                up.href = '#'; up.className = 'file-row dir'; up.textContent = '↑ ..';
+                up.onclick = (e) => { e.preventDefault();
+                    this.openFiles(node, d.path.replace(/\/[^/]+$/, '') || root); };
+                list.appendChild(up);
+            }
+            d.entries.forEach(en => {
+                const row = document.createElement('a');
+                row.className = 'file-row' + (en.dir ? ' dir' : '');
+                row.textContent = (en.dir ? '📁 ' : '📄 ') + en.name
+                    + (en.dir ? '' : '  (' + fmtSize(en.size) + ')');
+                if (en.dir) {
+                    row.href = '#';
+                    row.onclick = (e) => { e.preventDefault();
+                        this.openFiles(node, d.path + '/' + en.name); };
+                } else {
+                    row.href = '/api/files/' + node.instance_id + '/download?path='
+                             + encodeURIComponent(d.path + '/' + en.name);
+                }
+                list.appendChild(row);
+            });
+        }).catch(() => { this.q('.files-list').textContent = 'Could not list files.'; });
+    }
+    uploadFile(input) {
+        const node = this.node;
+        if (!node || !input.files.length || !this.filesPath) return;
+        const fd = new FormData();
+        fd.append('file', input.files[0]);
+        fetch('/api/files/' + node.instance_id + '/upload?path='
+              + encodeURIComponent(this.filesPath),
+              { method: 'POST', body: fd, credentials: 'same-origin' })
+            .then(r => r.json())
+            .then(d => {
+                input.value = '';
+                if (d.error) { alert(d.error); return; }
+                this.openFiles(node, this.filesPath);
+            }).catch(() => alert('Upload failed.'));
+    }
+}
+
+function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KiB';
+    return (n / 1048576).toFixed(1) + ' MiB';
+}
+
+function setActive(idx) {
+    activeIdx = idx;
+    slots.forEach((sl, i) => sl.el.classList.toggle('active', i === idx));
+    const sl = slots[idx];
+    if (sl && sl.node) clearAttn(sl.node.instance_id);
+}
+
+function setLayout(l, skipSave) {
+    // AGU-5: setLayout() rebuilds the grid from scratch and the fresh slots
+    // never carry `.maxed`, but nothing cleared `body.pane-maxed` — and the
+    // command palette (a document-level keydown, reachable WHILE maximized)
+    // offers "Layout: …" items. So maximize → Ctrl-K → Layout: 2×2 left the
+    // icon rail, agents column and toolbar hidden with no way back but a
+    // reload. Clear the body state before the rebuild, always.
+    document.body.classList.remove('pane-maxed');
+    slots.forEach(sl => sl.el.classList.remove('maxed'));
+    layout = SLOT_COUNT[l] ? l : '1';
+    const grid = document.getElementById('grid');
+    grid.className = 'grid layout-' + layout;
+    document.querySelectorAll('.layout-switch button').forEach(b => {
+        b.classList.toggle('active', b.dataset.layout === layout);
+    });
+    const want = SLOT_COUNT[layout];
+    // shrink: close surplus panes (their state dies with them, saved layouts
+    // remember only what fits the layout)
+    while (slots.length > want) slots.pop().close();
+    grid.innerHTML = '';
+    const old = slots; slots = [];
+    for (let i = 0; i < want; i++) {
+        const el = document.getElementById('slot-template').content
+            .firstElementChild.cloneNode(true);
+        grid.appendChild(el);
+        const sl = new Slot(el, i);
+        slots.push(sl);
+        // re-open what the old slot had (state carries over by node+kind —
+        // terminals reconnect, tmux keeps the session: the resurrect rule)
+        if (old[i] && old[i].node) {
+            const node = old[i].node, kind = old[i].kind;
+            old[i].closeLive();
+            sl.open(node);
+            if (kind && kind !== sl.kind) sl.show(kind);
+        }
+    }
+    old.forEach(o => { if (!slots.includes(o)) o.closeLive?.(); });
+    if (activeIdx >= slots.length) activeIdx = 0;
+    setActive(activeIdx);
+    if (!skipSave) savePrefsSoon();
+}
+
+function openInActiveSlot(node) {
+    if (!slots.length) setLayout(layout, true);
+    slots[activeIdx].open(node);
+}
+
+// ── prefs: layout + slot assignments + tree mode + folders ──────────────────
+let prefsTimer = null;
+// AGU-17: coerce a restored `folders` blob into the shape every consumer
+// assumes — { name: string[] } — dropping anything else instead of throwing
+// deep inside renderTree(). Folder names are capped at the same 64 chars the
+// prompt() site enforces.
+const FOLDER_NAME_MAX = 64;
+// AGU-17: one visible, self-dismissing notice. Deliberately deduped by text —
+// savePrefs() runs on every layout nudge, and a failing box must not stack a
+// wall of identical banners.
+let _toastSeen = new Set();
+function portalToast(text) {
+    if (_toastSeen.has(text)) return;
+    _toastSeen.add(text);
+    setTimeout(() => _toastSeen.delete(text), 30000);
+    const el = document.createElement('div');
+    el.className = 'portal-toast';
+    el.setAttribute('role', 'status');
+    el.textContent = text;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 6000);
+}
+function normalizeFolders(raw) {
+    const out = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    for (const [name, v] of Object.entries(raw)) {
+        if (typeof name !== 'string' || !name.trim()) continue;
+        if (!Array.isArray(v)) continue;
+        const ids = v.filter(x => typeof x === 'string' && x);
+        if (ids.length) out[name.slice(0, FOLDER_NAME_MAX)] = ids;
+    }
+    return out;
+}
+
+function savePrefsSoon() {
+    clearTimeout(prefsTimer);
+    prefsTimer = setTimeout(savePrefs, 800);
+}
+function savePrefs() {
+    const body = {
+        layout,
+        slots: slots.map(sl => sl.node
+            ? { instance_id: sl.node.instance_id, kind: sl.kind } : null),
+        treeMode, folders: FOLDERS,
+        // #1186: the nav's fold state (the pre-#1186 key folded the agents
+        // column instead and is never written again — see restorePrefs).
+        navWide: document.getElementById('icon-rail').classList.contains('wide'),
+    };
+    // AGU-17: a non-2xx (e.g. 413 from an oversized folder set — folder names
+    // came from an unbounded prompt()) used to be swallowed entirely, so the
+    // user's layout silently stopped persisting. Surface it once.
+    fetch('/api/portal/prefs', { method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) portalToast('Your pane layout could not be saved (HTTP '
+                                            + r.status + ').'); })
+        .catch(() => {});
+}
+async function restorePrefs() {
+    try {
+        const r = await fetch('/api/portal/prefs', { credentials: 'same-origin' });
+        const d = await r.json();
+        const p = d.prefs || {};
+        // AGU-17: `typeof … === 'object'` was the ONLY check, and every
+        // consumer then assumes the values are arrays of strings
+        // (ids.includes / ids.splice / Object.values(FOLDERS).flat()). The
+        // server accepts any JSON object up to 64 KiB with no shape check, so
+        // `{"folders": {"x": 5}}` — a hand-made PUT, or any future writer of
+        // that blob — made folderOf() throw inside renderTree() and left the
+        // rail blank with the exception unhandled. Normalise on read.
+        FOLDERS = normalizeFolders(p.folders);
+        if (p.treeMode === 'folder' || p.treeMode === 'type') treeMode = p.treeMode;
+        // #959 Task 1.5 / #1186 — the nav ships icon-only (server-rendered);
+        // an explicit `navWide: true` in saved prefs is the only thing that
+        // expands it on load. The pre-#1186 `railCollapsed` key folded the
+        // AGENTS column (finding 1) and is deliberately ignored — that column
+        // has no folded state any more.
+        if (p.navWide === true) setNavWide(true);
+        setLayout(p.layout || '1', true);
+        (p.slots || []).forEach((sp, i) => {
+            if (!sp || !slots[i]) return;
+            const node = allNodes().find(n => n.instance_id === sp.instance_id);
+            if (!node) return;
+            setActive(i);
+            slots[i].open(node);
+            if (sp.kind && sp.kind !== slots[i].kind && node.status === 'running')
+                slots[i].show(sp.kind);
+        });
+        setActive(0);
+        renderTree();
+    } catch (e) { setLayout('1', true); }
+}
+
+// #959 Task 1.5 / #1186 (finding 1) — collapsible icon-rail. The toggle folds
+// the APP NAV (Workspace/Agents/MCP/Settings) between its icon-only strip and
+// a labelled column; it used to fold the agents column instead, whose folded
+// state was a 58px strip of status dots. Toggle icon is state-aware: ☰ while
+// icon-only (click expands), « while labelled (click folds) — mirrors the
+// approved prototype's railToggle behaviour.
+function setNavWide(wide) {
+    const nav = document.getElementById('icon-rail');
+    nav.classList.toggle('wide', !!wide);
+    const btn = document.getElementById('rail-collapse-btn');
+    btn.textContent = wide ? '«' : '☰';
+    btn.title = wide ? 'Collapse the navigation' : 'Expand the navigation';
+    btn.setAttribute('aria-expanded', wide ? 'true' : 'false');
+    // the pane grid just changed width — refit live terminals now, and once
+    // more when the CSS width transition settles (transitionend below)
+    slots.forEach(sl => sl.refit());
+}
+function toggleRailCollapse() {
+    const nav = document.getElementById('icon-rail');
+    setNavWide(!nav.classList.contains('wide'));
+    savePrefsSoon();
+}
+document.getElementById('icon-rail').addEventListener('transitionend', (e) => {
+    if (e.propertyName === 'width') slots.forEach(sl => sl.refit());
+});
+
+// ── W3 mobile: swipe through your RUNNING agents, one per screen (operator
+// feature 2026-08-23). Horizontal swipe on the pane area moves the ACTIVE
+// slot to the previous/next running agent; ignores swipes that start on the
+// terminal (xterm owns those gestures) unless they travel far. ─────────────
+let _touchX = null, _touchY = null;
+document.addEventListener('touchstart', (e) => {
+    if (!e.target.closest('.pane-host')) { _touchX = null; return; }
+    _touchX = e.touches[0].clientX; _touchY = e.touches[0].clientY;
+}, { passive: true });
+document.addEventListener('touchend', (e) => {
+    if (_touchX === null) return;
+    const dx = e.changedTouches[0].clientX - _touchX;
+    const dy = e.changedTouches[0].clientY - _touchY;
+    _touchX = null;
+    if (Math.abs(dx) < 70 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
+    swipeAgent(dx < 0 ? 1 : -1);
+}, { passive: true });
+
+function swipeAgent(dir) {
+    const running = allNodes().filter(n => n.instance_id && n.status === 'running');
+    if (running.length < 2) return;
+    const sl = slots[activeIdx];
+    if (!sl) return;
+    const curIid = sl.node && sl.node.instance_id;
+    let i = running.findIndex(n => n.instance_id === curIid);
+    i = (i + dir + running.length) % running.length;
+    selectedId = running[i].instance_id;
+    sl.open(running[i]);
+    renderTree();
+}
+
+// ── W3 mobile key bar (JuiceSSH-style sticky modifiers) ─────────────────────
+const KEYSEQ = { esc: '\x1b', tab: '\t', up: '\x1b[A', down: '\x1b[B',
+                 right: '\x1b[C', left: '\x1b[D', ctrlc: '\x03',
+                 slash: '/', pipe: '|', dash: '-' };
+let armed = { ctrl: false, alt: false };
+// Sticky modifiers transform exactly ONE next key, wherever it is typed —
+// keybar button or soft-keyboard letter (#599 review Finding 1: the arm was
+// consumed by the bar only, so Ctrl+<letter> never reached the PTY).
+function applyArmed(seq) {
+    if (!armed.ctrl && !armed.alt) return seq;
+    if (armed.ctrl && seq.length === 1 && seq >= '@') {
+        seq = String.fromCharCode(seq.toUpperCase().charCodeAt(0) & 0x1f);
+    }
+    if (armed.alt) seq = '\x1b' + seq;
+    ['ctrl', 'alt'].forEach(m => {
+        if (armed[m]) {
+            armed[m] = false;
+            document.querySelector('.keybar [data-mod="' + m + '"]')
+                ?.classList.remove('armed');
+        }
+    });
+    return seq;
+}
+document.getElementById('keybar').addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const sl = slots[activeIdx];
+    if (btn.dataset.mod) {
+        // sticky: arm for the NEXT key; tap again to disarm
+        armed[btn.dataset.mod] = !armed[btn.dataset.mod];
+        btn.classList.toggle('armed', armed[btn.dataset.mod]);
+        return;
+    }
+    if (!sl || !sl.ws || sl.ws.readyState !== WebSocket.OPEN) return;
+    let seq = KEYSEQ[btn.dataset.key] ?? '';
+    if (!seq) return;
+    seq = applyArmed(seq);
+    sl.ws.send(JSON.stringify({ type: 'input', data: seq }));
+    if (sl.term) sl.term.focus();
+});
+
+window.addEventListener('resize', () => slots.forEach(sl => {
+    sl.refit();
+    if (sl.ws && sl.ws.readyState === WebSocket.OPEN && sl.term)
+        sl.ws.send(JSON.stringify({ type: 'resize', cols: sl.term.cols, rows: sl.term.rows }));
+}));
+
+loadTree().then(() => restorePrefs());
+// Slow poll: state changes here are human-driven (start/stop/crash), so a tight
+// interval would just add load for no extra truth. The readiness overlay is
+// what makes a freshly-started agent go green quickly.
+setInterval(loadTree, 15000);
+</script>
+
+{# ── W5 (#620): command palette + activity overlays ─────────────────────── #}
+<div class="ovl" id="palette-ovl" onclick="if (event.target === this) closePalette()">
+  <div class="ovl-card">
+    {# AGU-20(c): the palette's arrow-key selection worked visually (a roving
+       `.sel` class) but was invisible to assistive tech — no listbox/option
+       roles, no aria-activedescendant, no aria-expanded. The combobox pattern
+       below is wired from _palRender(). #}
+    <input id="palette-input" type="text" placeholder="Jump to agent, start, stop, layout…"
+           autocomplete="off" spellcheck="false"
+           role="combobox" aria-expanded="false" aria-controls="palette-list"
+           aria-autocomplete="list" aria-label="Command palette">
+    <ul id="palette-list" role="listbox" aria-label="Commands"></ul>
+  </div>
+</div>
+<div class="ovl" id="activity-ovl" onclick="if (event.target === this) closeActivity()">
+  <div class="ovl-card">
+    <div class="ovl-head">Activity<span class="spacer"></span>
+      <button class="btn btn-secondary btn-xs" onclick="closeActivity()">Close</button></div>
+    <div id="activity-list"></div>
+  </div>
+</div>
+
+<script>
+// ── W5 command palette (EPIC #244 item 6) ───────────────────────────────────
+// Client-only over the loaded TREE + existing actions; no new server surface.
+let _palItems = [], _palSel = 0;
+
+function _palBuildItems(q) {
+    const items = [];
+    allNodes().forEach(n => {
+        if (!n.instance_id) return;
+        const name = (n.display_name || n.label || n.agent_type || '') + '';
+        if (n.status === 'running') {
+            items.push({ label: name, hint: 'open', score: _palScore(q, name),
+                         run: () => { selectedId = n.instance_id;
+                                      slots[activeIdx] && slots[activeIdx].open(n);
+                                      renderTree(); } });
+            items.push({ label: name, hint: 'stop', score: _palScore(q, name + ' stop') - 1,
+                         run: () => bulkLifecycle([n.instance_id], 'stop') });
+        } else {
+            items.push({ label: name, hint: 'start', score: _palScore(q, name),
+                         run: () => bulkLifecycle([n.instance_id], 'start') });
+        }
+    });
+    [['1', 'Single pane'], ['2', 'Two panes'], ['3', 'Three panes'], ['4', '2\u00d72 grid']].forEach(([l, t]) => {
+        items.push({ label: 'Layout: ' + t, hint: 'layout',
+                     score: _palScore(q, 'layout ' + t), run: () => setLayout(l) });
+    });
+    items.push({ label: 'Activity', hint: 'view', score: _palScore(q, 'activity audit'),
+                 run: () => openActivity() });
+    items.push({ label: 'New agent\u2026', hint: 'dashboard',
+                 score: _palScore(q, 'new agent launch'),
+                 run: () => { window.location = '{{ url_for('dashboard.index') }}'; } });
+    return items.filter(i => i.score > -Infinity)
+                .sort((a, b) => b.score - a.score).slice(0, 12);
+}
+
+// Subsequence score: every query char must appear in order; earlier + denser
+// matches rank higher. Empty query matches everything (browse mode).
+function _palScore(q, text) {
+    q = (q || '').trim().toLowerCase();
+    if (!q) return 0;
+    const t = (text || '').toLowerCase();
+    let ti = 0, score = 100;
+    for (const ch of q) {
+        const idx = t.indexOf(ch, ti);
+        if (idx === -1) return -Infinity;
+        score -= (idx - ti);
+        ti = idx + 1;
+    }
+    return score;
+}
+
+function _palRender() {
+    const ul = document.getElementById('palette-list');
+    ul.innerHTML = '';
+    _palItems.forEach((it, i) => {
+        const li = document.createElement('li');
+        if (i === _palSel) li.className = 'sel';
+        // AGU-20(c): give AT the same selection the `.sel` class gives sighted
+        // users — role + id + aria-selected here, aria-activedescendant below.
+        li.id = 'pal-opt-' + i;
+        li.setAttribute('role', 'option');
+        li.setAttribute('aria-selected', i === _palSel ? 'true' : 'false');
+        const lbl = document.createElement('span');
+        lbl.className = 'p-label'; lbl.textContent = it.label;
+        const hint = document.createElement('span');
+        hint.className = 'p-hint'; hint.textContent = it.hint;
+        li.appendChild(lbl); li.appendChild(hint);
+        li.addEventListener('click', () => { closePalette(); it.run(); });
+        li.addEventListener('mousemove', () => { _palSel = i; _palRender(); });
+        ul.appendChild(li);
+    });
+    const inp = document.getElementById('palette-input');
+    if (inp) {
+        inp.setAttribute('aria-expanded', _palItems.length ? 'true' : 'false');
+        if (_palItems.length) inp.setAttribute('aria-activedescendant', 'pal-opt-' + _palSel);
+        else inp.removeAttribute('aria-activedescendant');
+    }
+}
+
+function _palRefresh() {
+    _palItems = _palBuildItems(document.getElementById('palette-input').value);
+    if (_palSel >= _palItems.length) _palSel = 0;
+    _palRender();
+}
+
+function openPalette() {
+    _palSel = 0;
+    document.getElementById('palette-ovl').classList.add('open');
+    const inp = document.getElementById('palette-input');
+    inp.value = '';
+    _palRefresh();
+    inp.focus();
+}
+function closePalette() {
+    document.getElementById('palette-ovl').classList.remove('open');
+}
+
+document.getElementById('palette-input').addEventListener('input', () => {
+    _palSel = 0; _palRefresh();
+});
+document.getElementById('palette-input').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); _palSel = Math.min(_palSel + 1, _palItems.length - 1); _palRender(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); _palSel = Math.max(_palSel - 1, 0); _palRender(); }
+    else if (e.key === 'Enter') { e.preventDefault();
+        const it = _palItems[_palSel]; if (it) { closePalette(); it.run(); } }
+    else if (e.key === 'Escape') { closePalette(); }
+});
+document.addEventListener('keydown', (e) => {
+    // Ctrl-K / Cmd-K opens; never while typing INTO the palette (handled
+    // above) — but deliberately even when a terminal has focus: the palette
+    // is the jump-between-agents gesture. Esc inside a terminal must keep
+    // reaching the PTY, so only the palette's own handler closes on Esc.
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        openPalette();
+        return;
+    }
+    // AGU-8(c): pane targeting had NO keyboard path — the active slot was set
+    // only by `mousedown`, and clicking a tree row opens into the ACTIVE slot,
+    // so a keyboard user could not choose which pane receives an agent (nor
+    // was drag-and-drop, the other targeting mechanism, reachable). Alt+1..4
+    // moves focus between panes. Alt is used because Escape must keep reaching
+    // the PTY and plain digits are terminal input.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
+        const i = Number(e.key) - 1;
+        if (slots[i]) { e.preventDefault(); setActive(i); slots[i].el.focus(); }
+        return;
+    }
+    // AGU-5: an un-maximize affordance that does not depend on finding the ⛶
+    // button again. Skipped while a terminal has focus — Esc belongs to the PTY
+    // there — and while the palette or an overlay is open (they own Escape).
+    if (e.key === 'Escape' && document.body.classList.contains('pane-maxed')) {
+        const inTerm = e.target && e.target.closest && e.target.closest('.pane-terminal');
+        const inOverlay = document.querySelector('.ovl.open');
+        if (!inTerm && !inOverlay) {
+            e.preventDefault();
+            slots.forEach(sl => sl.unmaximize());
+        }
+    }
+});
+
+// ── W5 activity overlay (EPIC #244 item 10) ─────────────────────────────────
+function openActivity() {
+    const host = document.getElementById('activity-list');
+    host.textContent = 'Loading\u2026';
+    document.getElementById('activity-ovl').classList.add('open');
+    fetch('/api/audit?limit=50', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => {
+            host.innerHTML = '';
+            const rows = (d && d.audit) || [];
+            if (!rows.length) { host.textContent = 'No activity yet.'; return; }
+            rows.forEach(r0 => {
+                const row = document.createElement('div');
+                row.className = 'act-row';
+                const when = document.createElement('span');
+                when.className = 'act-when';
+                try { when.textContent = new Date(r0.timestamp).toLocaleString(); }
+                catch (e) { when.textContent = r0.timestamp || ''; }
+                const what = document.createElement('span');
+                what.className = 'act-what'; what.textContent = r0.action || '';
+                const who = document.createElement('span');
+                who.textContent = r0.agent_type || '';
+                row.appendChild(when); row.appendChild(what); row.appendChild(who);
+                host.appendChild(row);
+            });
+        })
+        .catch(() => { host.textContent = 'Could not load activity.'; });
+}
+function closeActivity() {
+    document.getElementById('activity-ovl').classList.remove('open');
+}
+</script>
+</body>
+</html>

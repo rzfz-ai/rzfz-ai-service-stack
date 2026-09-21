@@ -1,0 +1,273 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# llm-worker-agent (#254) — per-node worker agent (profile: llm-worker-agent).
+# ------------------------------------------------------------------------------
+# Runs on each fleet node (incl. the master). Launches + supervises engine
+# containers (AMD llama.cpp / CUDA vLLM / CPU) per the manager's deployments,
+# and self-registers what it serves. It drives docker through the stack's
+# SCOPED docker-socket-proxy (DOCKER_HOST=tcp://docker-socket-proxy:2375) — NO
+# raw /var/run/docker.sock. GPU passthrough is applied per engine by the driver
+# (the AMD spec carries /dev/kfd + /dev/dri + video/render), not mounted here.
+#
+# On the master this is included in the top-level compose (shares the stack's
+# default network + docker-socket-proxy + the models volume). On a remote
+# worker the same file runs standalone, pointing DOCKER_HOST at that node's own
+# socket-proxy and LLM_MANAGER_URL at the master — but compose.thin.yml is the
+# PREFERRED remote form (NODE-13): it additionally wires the #585 CA bundle and
+# the node-scoped volume/network names. The four LOCAL-vs-REMOTE keys this file
+# used to omit (LLM_WORKER_ADVERTISE_ADDR, LLM_REGISTRY_URL,
+# LLM_WORKER_REGISTRY_USER/_PASSWORD) are now forwarded here too, empty-default,
+# so the standalone form documented above actually behaves as a remote node
+# instead of silently insisting it is co-located.
+#
+# The live runtime (real docker client + supervision/report loop) only arms
+# when LLM_WORKER_AGENT_RUNTIME=1 — set here; unset off-box so the app imports
+# clean. SECURITY: a new compose service → the release security review must
+# confirm the pin/socket-proxy scope before GA (pre-tag-check trips on this).
+# ==============================================================================
+services:
+  llm-worker-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # #1932: stamp the BUILDING box's stack version into the image, so a
+        # thin node that only ever RECEIVES this image can still say where it
+        # came from. Empty here is not a failure — the Dockerfile's own default
+        # (`unknown`) then applies, which is the honest answer.
+        RAZZFAZZ_IMAGE_VERSION: "${RAZZFAZZ_VERSION:-}"
+    image: razzfazz-llm-worker-agent:latest
+    profiles: ["llm-worker-agent"]
+    container_name: llm-worker-agent
+    restart: unless-stopped
+    networks:
+      - default
+      # #1016: reach the isolated docker-socket-proxy on docker-ctl
+      # (DOCKER_HOST above). This file is the MASTER-EMBEDDED form — a
+      # standalone thin node runs compose.thin.yml instead, whose node-local
+      # proxy lives on rzfz-node_default and needs no docker-ctl (rev-B,
+      # review F6: the earlier wording implied this file itself runs
+      # standalone, which it does not).
+      - docker-ctl
+    ports:
+      # Loopback-only host bind for operator debug; in-network the manager
+      # reaches it as llm-worker-agent:8090.
+      - "127.0.0.1:${LLM_WORKER_AGENT_PORT:-8090}:8090"
+    environment:
+      LLM_WORKER_AGENT_RUNTIME: "1"
+      HARDWARE: "${HARDWARE:-amd}"
+      # Reported to the manager so the console's Fleet detail shows the node's
+      # razzfazz.ai stack version (Slice A). Empty → "unknown" in the UI.
+      RAZZFAZZ_VERSION: "${RAZZFAZZ_VERSION:-}"
+      # #2219: the box's network mode reaches the node agent. Without it the
+      # agent defaults to "online", attempts a HuggingFace pull on an
+      # air-gapped box, and its refusal blames HuggingFace's missing digest for
+      # a purely local absence (journey B on 2026.09-rc9). With it, the agent's
+      # own offline branch answers "weights not present and offline mode".
+      RAZZFAZZ_NETWORK_MODE: "${RAZZFAZZ_NETWORK_MODE:-online}"
+      # Scoped socket-proxy (container create/start/stop/logs + images), never
+      # the raw socket. Override on a remote worker to that node's proxy.
+      DOCKER_HOST: "${LLM_WORKER_AGENT_DOCKER_HOST:-tcp://docker-socket-proxy:2375}"
+      # Where to self-register + the node auth key (matches the manager's).
+      LLM_MANAGER_URL: "${LLM_WORKER_AGENT_MANAGER_URL:-http://llm-manager:8080}"
+      LLM_MANAGER_NODE_KEY: "${LLM_MANAGER_NODE_KEY:-}"
+      # #207 per-worker command key (from enrollment). Empty → the node uses the
+      # shared node key for claim/result (fine while the manager is mode=allow).
+      LLM_WORKER_COMMAND_KEY: "${LLM_WORKER_COMMAND_KEY:-}"
+      # #1250a: the `master` default STAYS, deliberately. The two obvious
+      # alternatives are both worse. Defaulting to the container hostname would
+      # rename the embedded worker on every recreate (docker hands out a fresh
+      # random hostname), orphaning its manager row and its per-worker command
+      # key — the key is HMAC(node_key, name). A `:?` hard-fail (what
+      # compose.thin.yml does) cannot work here either: `rzfz init` brings the
+      # stack up BEFORE post-install resolves a name, and the agent has to
+      # start. So the invariant is enforced on the WRITER side instead:
+      # post-install's _llm_manager_enroll_embedded_worker resolves the name
+      # first, writes it to .env, re-exports it (a stale EMPTY export from
+      # load_env used to shadow the file here and silently render this default,
+      # producing an agent named `master` holding a key minted for the
+      # hostname → 401 forever), passes it explicitly on the recreate, and then
+      # verifies the worker actually registered.
+      LLM_WORKER_NAME: "${LLM_WORKER_NAME:-master}"
+      LLM_WORKER_ADDRESS: "${LLM_WORKER_ADDRESS:-llm-worker-agent}"
+      LLM_WORKER_REPORT_INTERVAL: "${LLM_WORKER_REPORT_INTERVAL:-30}"
+      # #1619: see compose.thin.yml — the lean beat (metrics + command claim)
+      # beside the 30 s full report. 0 disables it.
+      LLM_WORKER_FAST_BEAT_INTERVAL: "${LLM_WORKER_FAST_BEAT_INTERVAL:-3}"
+      # Engines mount this shared volume for weights; they join this network so
+      # the LiteLLM router resolves them by instance name.
+      # CRITICAL (#207): the worker-agent launches engines DIRECTLY via the docker
+      # socket, NOT through compose — so this value must be the REAL (resolved)
+      # volume name, not the compose KEY. The volume below pins an explicit
+      # name so the two always match; a bare "llm-node-models" here mounted an
+      # EMPTY, unprefixed volume into engines (≠ the compose-managed one that
+      # holds the weights) — models synced by the manager were invisible.
+      LLM_WORKER_MODELS_VOLUME: "${LLM_WORKER_MODELS_VOLUME:-razzfazz-stack_llm-node-models}"
+      LLM_WORKER_ENGINE_NETWORK: "${LLM_WORKER_ENGINE_NETWORK:-razzfazz-stack_default}"
+      # #549 R2: the ONE registry this node may pull runner images from — the
+      # master's Zot. Forwarded here because this block is an ALLOW-LIST (#319):
+      # an unforwarded key is unsettable, and this one gates what deploy_runner
+      # will pull. Empty → the built-in default (llm-registry:5000).
+      LLM_WORKER_RUNNER_REGISTRY: "${LLM_WORKER_RUNNER_REGISTRY:-}"
+      # #1677: the coordinate the HOST daemon can resolve. An empty
+      # LLM_WORKER_RUNNER_REGISTRY now means "the hub domain" — which is what
+      # config/.env.example has documented all along.
+      LLM_HUB_DOMAIN: "${LLM_HUB_DOMAIN:-}"
+      # NODE-13: the four keys that decide whether this agent behaves as a
+      # co-located (LOCAL) or a routed (REMOTE) node. This block is an ALLOW-LIST
+      # (#319), so leaving them out did not merely leave them undocumented — it
+      # made them UNSETTABLE. A worker brought up with this module file (which
+      # the header above advertises as a supported remote form) therefore always
+      # reported as LOCAL — registry_is_local() keys on LLM_WORKER_ADVERTISE_ADDR —
+      # pinned its registry base to http://llm-registry:5000 whatever the
+      # operator configured, never attached the #571 credential, and never armed
+      # the #262 relay. Empty-default, exactly like every other knob here, so a
+      # master's embedded agent is bit-for-bit unchanged: empty ADVERTISE_ADDR
+      # still means LOCAL, and LOCAL still ignores LLM_REGISTRY_URL by design.
+      # compose.thin.yml remains the PREFERRED remote form (it also wires the
+      # #585 CA bundle and the node-scoped volume names).
+      LLM_WORKER_ADVERTISE_ADDR: "${LLM_WORKER_ADVERTISE_ADDR:-}"
+      LLM_REGISTRY_URL: "${LLM_REGISTRY_URL:-}"
+      LLM_WORKER_REGISTRY_USER: "${LLM_WORKER_REGISTRY_USER:-}"
+      LLM_WORKER_REGISTRY_PASSWORD: "${LLM_WORKER_REGISTRY_PASSWORD:-}"
+      # #319 These are read by the worker-agent code but were absent from this
+      # block, and this block is an ALLOW-LIST: a key not named here never
+      # reaches the process, whatever the operator writes in .env. So they were
+      # not merely undocumented — they were unsettable, including the one the
+      # GPU double-booking issue calls "the" lever for reserving VRAM headroom.
+      # Empty is the documented "unset" for every one of them.
+      #
+      # Reserve host/VRAM headroom when GPUStack shares the GPU (runtime.py).
+      LLM_WORKER_MEM_BUDGET_GB: "${LLM_WORKER_MEM_BUDGET_GB:-}"
+      # Numeric host GIDs granting a non-root engine access to the GPU devices
+      # (drivers/amd.py). Comma-separated; empty → engine runs as root.
+      RAZZFAZZ_GPU_GROUP_GIDS: "${RAZZFAZZ_GPU_GROUP_GIDS:-}"
+      # #331 repin an engine image without a code change. Empty → the built-in
+      # default for that hardware class (see app/drivers/images.py).
+      RAZZFAZZ_ENGINE_IMAGE_AMD: "${RAZZFAZZ_ENGINE_IMAGE_AMD:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CPU: "${RAZZFAZZ_ENGINE_IMAGE_CPU:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CUDA: "${RAZZFAZZ_ENGINE_IMAGE_CUDA:-}"
+      # CUDA llama.cpp runner (GGUF on NVIDIA via llama-server, no GPUStack).
+      RAZZFAZZ_ENGINE_IMAGE_CUDA_LLAMACPP: "${RAZZFAZZ_ENGINE_IMAGE_CUDA_LLAMACPP:-}"
+      # #1436: the GB10 (cuda-gb10, DGX Spark class) images — vLLM from NGC and
+      # the CUDA-13/121a llama.cpp runner. Defined in images.py since #1329 but
+      # never forwarded, so the "repin without a code change" was unreachable
+      # on exactly the boxes it was written for.
+      RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10: "${RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10_LLAMACPP: "${RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10_LLAMACPP:-}"
+      # #1517 (E5) rev-B: the compute-capability override. `select_driver` asks
+      # the GPU which runner it can execute; this key is the documented — and
+      # ONLY — way to correct a box whose GPU we have not mapped, and it is
+      # what UnknownCudaCapability's message tells the operator to set. An
+      # `environment:` block is an ALLOW-LIST (#319/#1436): without this line
+      # the key never reaches the process and the escape hatch does not exist
+      # on a real box. That is the #1436 defect verbatim, four lines under the
+      # comment describing it.
+      RAZZFAZZ_CUDA_COMPUTE_CAP: "${RAZZFAZZ_CUDA_COMPUTE_CAP:-}"
+      # #1456: per-box override for the GB10 memory fraction. An
+      # `environment:` block is an allow-list (#319) — without this line the
+      # key the driver reads never reaches the process, and the documented
+      # escape hatch would not exist on a real box.
+      # Engine this node ADVERTISES + runs. A cuda box can serve vLLM or
+      # llama.cpp; set to "llamacpp" on a Blackwell box serving GGUF so the
+      # fleet view + version probe + driver selection match reality. Empty →
+      # per-hardware default (cuda→vllm) so existing boxes are unchanged.
+      RAZZFAZZ_NODE_ENGINE: "${RAZZFAZZ_NODE_ENGINE:-}"
+      # #1517 rev-B: the llama.cpp binary name inside the runner image (EMPTY =
+      # llama-server). Read by the AMD and CUDA llama.cpp drivers and, until
+      # now, forwarded by neither compose — the #319 allow-list class again.
+      RAZZFAZZ_LLAMACPP_BINARY: "${RAZZFAZZ_LLAMACPP_BINARY:-}"
+      # #971 Engine supervision windows. The code read all four from the env
+      # already, but this block is an ALLOW-LIST — so none of them reached the
+      # process and every one was UNSETTABLE, the same shape as the #319 keys
+      # above. That made the readiness window in particular a fleet-wide
+      # constant: a large model on the CUDA/vLLM path spends minutes in vLLM
+      # profiling + CUDA-graph capture before /health answers, and a node whose
+      # model needed longer than the default had no way to say so — the
+      # supervisor killed the engine mid-profiling, forever.
+      #
+      # Defaults here are NON-EMPTY on purpose. An empty-default interpolation
+      # (the ":-" form with nothing after it) sets the EMPTY STRING,
+      # os.environ.get(K, "300") returns "" for a variable that
+      # exists-but-is-empty, and float("") raises — at startup, on every node.
+      # The code tolerates it now (runtime.py::_positive_env_number); a config
+      # file should not depend on that.
+      #
+      # First-boot /health window before a load counts as failed, seconds.
+      RZFZ_ENGINE_READINESS_GRACE: "${RZFZ_ENGINE_READINESS_GRACE:-300}"
+      # #316 self-heal: cooldown before a circuit-broken engine is half-opened,
+      # and the bound on those attempts.
+      RZFZ_ENGINE_RECOVER_AFTER: "${RZFZ_ENGINE_RECOVER_AFTER:-180}"
+      RZFZ_ENGINE_MAX_RECOVER_ATTEMPTS: "${RZFZ_ENGINE_MAX_RECOVER_ATTEMPTS:-3}"
+      # NODE-16: per-instance /health probe timeout on the report loop, seconds.
+      RZFZ_ENGINE_PROBE_TIMEOUT: "${RZFZ_ENGINE_PROBE_TIMEOUT:-2}"
+      # #283: drivers/base.py::_inject_corporate_proxy reads BOTH of these
+      # straight from this process's os.environ to forward the corporate
+      # proxy/CA onto every engine it spawns via the docker socket. Neither is
+      # emitted by the Level-C corporate-proxy overlay (that overlay only sets
+      # HTTP(S)_PROXY/NO_PROXY + the six CA vars, as literal values, on the
+      # services in EGRESS_ALLOWLIST) — both live only in .env — so this
+      # explicit allow-list (#319) is the ONLY path either can reach the
+      # process by. RAZZFAZZ_CORPORATE_PROXY gates the whole injection
+      # (!= "1" => no-op); STACK_HOST_PATH anchors the CA bind source on the
+      # HOST filesystem (the daemon behind docker-socket-proxy resolves it
+      # there, not inside this container). Do NOT add env_file: here instead —
+      # that would undo the #319 explicit-allow-list decision.
+      RAZZFAZZ_CORPORATE_PROXY: "${RAZZFAZZ_CORPORATE_PROXY:-}"
+      STACK_HOST_PATH: "${STACK_HOST_PATH:-}"
+      # #817: where THIS container can read the stack repo, for the #291
+      # dev-version stamp (runtime.py::resolve_stack_version). A literal, not a
+      # "${...}" interpolation, on purpose: the value is not an operator choice
+      # — it must match the bind target below, and this block is an ALLOW-LIST
+      # (#319), so an unforwarded key made the whole #291 feature a silent
+      # no-op (`if not stack_root: return None`).
+      STACK_ROOT: "/stack"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      # references the compose KEY (resolves to the pinned real name below)
+      - "llm-node-models:/models"
+      # #817 — the repo metadata the #291 stamp needs, and NOTHING else.
+      #
+      # #291 reports `git describe` instead of the stale `RAZZFAZZ_VERSION` on a
+      # dev build. Correct, tested — and inert on every box, because the agent
+      # had no repo to describe. This is the mount that makes it fire.
+      #
+      # Only `.git`, not the repo root: `..:/stack:ro` (the shape
+      # core/compose.yml uses for backup-management, which genuinely needs to
+      # read `.env`) would hand this container every secret in `.env` /
+      # `.env.dify` to answer a version question. The socket-proxy scope means
+      # that is no NEW capability, but "reachable another way" is not a reason
+      # to write it into the config file.
+      #
+      # Relative to THIS file (compose `include` resolves an included file's
+      # relative paths against its own directory — same as
+      # `../../certs/caddy-ca.pem` in modules/chat/compose.yml), so it is
+      # correct both as a module include and standalone with `-f`.
+      #
+      # Honest caveat: on a box installed WITHOUT a git checkout (init.sh
+      # guards its own git work with `[ -d .git ]`, so that is a supported
+      # state) the daemon creates an empty `.git` directory here. Git does not
+      # mistake an empty `.git` for a repo, so `git describe` still returns
+      # nothing and the agent still reports the `.env` version — the #291
+      # fallback branch, unchanged. `create_host_path: false` was rejected: it
+      # would turn "no git checkout" into "worker-agent will not start".
+      - "../../../.git:/stack/.git:ro"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  llm-node-models:
+    # Pin the REAL volume name so socket-launched engines and the worker-agent's
+    # own /models mount reference the SAME volume regardless of project name.
+    name: razzfazz-stack_llm-node-models
+
+networks:
+  # #1016 — isolated control-plane net for the socket proxy. On the master this
+  # merges with core/compose.yml's identical name-keyed declaration; standalone
+  # it stands alone (internal, empty apart from this agent).
+  docker-ctl:
+    name: docker-ctl
+    driver: bridge
+    internal: true

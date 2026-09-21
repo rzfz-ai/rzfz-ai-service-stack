@@ -1,0 +1,181 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse config overrides for the razzfazz observability profile.
+  Mounted as /etc/clickhouse-server/config.d/razzfazz-overrides.xml at boot.
+
+  Four responsibilities:
+   1. Memory caps — keep ClickHouse within the compose mem_limit:6g budget
+      (bumped from 2g in 2026-05-17 hotfix; see compose.yml comment).
+      ClickHouse by default sizes its caches based on full host RAM, which
+      blows past the cgroup limit on first heavy query.
+   2. Per-query + per-user memory caps (2026-05-17 hotfix) — prevent one
+      runaway query from OOM-killing the whole container.
+   3. Merge backpressure (2026-05-17 hotfix) — tighter parts_to_*_insert
+      thresholds so OpenLIT pauses inserts before merge debt accumulates,
+      preventing the ~300% CPU pinning observed on prod 2026-05-17.
+   4. Backup disk — declare a named "backups" disk pointing at
+      /var/lib/clickhouse/backups (mounted as the clickhouse-backup named
+      volume in compose). Used by `BACKUP TO Disk('backups', ...)` from
+      core/backup/pre-backup.sh; results are picked up by docker-volume-backup.
+-->
+<clickhouse>
+    <!-- Memory caps — half of allocated RAM goes to query workspace -->
+    <max_server_memory_usage_to_ram_ratio>0.5</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>209715200</mark_cache_size>          <!-- 200 MB -->
+    <uncompressed_cache_size>209715200</uncompressed_cache_size>  <!-- 200 MB -->
+    <!-- 24.12 added two RAM-sized caches (primary_index, index_mark); without
+         caps they default to ~1 GiB each on a 2 GiB cgroup, blowing the budget
+         and freezing the server during startup. -->
+    <primary_index_cache_size>104857600</primary_index_cache_size>   <!-- 100 MB -->
+    <index_mark_cache_size>104857600</index_mark_cache_size>         <!-- 100 MB -->
+    <!--
+      Do NOT cap max_thread_pool_size below the upstream default (10000).
+      A previous override of 128 caused AsyncLoader to deadlock at
+      "Wait load job 'startup Atomic database system'" on multi-core hosts:
+      ClickHouse pre-allocates a chain of synchronisation jobs that each
+      need their own pool slot, and 128 is too small to satisfy the chain
+      on >=16-core machines, so the server hangs forever before opening
+      the HTTP/native listeners. Memory caps above are sufficient to keep
+      the container within the 2g cgroup; threading does not need shrinking.
+    -->
+    <!-- <max_thread_pool_size>128</max_thread_pool_size> -->
+
+    <!-- 2026-05-17 follow-up: per-query memory caps were originally placed
+         here but ClickHouse rejects them at top-level (Code 137:
+         UNKNOWN_ELEMENT_IN_CONFIG — they're user-profile settings, must
+         live in users.d under <profiles><default>, not config.d). Removed
+         in this revision; if we want them, add a separate users.d/
+         override file. The 6 GiB cgroup × 0.5 ratio (3 GiB engine budget)
+         plus the merge_tree backpressure below are the real value of
+         this hotfix; per-query caps are nice-to-have, not essential. -->
+
+    <!-- 2026-05-17 hotfix: merge backpressure.
+         OpenLIT writes OTel traces continuously → many small parts.
+         Live prod state on 2026-05-17: 316 PartsActive / 304 PartsCompact
+         + ~300% CPU constantly merging. ClickHouse defaults
+         (parts_to_throw_insert=3000) let the queue grow huge before
+         pushing back on OpenLIT — by then merges are far behind +
+         CPU saturated. Tighter thresholds (300 throw / 150 delay)
+         pause OpenLIT's insert earlier, giving merges room to catch
+         up. Recommended ratio for high-write OLTP-style workloads
+         per ClickHouse docs. -->
+    <merge_tree>
+        <parts_to_delay_insert>150</parts_to_delay_insert>
+        <parts_to_throw_insert>300</parts_to_throw_insert>
+        <max_delay_to_insert>3</max_delay_to_insert>
+        <!-- 2026.08 disk-fill fix (#193/#139): make retention actually FREE
+             disk, promptly and cheaply.
+             * ttl_only_drop_parts=1 — expire whole parts by dropping them
+               rather than rewriting each part row-by-row. Row-level TTL
+               deletes leave the on-disk part until the next full merge, so
+               expired data can linger (and keep occupying disk) for a long
+               time on a low-churn table; dropping whole expired parts
+               reclaims space immediately.
+             * merge_with_ttl_timeout=900 — evaluate TTL every 15 min
+               (default 14400s = 4 h) so expired traces are pruned promptly
+               instead of accumulating for hours between TTL merges. -->
+        <ttl_only_drop_parts>1</ttl_only_drop_parts>
+        <merge_with_ttl_timeout>900</merge_with_ttl_timeout>
+
+        <!-- #2270: THE MERGE CEILING MUST NOT EXCEED THE MEMORY BUDGET.
+             ClickHouse defaults max_bytes_to_merge_at_max_space_in_pool to
+             150 GiB, sized for a dedicated host. We cap the engine at
+             mem_limit(6g) x max_server_memory_usage_to_ram_ratio(0.5) = 3 GiB,
+             so the server was free to SELECT a merge it could never FINISH.
+             Measured on the demo box 2026-09-17: a merge of 11 text_log parts
+             (4.44 GiB of input) died with
+
+               Code: 241 ... (total) memory limit exceeded: would use 2.50 GiB,
+               current RSS: 3.00 GiB, maximum: 3.00 GiB (MEMORY_LIMIT_EXCEEDED)
+
+             and was rescheduled forever — 12,585 failures/hour, one core
+             pinned on an otherwise idle box. The failure text is written INTO
+             system.text_log, so each retry made the next attempt's input
+             larger: a loop that feeds itself.
+             A TTL cannot break that loop, which is why #292/#868/#872 did not
+             hold: TTL cleanup is ITSELF a merge, and merges are what fail.
+             1 GiB keeps every merge at roughly a third of the engine budget,
+             and it applies to EVERY MergeTree table on the box - the OpenLIT
+             otel_* tables had exactly the same exposure, not just the system
+             logs. Parts simply stop growing past 1 GiB; with daily partitions
+             and ttl_only_drop_parts above, retention still reclaims promptly.
+             tests/unit/consistency/test_2270_clickhouse_merge_ceiling.py keeps
+             this value and the compose mem_limit from drifting apart again. -->
+        <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool>
+    </merge_tree>
+
+    <!-- 2026.08 SYSTEM-LOG runaway fix. ClickHouse's OWN internal logs
+         (trace_log/text_log/metric_log/asynchronous_metric_log/query_log/…) had
+         NO retention and grew unbounded — on a staging box that wasn't even
+         being queried, trace_log reached 1.4 BILLION rows / 22 GiB and the
+         server burned CPU perpetually MERGING these logs ("load without use",
+         recurring). The earlier hotfixes bounded OpenLIT's OTel tables, never
+         these. Give every system log a short TTL so parts drop promptly
+         (ttl_only_drop_parts above), and slow the two per-second metric logs.
+         trace_log is additionally starved at the source by disabling the query
+         AND memory profilers (see clickhouse-users.xml). These are
+         ClickHouse-internal diagnostics — NOT the OpenLIT observability data. -->
+    <!-- #868: server-level memory-profiler off. The per-profile
+         memory_profiler_step=0 (clickhouse-users.xml) covers per-query sampling;
+         total_memory_profiler_step is the SERVER allocation-sampler that also
+         writes trace_log (trace_type Memory) regardless of profile. Both must be
+         0 or trace_log keeps re-growing under continuous OTEL ingest. -->
+    <total_memory_profiler_step>0</total_memory_profiler_step>
+    <total_memory_tracker_sample_probability>0</total_memory_tracker_sample_probability>
+    <!-- #2270: partition the system logs BY DAY. ClickHouse defaults them to
+         PARTITION BY toYYYYMM(event_date) - monthly - so a merge combines many
+         days into a single part, and ttl_only_drop_parts=1 can only drop a part
+         once its NEWEST row has expired. Measured on the demo box: partitions
+         202608 (6 parts / 585 MiB) and 202609 (19 parts / 5.24 GiB) with a
+         2-day TTL that had reclaimed nothing. Daily partitions keep every part
+         inside one day, so an expired day is dropped whole and cheaply.
+         NB: changing a system log's schema makes ClickHouse rename the existing
+         table aside (text_log -> text_log_0, _1, ...) and start a new one. Those
+         renamed generations are never read and never reclaimed - the demo box
+         carried four of them. configs/clickhouse-init.sh now drops them. -->
+    <trace_log><database>system</database><table>trace_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></trace_log>
+    <text_log><database>system</database><table>text_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><level>warning</level><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></text_log>
+    <query_log><database>system</database><table>query_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_log>
+    <query_thread_log><database>system</database><table>query_thread_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></query_thread_log>
+    <query_views_log><database>system</database><table>query_views_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></query_views_log>
+    <part_log><database>system</database><table>part_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></part_log>
+    <processors_profile_log><database>system</database><table>processors_profile_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></processors_profile_log>
+    <!-- (opentelemetry_span_log omitted on purpose: its schema keys on
+         finish_date, not event_date, so an event_date TTL is invalid there and
+         aborts system-log init. It's ClickHouse-self tracing we don't use.) -->
+    <metric_log><database>system</database><table>metric_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><collect_interval_milliseconds>30000</collect_interval_milliseconds><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></metric_log>
+    <asynchronous_metric_log><database>system</database><table>asynchronous_metric_log</table><partition_by>toYYYYMMDD(event_date)</partition_by><collect_interval_milliseconds>30000</collect_interval_milliseconds><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></asynchronous_metric_log>
+
+    <!-- Storage: the native-BACKUP target disk PLUS a hard disk-full backstop
+         on the data disk. -->
+    <storage_configuration>
+        <disks>
+            <backups>
+                <type>local</type>
+                <path>/var/lib/clickhouse/backups/</path>
+            </backups>
+            <!-- DISK-FULL BACKSTOP (2026.08, #139). Override the implicit
+                 `default` data disk to reserve 50 GiB of host free space:
+                 when a write/merge would drop free space below this,
+                 ClickHouse refuses it ("Cannot reserve … not enough space")
+                 instead of consuming the disk to 100%. This deliberately
+                 sacrifices observability writes to protect the core stack —
+                 on 2026-08-03 an unbounded OpenLIT trace store filled the
+                 host disk 100%, which pushed Valkey into MISCONF (stop-writes-
+                 on-bgsave-error) and took the whole stack down. With this
+                 guard that cascade is impossible even if BOTH TTL mechanisms
+                 (exporter ttl + init ALTER) were somehow misconfigured: the
+                 worst case is "OpenLIT stops recording new traces", never
+                 "the box goes down". keep_free_space_bytes is evaluated
+                 against actual filesystem free space, so it also protects the
+                 stack when the disk is being consumed by something else. -->
+            <default>
+                <keep_free_space_bytes>53687091200</keep_free_space_bytes>
+            </default>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+        <allowed_path>/var/lib/clickhouse/backups/</allowed_path>
+    </backups>
+</clickhouse>

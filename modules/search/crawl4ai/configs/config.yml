@@ -1,0 +1,59 @@
+# crawl4ai server config — bind-mounted read-only at /app/config.yml
+# Reference: https://docs.crawl4ai.com/core/docker-deployment/
+#
+# ⚠ THIS FILE REPLACES THE IMAGE'S OWN /app/config.yml. It does not extend it.
+#
+# That is the whole reason this file has content again. It used to be `{}` with
+# a note saying an empty document "loads fine and falls back to the image's
+# built-in defaults". Measured against unclecode/crawl4ai:0.9.0, that is true in
+# letter and wrong in effect:
+#
+#   utils.py::load_config() deep-merges the file over DEFAULT_CONFIG — the
+#   defaults compiled into the CODE, not the values in the config.yml the image
+#   ships. The two differ on exactly the key that decides whether the server
+#   starts at all:
+#
+#       DEFAULT_CONFIG['app']['host']  = "0.0.0.0"     (code)
+#       image /app/config.yml app.host = "127.0.0.1"   (file we overwrote)
+#
+#   server.py::_resolve_auth() then reads config['app']['host'], sees a
+#   NON-loopback bind with no CRAWL4AI_API_TOKEN, and calls sys.exit(1).
+#   supervisord respawns gunicorn, which exits again — a crash-loop that never
+#   reaches healthy. Reproduced directly: with this file as `{}` the container
+#   crash-loops; with the mount removed it logs "Application startup complete".
+#
+# So: any section we omit here silently reverts to the code default. Spell out
+# what the deployment depends on. (#191)
+
+app:
+  title: "Crawl4AI API"
+  version: "1.0.0"
+  # 0.0.0.0 is REQUIRED, not a relaxation: Caddy reaches this container over the
+  # docker network (crawl4ai:11235), and the published host port maps to the
+  # container's eth0 address — neither can reach a loopback-only listener. The
+  # image's 127.0.0.1 default assumes you run it standalone.
+  #
+  # A non-loopback bind obliges us to supply CRAWL4AI_API_TOKEN (that is
+  # _resolve_auth's contract, and it is the right contract). It is minted by
+  # razzfazz-init.sh, razzfazz-upgrade.sh and the Config-Portal profile
+  # provisioner, so all three enable paths satisfy it.
+  host: "0.0.0.0"
+  # Pinned so the container port is stable regardless of what CRAWL4AI_PORT
+  # (the HOST-side port) happens to be. The entrypoint reads CRAWL4AI_PORT for
+  # the gunicorn bind, and compose's env_file passes the host value straight in
+  # — see the explicit override in compose.yml.
+  port: 11235
+  reload: false
+  workers: 1
+  timeout_keep_alive: 300
+
+observability:
+  health_check:
+    # The auth gate's public-path set is {this endpoint, "/token"} — everything
+    # else needs a Bearer credential. Both the container healthcheck and Caddy's
+    # unauthenticated exemption MUST use this exact path; they targeted
+    # /monitor/health, which is not it, and got 401 (measured).
+    endpoint: "/health"
+  prometheus:
+    enabled: true
+    endpoint: "/metrics"

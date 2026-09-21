@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block page_title %}Domain & TLS{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Domain & TLS</h1>
+    <p class="lede">Configure domain name and TLS certificate settings</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+<form method="POST" enctype="multipart/form-data" class="settings-form">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <h2 class="section">Domain</h2>
+    <div class="card">
+        <div class="field">
+            <label>Main domain</label>
+            <input type="text" name="domain" value="{{ config.domain }}" placeholder="example.com" required>
+            <p class="hint">
+                Changing the domain updates all service URLs (chat.&lt;domain&gt;, dify.&lt;domain&gt;, etc.) and restarts Caddy. Existing TLS certificates for the old domain will be invalidated.
+            </p>
+        </div>
+    </div>
+
+    <h2 class="section">TLS Mode</h2>
+    <div class="card">
+        <div class="field">
+            <label><input type="radio" name="tls_mode" value="letsencrypt" {% if config.tls_mode == 'letsencrypt' %}checked{% endif %} onchange="toggleTlsSections()"> Let's Encrypt (automatic certificates)</label>
+        </div>
+        <div class="field">
+            <label><input type="radio" name="tls_mode" value="selfsigned" {% if config.tls_mode == 'selfsigned' %}checked{% endif %} onchange="toggleTlsSections()"> Self-signed (internal/dev)</label>
+        </div>
+        <div class="field">
+            <label><input type="radio" name="tls_mode" value="certificate" {% if config.tls_mode == 'certificate' %}checked{% endif %} onchange="toggleTlsSections()"> Custom certificate (upload wildcard cert)</label>
+        </div>
+    </div>
+
+    <!-- Let's Encrypt options -->
+    <div id="section-letsencrypt" style="{% if config.tls_mode != 'letsencrypt' %}display:none{% endif %}">
+        <h2 class="section">Let's Encrypt</h2>
+        <div class="card">
+            <div class="field">
+                <label>Admin email (for certificate notifications)</label>
+                <input type="email" name="letsencrypt_email" value="{{ config.letsencrypt_email }}" placeholder="admin@example.com">
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom certificate upload -->
+    <div id="section-certificate" style="{% if config.tls_mode != 'certificate' %}display:none{% endif %}">
+        <h2 class="section">Custom Certificate</h2>
+        <div class="card">
+            {% if config.cert_status %}
+            <div class="badge ok" style="margin-bottom:0.75rem;font-size:0.75rem;text-transform:none;display:block;padding:0.5rem 0.75rem">
+                Current certificate: <strong>{{ config.cert_status.issuer or 'Unknown issuer' }}</strong><br>
+                Expires: {{ config.cert_status.expiry or 'Unknown' }}
+                {% if config.cert_status.days_remaining is not none %}
+                ({{ config.cert_status.days_remaining }} days remaining)
+                {% endif %}
+            </div>
+            {% endif %}
+            <div class="field">
+                <label>Certificate file (PEM)</label>
+                <input type="file" name="cert_file" accept=".pem,.crt,.cer">
+                <p class="hint">Wildcard certificate for *.{{ config.domain }} (full chain including intermediates)</p>
+            </div>
+            <div class="field">
+                <label>Private key file (PEM)</label>
+                <input type="file" name="key_file" accept=".pem,.key">
+            </div>
+        </div>
+    </div>
+
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn primary">Save & Apply</button>
+    </div>
+</form>
+
+<script>
+function toggleTlsSections() {
+    const mode = document.querySelector('input[name="tls_mode"]:checked').value;
+    document.getElementById('section-letsencrypt').style.display = mode === 'letsencrypt' ? '' : 'none';
+    document.getElementById('section-certificate').style.display = mode === 'certificate' ? '' : 'none';
+}
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+# NODE-18: the image is built with `COPY . .`, so without this file the whole
+# build context lands in /app — compose files, README, test caches — alongside
+# the code the agent actually runs. Nothing here is read at runtime; shipping it
+# only widens what an arbitrary write into /app has to work with.
+compose.yml
+compose.thin.yml
+README.md
+.dockerignore
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.git
+.gitignore

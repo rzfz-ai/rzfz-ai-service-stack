@@ -1,0 +1,42 @@
+version: 1
+metadata:
+  name: "Module - Paperclip"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # Provider: Caddy Forward Auth for Paperclip
+  # ==========================================
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: "Caddy Forward Auth Provider for Paperclip"
+    attrs:
+      client_id: "paperclip_app_client_id"
+      client_secret: "${PAPERCLIP_CLIENT_SECRET}"
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      external_host: "https://${PAPERCLIP_DOMAIN}"
+      mode: forward_single
+      intercept_header_auth: true
+      access_token_validity: "hours=24"
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: Proxy outpost"]]
+
+  # ==========================================
+  # Application: Paperclip
+  # ==========================================
+  - model: authentik_core.application
+    identifiers:
+      slug: paperclip
+    attrs:
+      name: Paperclip
+      group: "1 Workspace"
+      provider: !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Paperclip"]]
+      meta_launch_url: "blank://blank"
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_paperclip_icon.png"
+      meta_description: "Open-source AI company orchestration — hire AI employees, set goals, automate your business"
+      meta_publisher: "paperclipai"
+      open_in_new_tab: true
+      policy_engine_mode: any

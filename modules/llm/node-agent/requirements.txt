@@ -1,0 +1,18 @@
+# llm-worker-agent (Phase-2) — runtime deps (#254). Py3.14-verified.
+fastapi==0.141.*
+uvicorn[standard]==0.52.*
+httpx==0.28.*
+# Engine-container control (P2-A1 drivers). Imported LAZILY only when a real
+# docker client is wired in (socket mount + hardware class land with the
+# node deploy) — never at app import, so off-box import stays clean.
+docker==7.1.*
+# Relay client (#262 Task 7/9). Imported LAZILY by
+# relay_client._default_connect, same off-box-import-stays-clean rule as
+# `docker` above. >=13 for the `additional_headers=` kwarg on
+# `websockets.connect` (renamed from `extra_headers` in 13.0) — the node
+# dials with a Bearer node-key header, so the older kwarg name would fail
+# at call time, not at import time. Upper-bounded like the other deps in
+# this file (fastapi/uvicorn/httpx/docker are all bounded): 12→13 already
+# broke this exact API once, so an uncapped major is a rebuild-time break
+# risk rather than a validated-behavior guarantee.
+websockets>=13,<14

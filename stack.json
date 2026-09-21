@@ -1,0 +1,2020 @@
+{
+  "schema_version": 1,
+  "stack_version": "2026.07-ga.9",
+  "generated": "2026-06-16",
+  "maintainer": "razzfazz.ai GmbH — Member of SEQIS Group",
+  "legend": {
+    "tiers": {
+      "core": "Always-on foundation; runs unconditionally, cannot be disabled.",
+      "production": "Supported, GA-quality, validated each release.",
+      "experimental": "Opt-in; functional but still evolving."
+    },
+    "networks": {
+      "default": "Bridge network all services share; addressed by container name via Docker DNS.",
+      "ssrf_proxy_network": "Internal-only network for SSRF-isolated outbound HTTP (Dify code/HTTP nodes via Caddy:8195)."
+    },
+    "edge": "Caddy (ports 80/443) is the sole external entry point; every user-facing UI is gated by Authentik SSO forward-auth."
+  },
+  "modules": {
+    "core": {
+      "name": "Core Infrastructure",
+      "category": "Core",
+      "tier": "core",
+      "origin": "AT",
+      "license": "mixed",
+      "edition": "mixed",
+      "github": null,
+      "subdomains": [
+        "auth",
+        "setup",
+        "config",
+        "help",
+        "license",
+        "backup"
+      ],
+      "containers": [
+        {
+          "name": "caddy",
+          "image": "razzfazz-caddy (built)",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/caddyserver/caddy"
+        },
+        {
+          "name": "postgres",
+          "image": "pgvector/pgvector:pg17",
+          "license": "upstream:PostgreSQL",
+          "edition": "bundled",
+          "built_from": "https://github.com/pgvector/pgvector"
+        },
+        {
+          "name": "authentik-server",
+          "image": "ghcr.io/goauthentik/server",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/goauthentik/authentik"
+        },
+        {
+          "name": "authentik-worker",
+          "image": "ghcr.io/goauthentik/server",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/goauthentik/authentik"
+        },
+        {
+          "name": "valkey",
+          "image": "valkey/valkey",
+          "license": "upstream:BSD-3-Clause",
+          "edition": "bundled"
+        },
+        {
+          "name": "smtp-relay",
+          "image": "boky/postfix",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/bokysan/docker-postfix"
+        },
+        {
+          "name": "backup-service",
+          "image": "offen/docker-volume-backup",
+          "license": "upstream:MPL-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/offen/docker-volume-backup"
+        },
+        {
+          "name": "razzfazz-config",
+          "image": "razzfazz-config (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "razzfazz-help",
+          "image": "razzfazz-help (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "razzfazz-licenses",
+          "image": "razzfazz-licenses (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "razzfazz-backup-management",
+          "image": "razzfazz-backup-management (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "razzfazz-start-portal",
+          "image": "razzfazz-start-portal (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "mcp-manager",
+          "image": "razzfazz-mcp-manager (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "docker-socket-proxy",
+          "image": "tecnativa/docker-socket-proxy",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/Tecnativa/docker-socket-proxy"
+        },
+        {
+          "name": "autoheal",
+          "image": "willfarrell/autoheal",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/willfarrell/docker-autoheal"
+        }
+      ],
+      "purpose": "The always-on foundation every other module builds on. Caddy is the sole\nexternal entry point — it terminates TLS, reverse-proxies every subdomain,\nand enforces Authentik SSO via forward-auth (plus an internal SSRF proxy on\n:8195). Authentik provides identity, SSO, OIDC and group-based access\ncontrol. PostgreSQL (pgvector) is the shared relational + vector database\nwith a separate tenant DB per service. Valkey is the shared cache / task\nqueue. A Postfix relay sends mail; the backup service snapshots all Docker\nvolumes on a cron schedule (encrypted). docker-socket-proxy brokers a\nlocked-down Docker API to the few services that need it; autoheal restarts\nany container that goes unhealthy. The Setup, Config, Help, Licenses and\nBackup web UIs round out the operator surface.\n",
+      "user_facing_capabilities": [
+        "Single sign-on across every app with one identity (Authentik).",
+        "Self-service config portal to enable/disable modules, manage secrets, run backups, view governance checksums.",
+        "Guided first-time setup wizard and an offline documentation hub.",
+        "Automated encrypted nightly backups of all data volumes, with a restore UI.",
+        "Per-app access control via Authentik groups."
+      ],
+      "use_cases": [
+        "Admin enables a new module from the Config portal and it appears, SSO-gated, within minutes.",
+        "Operator rotates a secret or takes a governance checksum snapshot before an audit.",
+        "Recover a service from a nightly backup after a bad change."
+      ],
+      "dependencies": {
+        "required": [],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "all-services",
+          "purpose": "Caddy reverse-proxy + forward-auth for every gated subdomain"
+        },
+        {
+          "service": "postgres",
+          "purpose": "shared DB for Authentik + every tenant"
+        },
+        {
+          "service": "valkey",
+          "purpose": "Authentik cache/sessions; shared cache"
+        },
+        {
+          "service": "docker-socket-proxy",
+          "purpose": "brokered Docker API for config/backup/agent-manager/gpustack"
+        }
+      ],
+      "databases": [
+        "authentik_db"
+      ]
+    },
+    "chat": {
+      "name": "Chat (Open WebUI)",
+      "category": "AI & Chat",
+      "tier": "production",
+      "origin": "US",
+      "license": "upstream:BSD-3-Clause",
+      "edition": "bundled",
+      "built_from": "https://github.com/open-webui/open-webui",
+      "github": "https://github.com/open-webui/open-webui",
+      "subdomains": [
+        "chat"
+      ],
+      "containers": [
+        {
+          "name": "openwebui",
+          "image": "ghcr.io/open-webui/open-webui"
+        },
+        {
+          "name": "pipelines",
+          "image": "ghcr.io/open-webui/pipelines",
+          "license": "upstream:MIT",
+          "edition": "bundled"
+        }
+      ],
+      "purpose": "A full-featured, ChatGPT-like workspace for talking to the box's local LLMs.\nMulti-model conversations, retrieval-augmented generation (RAG) over uploaded\ndocuments, web search grounding via SearXNG, voice in/out via the speech\nservices, a custom \"pipelines\" extension layer, and multi-user access control\nthrough Authentik SSO. It is the primary day-to-day interface most users see.\n",
+      "user_facing_capabilities": [
+        "Chat with local models (qwen3.6 by default) — fully private, nothing leaves the box.",
+        "Upload documents (PDF, DOCX, etc.) and ask questions over them (RAG with reranking).",
+        "Ground answers in live web results via SearXNG web search.",
+        "Dictate by voice and have responses read back (STT/TTS).",
+        "Switch models per conversation; manage prompts, knowledge collections, and per-user chat history.",
+        "Extend behaviour with pipelines (filters, custom tools, observability hooks)."
+      ],
+      "use_cases": [
+        "Team AI assistant for drafting, summarising, translating, brainstorming.",
+        "Private document Q&A over contracts, manuals, or internal wikis.",
+        "Code review and generation against pasted snippets.",
+        "Research with web-grounded, citation-style answers."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "searxng",
+          "stts",
+          "observability"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference (OpenAI-compatible) + embeddings + reranker"
+        },
+        {
+          "service": "postgres",
+          "purpose": "chat history, RAG config, users (openwebui_db)"
+        },
+        {
+          "service": "searxng",
+          "purpose": "web search grounding (when enabled)"
+        },
+        {
+          "service": "speaches",
+          "purpose": "speech-to-text + text-to-speech (when enabled)"
+        },
+        {
+          "service": "openlit",
+          "purpose": "LLM call tracing via the global pipeline filter (when observability enabled)"
+        }
+      ],
+      "databases": [
+        "openwebui_db"
+      ]
+    },
+    "dify": {
+      "name": "Workflows (Dify)",
+      "category": "Workflows",
+      "tier": "production",
+      "origin": "US",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "built_from": "https://github.com/langgenius/dify",
+      "github": "https://github.com/langgenius/dify",
+      "subdomains": [
+        "dify"
+      ],
+      "containers": [
+        {
+          "name": "dify-api",
+          "image": "langgenius/dify-api"
+        },
+        {
+          "name": "dify-worker",
+          "image": "langgenius/dify-api"
+        },
+        {
+          "name": "dify-worker-beat",
+          "image": "langgenius/dify-api"
+        },
+        {
+          "name": "dify-web",
+          "image": "razzfazz-dify-web (built)"
+        },
+        {
+          "name": "dify-sandbox",
+          "image": "langgenius/dify-sandbox"
+        },
+        {
+          "name": "dify-plugin-daemon",
+          "image": "langgenius/dify-plugin-daemon"
+        },
+        {
+          "name": "dify-init-permissions",
+          "image": "busybox (one-shot)"
+        }
+      ],
+      "purpose": "A visual, low-code platform for building LLM applications — AI agents, RAG\npipelines, chatbots, and multi-step workflow automations — without writing\ncode. Drag-and-drop a workflow, wire in the box's local models, document\nknowledge bases, HTTP calls (through the SSRF-safe proxy), and code nodes\nthat run in an isolated sandbox. Publish flows as chat apps or as APIs.\n",
+      "user_facing_capabilities": [
+        "Build AI workflows visually (LLM, knowledge-retrieval, condition, code, HTTP, tool nodes).",
+        "Create RAG knowledge bases from uploaded documents and query them in flows.",
+        "Run sandboxed Python/Node code nodes safely inside a workflow.",
+        "Publish a workflow as a hosted chat app or call it as a REST API.",
+        "Call internal doc tools (docling/tika/presidio) and web search from a flow."
+      ],
+      "use_cases": [
+        "Customer-support / triage bots over a curated knowledge base.",
+        "Document pipelines: PDF → extract → classify → structured JSON (e.g. the PSA CMT demo).",
+        "Multi-step autonomous agents that chain tools and models.",
+        "API-driven LLM features embedded into other internal apps."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "searxng",
+          "docling",
+          "tika",
+          "presidio"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference + embeddings"
+        },
+        {
+          "service": "postgres",
+          "purpose": "app + plugin databases (dify_db, dify_plugin_db)"
+        },
+        {
+          "service": "valkey",
+          "purpose": "task queue + cache"
+        },
+        {
+          "service": "caddy:8195",
+          "purpose": "SSRF-protected outbound HTTP for HTTP/code nodes"
+        },
+        {
+          "service": "searxng / docling / tika / presidio",
+          "purpose": "web search + document tooling from flows"
+        }
+      ],
+      "databases": [
+        "dify_db",
+        "dify_plugin_db"
+      ]
+    },
+    "llm-legacy": {
+      "name": "LLM Inference — GPUStack 0.7.1 (stable default for every GPU box)",
+      "category": "LLM Inference",
+      "tier": "production",
+      "origin": "US",
+      "license": "mixed",
+      "edition": "mixed",
+      "github": "https://github.com/gpustack/gpustack",
+      "subdomains": [
+        "llm"
+      ],
+      "containers": [
+        {
+          "name": "gpustack",
+          "image": "razzfazz-gpustack:vulkan (built, GPUStack 0.7.1 + custom AMD Vulkan runner; HARDWARE=amd)",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/gpustack/gpustack"
+        },
+        {
+          "name": "gpustack",
+          "image": "razzfazz-gpustack:cuda (built, GPUStack 0.7.1 + custom CUDA llama.cpp b9851; HARDWARE=nvidia)",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/gpustack/gpustack"
+        },
+        {
+          "name": "model-sync",
+          "image": "razzfazz-model-sync (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "ollama-proxy",
+          "image": "eyalrot2/ollama-openai-proxy",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/eyalrot/ollama_openai"
+        }
+      ],
+      "purpose": "The model-serving engine that downloads, loads, and serves LLMs over an\nOpenAI-compatible API to the whole stack. This is the STABLE production\ndefault for every GPU box; ONE profile since the #1448 cutover (C8), with\nHARDWARE selecting the device overlay: `amd` runs GPUStack 0.7.1 with a\nlocally-built Vulkan runner (validated leak-free under stop/start cycles),\n`nvidia` runs the same 0.7.1 control plane with a locally-built CUDA\nllama.cpp runner (b9851, sm_120 — Blackwell / RTX PRO 6000). A model-sync\nsidecar mirrors the active model list into Open WebUI; an Ollama-compatible\nproxy lets legacy Ollama tools talk to it. Behind the LLM Manager it is an\noptional backend (#979 cutover decision, 2026-09-04).\n",
+      "user_facing_capabilities": [
+        "Serve local chat / coding / vision / embedding / reranker models over one OpenAI-compatible endpoint.",
+        "Manage models (download, start/stop, scale replicas) from the GPUStack dashboard.",
+        "Offload models to the GPU (VRAM) for fast inference, fully on-box — AMD via Vulkan, NVIDIA via CUDA.",
+        "Expose an Ollama-compatible API for tools that expect Ollama."
+      ],
+      "use_cases": [
+        "Back the Chat, Dify, RAG, and agent modules with private inference.",
+        "Run qwen3.6 at 1M context for chat/coding/vision on a single Strix Halo box."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "mutually_exclusive_with": [],
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "GPUStack metadata (gpustack_db)"
+        },
+        {
+          "service": "consumers",
+          "purpose": "serves chat, dify, cognee, lightrag, agents, openhands via :9090"
+        }
+      ],
+      "databases": [
+        "gpustack_db"
+      ]
+    },
+    "monitor": {
+      "name": "Monitoring (Komodo)",
+      "category": "Monitoring",
+      "tier": "production",
+      "origin": "US",
+      "license": "upstream:GPL-3.0",
+      "edition": "bundled",
+      "built_from": "https://github.com/moghtech/komodo",
+      "github": "https://github.com/moghtech/komodo",
+      "subdomains": [
+        "admin"
+      ],
+      "containers": [
+        {
+          "name": "komodo-core",
+          "image": "ghcr.io/moghtech/komodo-core"
+        },
+        {
+          "name": "komodo-periphery",
+          "image": "ghcr.io/moghtech/komodo-periphery"
+        },
+        {
+          "name": "ferretdb",
+          "image": "ghcr.io/ferretdb/ferretdb",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled"
+        },
+        {
+          "name": "postgres-komodo",
+          "image": "ghcr.io/ferretdb/postgres-documentdb",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled"
+        }
+      ],
+      "purpose": "A web dashboard to monitor and manage every Docker container in the stack —\nreal-time logs, resource usage, restart/stop controls, and deployment\nhistory. Runs its own database (FerretDB over a dedicated Postgres) so it\nnever contends with the main DB.\n",
+      "user_facing_capabilities": [
+        "View live logs and resource usage for any container.",
+        "Restart / stop / start individual services from the browser.",
+        "Track deployment and update history."
+      ],
+      "use_cases": [
+        "On-call triage: inspect a failing container's logs and bounce it.",
+        "Capacity review across the running stack."
+      ],
+      "dependencies": {
+        "required": [],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "ferretdb -> postgres-komodo",
+          "purpose": "Mongo-compatible document store on a dedicated Postgres"
+        },
+        {
+          "service": "docker socket",
+          "purpose": "container management + log collection (periphery)"
+        }
+      ],
+      "databases": []
+    },
+    "observability": {
+      "name": "Observability (OpenLIT + ClickHouse)",
+      "category": "Monitoring",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "github": "https://github.com/openlit/openlit",
+      "subdomains": [
+        "observability"
+      ],
+      "containers": [
+        {
+          "name": "openlit",
+          "image": "ghcr.io/openlit/openlit"
+        },
+        {
+          "name": "clickhouse",
+          "image": "clickhouse/clickhouse-server"
+        }
+      ],
+      "purpose": "Stack-wide LLM observability. OpenLIT captures every LLM call that flows\nthrough Open WebUI's pipeline layer (Dify, GPUStack, hermes, moltis,\nopencode) and indexes it in ClickHouse for cost / latency / token /\nprompt-quality dashboards, with 30-day auto-pruned retention.\n",
+      "user_facing_capabilities": [
+        "See cost, latency, token usage and prompt/response quality per model and per app.",
+        "Drill into individual LLM traces to debug slow or expensive prompts."
+      ],
+      "use_cases": [
+        "Track LLM spend and performance trends over time.",
+        "Find and fix prompts that blow the token budget or run slow."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "chat"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "clickhouse",
+          "purpose": "span/trace store"
+        },
+        {
+          "service": "pipelines",
+          "purpose": "receives OTLP traces from the Open WebUI global filter"
+        }
+      ],
+      "databases": []
+    },
+    "searxng": {
+      "name": "Search (SearXNG)",
+      "category": "Search",
+      "tier": "production",
+      "origin": "EU",
+      "license": "upstream:AGPL-3.0",
+      "edition": "bundled",
+      "github": "https://github.com/searxng/searxng",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "searxng",
+          "image": "searxng/searxng"
+        }
+      ],
+      "purpose": "A privacy-respecting metasearch engine that aggregates results from 70+\nengines without tracking. Runs internal-only as the web-search backend for\nChat and Dify (URL discovery), not exposed as an end-user UI.\n",
+      "user_facing_capabilities": [
+        "Web-search grounding inside AI chat and Dify workflows (no external tracking)."
+      ],
+      "use_cases": [
+        "Give chat answers current, web-grounded context.",
+        "Discover source URLs to feed into Crawl4AI / RAG ingestion."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by openwebui / dify-api",
+          "purpose": "web search queries via :8080"
+        }
+      ],
+      "databases": []
+    },
+    "crawl4ai": {
+      "name": "Crawl4AI",
+      "category": "Search",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "github": "https://github.com/unclecode/crawl4ai",
+      "subdomains": [
+        "crawl4ai"
+      ],
+      "containers": [
+        {
+          "name": "crawl4ai",
+          "image": "unclecode/crawl4ai"
+        }
+      ],
+      "purpose": "A RAG-friendly web crawler. Runs headless Chromium under Playwright,\nexecutes JavaScript, and emits clean Markdown / structured JSON suitable\nfor direct ingestion into knowledge bases. Where SearXNG finds URLs,\nCrawl4AI fetches and distils the actual page content.\n",
+      "user_facing_capabilities": [
+        "Crawl a URL and get clean Markdown/JSON (not just a link).",
+        "Use a playground UI to test extraction recipes; call /crawl /scrape /llm via REST.",
+        "Feed distilled pages into LightRAG / Cognee / Onyx / Dify knowledge bases."
+      ],
+      "use_cases": [
+        "Scheduled ingestion of curated URLs into a knowledge base.",
+        "\"Read this URL and summarise\" on demand from chat."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by dify-api / openwebui",
+          "purpose": "RAG ingestion + on-demand page distillation via :11235"
+        }
+      ],
+      "databases": []
+    },
+    "stts": {
+      "name": "Speech (STT + TTS)",
+      "category": "Speech",
+      "tier": "production",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/speaches-ai/speaches",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "speaches",
+          "image": "ghcr.io/speaches-ai/speaches (Whisper STT + Kokoro/Piper TTS)"
+        }
+      ],
+      "purpose": "Voice services for the stack: speech-to-text via Speaches (OpenAI Whisper)\nand text-to-speech via Microsoft Edge TTS. Both are internal APIs consumed\nby Open WebUI for voice input and spoken responses.\n",
+      "user_facing_capabilities": [
+        "Dictate prompts by voice in chat (Whisper transcription).",
+        "Have AI responses read aloud (TTS).",
+        "Transcribe uploaded audio."
+      ],
+      "use_cases": [
+        "Hands-free / accessible AI chat.",
+        "Audio note transcription."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by openwebui",
+          "purpose": "STT (:8000) + TTS (:5050) for chat voice"
+        }
+      ],
+      "databases": []
+    },
+    "gotenberg": {
+      "name": "Document Conversion (Gotenberg)",
+      "category": "Documents",
+      "tier": "production",
+      "origin": "FR",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/gotenberg/gotenberg",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "gotenberg",
+          "image": "gotenberg/gotenberg"
+        }
+      ],
+      "purpose": "A stateless API that converts HTML, Markdown and Office documents\n(DOCX/XLSX/PPTX) to PDF using Chromium + LibreOffice. Used as a backend\nfor Paperless-ngx and available to Dify document workflows.\n",
+      "user_facing_capabilities": [
+        "Convert Office and HTML documents to PDF programmatically."
+      ],
+      "use_cases": [
+        "Office-to-PDF for archival in Paperless-ngx.",
+        "Render report templates to PDF in a workflow."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by paperless-ngx / dify",
+          "purpose": "document → PDF conversion via :3000"
+        }
+      ],
+      "databases": []
+    },
+    "tika": {
+      "name": "Apache Tika",
+      "category": "Documents",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "github": "https://github.com/apache/tika",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "tika",
+          "image": "apache/tika:full"
+        }
+      ],
+      "purpose": "Detects and extracts text, metadata and language from 1000+ file formats\nvia a simple REST API. Backs Paperless-ngx text extraction and is callable\nfrom Dify document flows.\n",
+      "user_facing_capabilities": [
+        "Extract text + metadata from heterogeneous files (PDF, Office, email, images, archives).",
+        "Detect document language."
+      ],
+      "use_cases": [
+        "High-quality text extraction for Paperless-ngx search.",
+        "Metadata harvesting in document pipelines."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by paperless-ngx / dify",
+          "purpose": "text + metadata extraction via :9998"
+        }
+      ],
+      "databases": []
+    },
+    "docling": {
+      "name": "Docling",
+      "category": "Documents",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/docling-project/docling",
+      "subdomains": [
+        "docling"
+      ],
+      "containers": [
+        {
+          "name": "docling",
+          "image": "ghcr.io/docling-project/docling-serve-cpu"
+        },
+        {
+          "name": "docling-rq-worker",
+          "image": "ghcr.io/docling-project/docling-serve-cpu (RQ worker)"
+        }
+      ],
+      "purpose": "Converts PDF, DOCX, PPTX, images and HTML into structured Markdown/JSON\nwith layout analysis that preserves tables, headings and reading order.\nExposes a REST API and a Gradio UI; can optionally use a GPUStack\ngranite-docling vision model for complex layouts. Uses an RQ (valkey)\njob engine so the UI works under concurrent load.\n",
+      "user_facing_capabilities": [
+        "Convert PDFs/scans/Office docs to clean structured Markdown or JSON.",
+        "Interactive conversion via a Gradio web UI, or batch via REST.",
+        "Optionally apply a vision-language model for hard layouts."
+      ],
+      "use_cases": [
+        "PDF → Markdown for RAG ingestion.",
+        "Structured extraction from scanned documents (e.g. the PSA CMT demo)."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": [
+          "llm-manager"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "valkey",
+          "purpose": "RQ job queue for async conversions"
+        },
+        {
+          "service": "gpustack",
+          "purpose": "granite-docling VLM (optional)"
+        },
+        {
+          "service": "consumed by dify",
+          "purpose": "document conversion in workflows"
+        }
+      ],
+      "databases": []
+    },
+    "presidio": {
+      "name": "Presidio (PII Detection & Redaction)",
+      "category": "Documents",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/microsoft/presidio",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "presidio-analyzer",
+          "image": "mcr.microsoft.com/presidio-analyzer"
+        },
+        {
+          "name": "presidio-anonymizer",
+          "image": "mcr.microsoft.com/presidio-anonymizer"
+        },
+        {
+          "name": "presidio-image-redactor",
+          "image": "mcr.microsoft.com/presidio-image-redactor"
+        }
+      ],
+      "purpose": "Local PII detection, anonymisation and image redaction. The Analyzer finds\n30+ PII entity types in text, the Anonymizer masks/replaces them, and the\nImage Redactor blacks out PII regions in images — all on-box, no data\nleaves the server.\n",
+      "user_facing_capabilities": [
+        "Detect PII (names, emails, IBANs, card numbers, SSNs, …) in text.",
+        "Mask / replace PII before sharing or sending to an LLM.",
+        "Black out sensitive regions in images."
+      ],
+      "use_cases": [
+        "GDPR-style redaction of documents before sharing.",
+        "PII scrubbing in AI pipelines (e.g. the PSA PII-shield flow)."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by dify",
+          "purpose": "PII analyze/anonymize/redact in workflows"
+        }
+      ],
+      "databases": []
+    },
+    "stirling-pdf": {
+      "name": "Stirling-PDF",
+      "category": "Documents",
+      "tier": "experimental",
+      "origin": "GB",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/Stirling-Tools/Stirling-PDF",
+      "subdomains": [
+        "stirling"
+      ],
+      "containers": [
+        {
+          "name": "stirling-pdf",
+          "image": "stirlingtools/stirling-pdf"
+        }
+      ],
+      "purpose": "A self-hosted web UI for 50+ PDF operations — merge, split, rotate, OCR,\ncompress, convert, watermark, fill forms, sign, redact — all processed\nserver-side with nothing leaving the box.\n",
+      "user_facing_capabilities": [
+        "Merge / split / rotate / reorder PDFs in the browser.",
+        "OCR scanned PDFs; compress for email; convert to/from images and Office.",
+        "Watermark, sign, fill forms, and redact."
+      ],
+      "use_cases": [
+        "Combine invoices; split a large scan; shrink a file to email.",
+        "OCR a stack of scanned pages into searchable PDFs."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [],
+      "databases": []
+    },
+    "paperless-ngx": {
+      "name": "Paperless-ngx",
+      "category": "Documents",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:GPL-3.0",
+      "edition": "bundled",
+      "github": "https://github.com/paperless-ngx/paperless-ngx",
+      "subdomains": [
+        "paperless"
+      ],
+      "containers": [
+        {
+          "name": "paperless-ngx",
+          "image": "ghcr.io/paperless-ngx/paperless-ngx"
+        }
+      ],
+      "purpose": "A document management system that scans, OCRs, archives and full-text\nindexes paper documents into a searchable web archive, with tag-based\nautomated filing. Uses Gotenberg for Office→PDF and Tika for extraction.\n",
+      "user_facing_capabilities": [
+        "Ingest scans/emails, OCR them, and auto-file by tags/correspondents.",
+        "Full-text search across the whole document archive.",
+        "Browse and download original + archived versions."
+      ],
+      "use_cases": [
+        "Paperless office: invoices, receipts, contracts.",
+        "Searchable long-term archive of business paperwork."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "gotenberg",
+          "tika"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "app DB (paperless_db)"
+        },
+        {
+          "service": "valkey",
+          "purpose": "task broker"
+        },
+        {
+          "service": "gotenberg / tika",
+          "purpose": "PDF conversion + text extraction"
+        },
+        {
+          "service": "smtp-relay",
+          "purpose": "email notifications"
+        }
+      ],
+      "databases": [
+        "paperless_db"
+      ]
+    },
+    "gitea": {
+      "name": "Git (Gitea)",
+      "category": "Git",
+      "tier": "production",
+      "origin": "CN",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/go-gitea/gitea",
+      "subdomains": [
+        "git"
+      ],
+      "ports": [
+        "2222 (Git SSH)"
+      ],
+      "containers": [
+        {
+          "name": "gitea",
+          "image": "gitea/gitea"
+        }
+      ],
+      "purpose": "A lightweight self-hosted Git service with web UI, issue tracking, pull\nrequests and CI/CD (Gitea Actions). Shares the main Postgres + Valkey.\nGit over SSH is available on port 2222.\n",
+      "user_facing_capabilities": [
+        "Host private Git repositories with a full web UI.",
+        "Issues, pull requests, code review, releases, and Actions CI/CD.",
+        "Clone/push over HTTPS or SSH (:2222)."
+      ],
+      "use_cases": [
+        "Private team source control + code review.",
+        "Repo backend for OpenHands / Coding-Tools agents and Onyx code indexing."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "app DB (gitea_db)"
+        },
+        {
+          "service": "valkey",
+          "purpose": "sessions/cache/queues"
+        },
+        {
+          "service": "smtp-relay",
+          "purpose": "email notifications"
+        }
+      ],
+      "databases": [
+        "gitea_db"
+      ]
+    },
+    "lightrag": {
+      "name": "LightRAG",
+      "category": "Knowledge",
+      "tier": "experimental",
+      "origin": "CN",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/HKUDS/LightRAG",
+      "subdomains": [
+        "rag"
+      ],
+      "containers": [
+        {
+          "name": "lightrag",
+          "image": "ghcr.io/hkuds/lightrag"
+        }
+      ],
+      "purpose": "A graph-based RAG knowledge base. Decomposes documents into entities and\nrelationships and combines entity-level + relationship-level graphs for\nmore accurate retrieval than flat vector search. Uses GPUStack for\nembeddings and LLM-powered graph construction.\n",
+      "user_facing_capabilities": [
+        "Build a knowledge graph from a document collection and query it.",
+        "Dual-level (entity + relationship) retrieval for grounded answers."
+      ],
+      "use_cases": [
+        "Q&A over large document corpora with structured retrieval.",
+        "Research/literature exploration that follows relationships."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "embeddings + LLM extraction (qwen3.6, thinking disabled via chat_template_kwargs)"
+        }
+      ],
+      "databases": [
+        "lightrag_db (pgvector + age graph)"
+      ]
+    },
+    "cognee": {
+      "name": "Cognee (GraphRAG / AI Memory)",
+      "category": "Knowledge",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "built_from": "https://github.com/topoteretes/cognee",
+      "github": "https://github.com/topoteretes/cognee",
+      "subdomains": [
+        "cognee"
+      ],
+      "containers": [
+        {
+          "name": "cognee",
+          "image": "razzfazz-cognee (built; embedded Kuzu graph)"
+        },
+        {
+          "name": "cognee-mcp",
+          "image": "cognee/cognee-mcp (MCP server)"
+        },
+        {
+          "name": "cognee-frontend",
+          "image": "razzfazz-cognee-frontend (built)"
+        }
+      ],
+      "purpose": "A GraphRAG knowledge engine that builds structured knowledge graphs\n(\"brains\") from unstructured data and serves as a persistent memory layer\nfor AI agents. Entity extraction + relationship mapping enable multi-hop\nqueries across documents and conversations. Exposes an MCP server so\nagents (moltis, opencode) can remember/recall over the graph.\n",
+      "user_facing_capabilities": [
+        "Ingest data into named 'brains' and build queryable knowledge graphs (cognify).",
+        "Multi-hop semantic search + graph visualisation in the web UI.",
+        "Give agents long-term memory via the cognee MCP tools (remember/recall/search)."
+      ],
+      "use_cases": [
+        "Persistent memory for moltis / opencode coding agents.",
+        "Connect facts across many documents for richer answers."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM extraction (openai/qwen3.6, thinking disabled via chat_template_kwargs) + embeddings"
+        },
+        {
+          "service": "postgres",
+          "purpose": "metadata (cognee_db); Kuzu graph is embedded on-volume"
+        },
+        {
+          "service": "consumed by moltis/opencode",
+          "purpose": "MCP remember/recall/search tools"
+        }
+      ],
+      "databases": [
+        "cognee_db"
+      ]
+    },
+    "onyx": {
+      "name": "Onyx (Enterprise Search)",
+      "category": "Enterprise Search",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/onyx-dot-app/onyx",
+      "subdomains": [
+        "onyx"
+      ],
+      "containers": [
+        {
+          "name": "onyx-api",
+          "image": "onyxdotapp/onyx-backend"
+        },
+        {
+          "name": "onyx-background",
+          "image": "onyxdotapp/onyx-backend"
+        },
+        {
+          "name": "onyx-web",
+          "image": "onyxdotapp/onyx-web-server"
+        },
+        {
+          "name": "onyx-model-server",
+          "image": "onyxdotapp/onyx-model-server"
+        },
+        {
+          "name": "onyx-model-indexer",
+          "image": "onyxdotapp/onyx-model-server"
+        },
+        {
+          "name": "onyx-vespa",
+          "image": "vespaengine/vespa",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/vespa-engine/vespa"
+        }
+      ],
+      "purpose": "An AI enterprise-search platform that connects to many data sources (Gitea\nrepos, Paperless documents, web pages) and answers questions semantically\nwith LLM-generated answers over its own Vespa index + embedding model\nservers. One of the heaviest modules (~5 GB RAM).\n",
+      "user_facing_capabilities": [
+        "Unified semantic search across code and documents with cited LLM answers.",
+        "Connectors that index team resources on a schedule."
+      ],
+      "use_cases": [
+        "Ask one question and get an answer drawn from code + docs together.",
+        "Org-wide knowledge search over connected sources."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "gitea",
+          "paperless-ngx"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "app DB (onyx_db)"
+        },
+        {
+          "service": "valkey",
+          "purpose": "task queue/cache"
+        },
+        {
+          "service": "onyx-vespa",
+          "purpose": "vector + keyword index"
+        },
+        {
+          "service": "onyx-model-server",
+          "purpose": "embedding inference"
+        },
+        {
+          "service": "gitea",
+          "purpose": "repo indexing connector"
+        }
+      ],
+      "databases": [
+        "onyx_db"
+      ]
+    },
+    "matrix": {
+      "name": "Matrix (Synapse + Element)",
+      "category": "Communication",
+      "tier": "experimental",
+      "origin": "GB",
+      "license": "upstream:AGPL-3.0",
+      "edition": "bundled",
+      "github": "https://github.com/element-hq/synapse",
+      "subdomains": [
+        "matrix",
+        "element"
+      ],
+      "containers": [
+        {
+          "name": "synapse",
+          "image": "matrixdotorg/synapse"
+        },
+        {
+          "name": "element-web",
+          "image": "vectorim/element-web"
+        }
+      ],
+      "purpose": "A self-hosted Matrix homeserver (Synapse) with the Element Web client for\nencrypted team messaging, rooms and DMs. Authentik OIDC provides SSO;\nfederation is off by default.\n",
+      "user_facing_capabilities": [
+        "Encrypted team chat: rooms, DMs, threads — in the browser via Element.",
+        "Single sign-on with stack credentials (OIDC).",
+        "Bot/bridge integration (e.g. via the Moltis agent gateway)."
+      ],
+      "use_cases": [
+        "Internal secure messaging.",
+        "Bridge conversations to Telegram/Discord/Slack via Moltis."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "Synapse DB (synapse_db)"
+        },
+        {
+          "service": "authentik-server",
+          "purpose": "OIDC login"
+        }
+      ],
+      "databases": [
+        "synapse_db"
+      ]
+    },
+    "openuem": {
+      "name": "OpenUEM (Unified Endpoint Management)",
+      "category": "Security",
+      "tier": "experimental",
+      "origin": "EU",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "github": "https://github.com/open-uem",
+      "subdomains": [
+        "openuem"
+      ],
+      "containers": [
+        {
+          "name": "openuem-console",
+          "image": "openuem/openuem-console",
+          "built_from": "https://github.com/open-uem/openuem-console"
+        },
+        {
+          "name": "openuem-worker-agents",
+          "image": "openuem/openuem-worker",
+          "built_from": "https://github.com/open-uem/openuem-worker"
+        },
+        {
+          "name": "openuem-worker-cert-manager",
+          "image": "openuem/openuem-worker",
+          "built_from": "https://github.com/open-uem/openuem-worker"
+        },
+        {
+          "name": "openuem-worker-notification",
+          "image": "openuem/openuem-worker",
+          "built_from": "https://github.com/open-uem/openuem-worker"
+        },
+        {
+          "name": "openuem-nats",
+          "image": "nats",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/nats-io/nats-server"
+        },
+        {
+          "name": "openuem-ocsp-responder",
+          "image": "openuem/openuem-ocsp-responder",
+          "built_from": "https://github.com/open-uem/openuem-ocsp-responder"
+        },
+        {
+          "name": "openuem-certs",
+          "image": "openuem/openuem-cert-manager",
+          "built_from": "https://github.com/open-uem/openuem-cert-manager"
+        }
+      ],
+      "purpose": "Self-hosted unified endpoint management (UEM/RMM) for the fleet's end\ndevices: hardware/software inventory, software deployment, and remote\nassistance via lightweight agents (Windows/Linux/macOS). Runs entirely\non-box: own mTLS CA, NATS JetStream broker for agent communication,\nshared stack Postgres (openuem_db); the console sits behind Caddy +\nAuthentik forward_auth. LAN exposure of the broker is env-gated\n(OPENUEM_NATS_HOST_BIND, loopback default).\n",
+      "user_facing_capabilities": [
+        "Inventory every managed endpoint (hardware, OS, installed software).",
+        "Deploy software packages to endpoints and track rollout status.",
+        "Remote assistance and endpoint actions from the console."
+      ],
+      "use_cases": [
+        "IT asset management for the organisation's device fleet.",
+        "Compliance-ready software inventory without a cloud UEM."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "openuem_db (inventory, certs registry)"
+        },
+        {
+          "service": "authentik-server",
+          "purpose": "forward_auth gate on the console"
+        }
+      ],
+      "databases": [
+        "openuem_db"
+      ]
+    },
+    "wazuh": {
+      "name": "Wazuh (Security Monitoring / SIEM)",
+      "category": "Security",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:GPL-2.0",
+      "edition": "bundled",
+      "github": "https://github.com/wazuh/wazuh",
+      "subdomains": [
+        "wazuh"
+      ],
+      "containers": [
+        {
+          "name": "wazuh-manager",
+          "image": "wazuh/wazuh-manager",
+          "built_from": "https://github.com/wazuh/wazuh"
+        },
+        {
+          "name": "wazuh-indexer",
+          "image": "wazuh/wazuh-indexer",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/wazuh/wazuh-indexer"
+        },
+        {
+          "name": "wazuh-dashboard",
+          "image": "wazuh/wazuh-dashboard",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/wazuh/wazuh-dashboard"
+        },
+        {
+          "name": "wazuh-certs-generator",
+          "image": "wazuh/wazuh-certs-generator",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/wazuh/wazuh-docker"
+        },
+        {
+          "name": "wazuh-securityconfig-init",
+          "image": "wazuh/wazuh-indexer",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/wazuh/wazuh-indexer"
+        },
+        {
+          "name": "wazuh-securityadmin",
+          "image": "wazuh/wazuh-indexer",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/wazuh/wazuh-indexer"
+        },
+        {
+          "name": "wazuh-dashboard-config-init",
+          "image": "wazuh/wazuh-dashboard",
+          "license": "upstream:Apache-2.0",
+          "built_from": "https://github.com/wazuh/wazuh-dashboard"
+        }
+      ],
+      "purpose": "Open-source SIEM/XDR for the box and the fleet around it: host intrusion\ndetection (HIDS), file-integrity monitoring, security-configuration\nassessment against CIS benchmarks, log correlation, and built-in\nregulatory-compliance mappings (PCI DSS, GDPR, NIST 800-53). Three\nlong-running services (manager, an OpenSearch-fork indexer, and the web\nconsole) plus four one-shots that generate the module's own TLS PKI and\nevery credential it uses — no upstream demo credential survives. A\nper-box wazuh-agent reports journald, an operator-supplied allow-list of\ncontainer logs, and file-integrity events; agent enrolment is\npassword-gated and every manager listener is CIDR-fenced. Stores all\nstate in its own indexer, never shared Postgres. EXPERIMENTAL, opt-in,\nin no preset.\n",
+      "user_facing_capabilities": [
+        "See intrusion, file-integrity and configuration-drift alerts for every enrolled box in one console.",
+        "Search and correlate collected security events across the fleet.",
+        "Run CIS benchmark scans and read the compliance mappings (PCI DSS, GDPR, NIST 800-53)."
+      ],
+      "use_cases": [
+        "NIS2 / ISO 27001 evidence: continuous monitoring and retained security events.",
+        "Detect tampering with the stack's own configuration and host binaries.",
+        "Ingest syslog over TCP from agentless sources that can be pointed at the box (UDP-only devices are not supported)."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "authentik-server",
+          "purpose": "forward_auth gate + native OIDC login for the dashboard"
+        }
+      ],
+      "databases": []
+    },
+    "vaultwarden": {
+      "name": "Vaultwarden (Password Manager)",
+      "category": "Security",
+      "tier": "experimental",
+      "origin": "EU",
+      "license": "upstream:AGPL-3.0",
+      "edition": "bundled",
+      "github": "https://github.com/dani-garcia/vaultwarden",
+      "subdomains": [
+        "vault"
+      ],
+      "containers": [
+        {
+          "name": "vaultwarden",
+          "image": "vaultwarden/server"
+        }
+      ],
+      "purpose": "A lightweight, Rust-based Bitwarden-compatible password manager. Works with\nofficial Bitwarden browser extensions, desktop and mobile apps; Authentik\nOIDC SSO lets users sign in with stack credentials.\n",
+      "user_facing_capabilities": [
+        "Store and share passwords/secrets in personal and org vaults.",
+        "Browser auto-fill via Bitwarden extensions; mobile/desktop apps."
+      ],
+      "use_cases": [
+        "Team password management and secure credential sharing.",
+        "Developer API-key storage."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "authentik-server",
+          "purpose": "OIDC SSO"
+        }
+      ],
+      "databases": []
+    },
+    "infisical": {
+      "name": "Infisical (Secrets Management)",
+      "category": "Security",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/Infisical/infisical",
+      "subdomains": [
+        "infisical"
+      ],
+      "containers": [
+        {
+          "name": "infisical",
+          "image": "infisical/infisical"
+        }
+      ],
+      "purpose": "A developer-focused secrets-management platform: store API keys, DB\ncredentials and config with project + environment scoping (dev/staging/\nprod), via web dashboard, CLI and REST API. AI coding agents can pull\nsecrets at runtime.\n",
+      "user_facing_capabilities": [
+        "Centralised, environment-scoped secret storage with a web UI + CLI + API.",
+        "Runtime secret injection for apps and AI agents (e.g. OpenHands)."
+      ],
+      "use_cases": [
+        "Single source of secrets for a dev team.",
+        "Give an autonomous agent scoped credentials at task time."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "consumed by openhands",
+          "purpose": "runtime secret retrieval"
+        }
+      ],
+      "databases": []
+    },
+    "llm-manager": {
+      "name": "LLM Manager",
+      "category": "LLM Inference",
+      "tier": "core",
+      "origin": "AT",
+      "license": "mixed",
+      "edition": "mixed",
+      "github": null,
+      "subdomains": [
+        "llm-manager",
+        "llm"
+      ],
+      "containers": [
+        {
+          "name": "llm-manager",
+          "image": "razzfazz-llm-manager (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "llm-manager-ui",
+          "image": "razzfazz-llm-manager-ui (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "llm-manager-router",
+          "image": "ghcr.io/berriai/litellm",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/BerriAI/litellm"
+        }
+      ],
+      "purpose": "Sovereign, Kubernetes-free control plane over a heterogeneous LLM fleet\n(CUDA / AMD Strix Halo / Mac / GB10): an OpenAI-compatible gateway with\nAPI-key auth and per-key enforcement, a streaming proxy, worker\nenrolment, desired-state deployments with placement, a model catalog,\nand the fleet console. The single front door for inference on the box\nsince the 2026.09 cutover (#979); GPUStack remains an optional backend\nbehind it. The router is a bundled LiteLLM proxy (OSS image, no\nenterprise features).\n",
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-worker-agent"
+        ],
+        "optional": [
+          "llm-registry",
+          "mac-llm",
+          "llm-legacy"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "llm-worker-agent",
+          "purpose": "commands (load/unload engines) over the command channel; heartbeats + metrics back"
+        },
+        {
+          "service": "consumers",
+          "purpose": "serves chat, dify, cognee, lightrag, agents via the OpenAI-compatible gateway"
+        }
+      ]
+    },
+    "llm-registry": {
+      "name": "LLM Model Registry (Zot)",
+      "category": "LLM Inference",
+      "tier": "core",
+      "origin": "US",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "github": "https://github.com/project-zot/zot",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "llm-registry",
+          "image": "ghcr.io/project-zot/zot-linux-amd64",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/project-zot/zot"
+        }
+      ],
+      "purpose": "Content-addressed OCI registry (Zot) holding model artifacts (GGUF,\nsafetensors, mmproj) and runner images as OCI blobs for the LLM Manager\nfleet. Nodes pull artifacts BY DIGEST into their models volume —\ndeduplicated, verifiable, and the only registry a worker may pull a\nrunner from (air-gap invariant, #307/#549).\n",
+      "dependencies": {
+        "required": [
+          "core",
+          "llm-manager"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "llm-worker-agent",
+          "purpose": "serves model + runner blobs by digest"
+        }
+      ]
+    },
+    "llm-worker-agent": {
+      "name": "LLM Worker-Agent",
+      "category": "LLM Inference",
+      "tier": "core",
+      "origin": "AT",
+      "license": "busl-1.1",
+      "edition": "enterprise",
+      "github": null,
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "llm-worker-agent",
+          "image": "razzfazz-llm-worker-agent (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        }
+      ],
+      "purpose": "Per-node agent of the LLM Manager: enrols the box as a worker, launches\nand supervises engine containers (llama.cpp on AMD Vulkan / CPU, vLLM or\nllama.cpp on CUDA, the GB10 class) per the manager's deployments, and\nself-registers what it serves. Drives docker through a scoped socket\nproxy; the thin worker install (two containers) is the whole footprint\nof an inference-only node.\n",
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "llm-registry"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "llm-manager",
+          "purpose": "enrolment, heartbeats, command channel"
+        },
+        {
+          "service": "llm-registry",
+          "purpose": "pulls model artifacts + runner images by digest"
+        }
+      ]
+    },
+    "mac-llm": {
+      "name": "Mac LLM Gateway (LiteLLM)",
+      "category": "LLM Inference",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/BerriAI/litellm",
+      "subdomains": [],
+      "containers": [
+        {
+          "name": "llm-mac-gateway",
+          "image": "ghcr.io/berriai/litellm",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/BerriAI/litellm"
+        }
+      ],
+      "purpose": "Fronts one or more Macs running Ollama (Apple Silicon / MLX) as a\nSECOND OpenAI-compatible endpoint — load-balanced and health-checked —\nthrough a LiteLLM proxy (OSS image, no enterprise features). Opt-in and\nOFF by default; registered with the LLM Manager as an external backend,\nnever as a placement target.\n",
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "external",
+          "purpose": "Ollama on the Mac(s) over the LAN"
+        },
+        {
+          "service": "llm-manager",
+          "purpose": "registered as an external endpoint backend"
+        }
+      ]
+    },
+    "agents": {
+      "name": "Personal Agent Manager",
+      "category": "Agents",
+      "tier": "experimental",
+      "origin": "AT",
+      "license": "busl-1.1",
+      "edition": "enterprise",
+      "github": null,
+      "subdomains": [
+        "agents"
+      ],
+      "containers": [
+        {
+          "name": "agent-manager",
+          "image": "razzfazz-agent-manager (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        }
+      ],
+      "purpose": "The orchestrator for per-user AI agents. Authenticated users launch their\nown isolated agent containers (Hermes, Moltis, Coding Agents, OpenHands,\nPaperclip) with quota-based resource governance, each on its own subdomain,\nwith dynamic Caddy routing, idle auto-shutdown and stale-instance cleanup.\nAdmins configure available agent types and quota tiers (Basic/Power/Admin)\nin the Config UI.\n",
+      "user_facing_capabilities": [
+        "Self-provision a personal AI agent from the 'My Agents' drawer.",
+        "Each agent runs isolated, per-user, with its own URL + persistent volumes.",
+        "Idle agents auto-stop; quota tiers cap resource use per user."
+      ],
+      "use_cases": [
+        "Multi-user AI agent platform with per-person isolation.",
+        "Give every developer a personal coding agent + memory."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "openhands"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "postgres",
+          "purpose": "instance registry + quotas (agent_manager_db)"
+        },
+        {
+          "service": "caddy admin API",
+          "purpose": "dynamic per-user subdomain routes"
+        },
+        {
+          "service": "docker-socket-proxy",
+          "purpose": "per-user container lifecycle"
+        }
+      ],
+      "databases": [
+        "agent_manager_db"
+      ]
+    },
+    "mcp": {
+      "name": "MCP Integrations (part of MCP & Agent Manager)",
+      "category": "Agents",
+      "tier": "experimental",
+      "origin": "AT",
+      "license": "busl-1.1",
+      "edition": "enterprise",
+      "github": null,
+      "subdomains": [
+        "mcp"
+      ],
+      "containers": [
+        {
+          "name": "mcp-manager",
+          "image": "razzfazz-mcp-manager (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        },
+        {
+          "name": "mcp-test-echo-image-builder",
+          "image": "razzfazz-mcp-test-echo (built)",
+          "license": "busl-1.1",
+          "edition": "enterprise"
+        }
+      ],
+      "purpose": "The MCP half of MCP & Agent Manager: connect your own tools (Moco /\nSEQITracker, Pipedrive, GitHub, Google) to your agents through Model\nContext Protocol servers managed per user. No separate tile — it lives\ninside the Agent Manager surface; mcp.<domain> is the backend\nforward-auth host. The echo image is the built-in MCP self-test server.\n",
+      "dependencies": {
+        "required": [
+          "core",
+          "agents"
+        ],
+        "recommended": [],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "agent-manager",
+          "purpose": "MCP servers are provisioned for and consumed by the personal agents"
+        }
+      ]
+    },
+    "openhands": {
+      "name": "OpenHands (Autonomous Coding Agent)",
+      "category": "Agents",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "github": "https://github.com/All-Hands-AI/OpenHands",
+      "subdomains": [
+        "openhands"
+      ],
+      "also_provisioned_per_user": true,
+      "containers": [
+        {
+          "name": "openhands",
+          "image": "ghcr.io/openhands/openhands"
+        },
+        {
+          "name": "openhands-runtime",
+          "image": "ghcr.io/openhands/runtime (per-task sandbox)",
+          "license": "upstream:MIT",
+          "built_from": "https://github.com/OpenHands/OpenHands"
+        }
+      ],
+      "purpose": "An autonomous AI software-development agent that writes, runs, tests and\ndebugs code, spawning per-task sandbox containers. Uses GPUStack for\ninference, Gitea for repos/PRs, and Infisical for secrets. Available as a\nshared profile and as a per-user agent.\n",
+      "user_facing_capabilities": [
+        "Give a goal in natural language; the agent writes and runs the code to achieve it.",
+        "Create branches/PRs in Gitea; iterate with tests."
+      ],
+      "use_cases": [
+        "Automated bug-fixing, feature prototyping, test writing, code review help."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "gitea",
+          "infisical"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference"
+        },
+        {
+          "service": "gitea",
+          "purpose": "repo access + PRs"
+        },
+        {
+          "service": "infisical",
+          "purpose": "secrets for tasks"
+        },
+        {
+          "service": "docker-socket-proxy",
+          "purpose": "spawn per-task runtime sandboxes"
+        }
+      ],
+      "databases": []
+    },
+    "paperclip": {
+      "name": "Paperclip (AI Company Orchestration)",
+      "category": "Agents",
+      "tier": "experimental",
+      "origin": "US",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "built_from": "https://github.com/paperclipai/paperclip",
+      "github": null,
+      "subdomains": [
+        "paperclip"
+      ],
+      "also_provisioned_per_user": true,
+      "containers": [
+        {
+          "name": "paperclip",
+          "image": "razzfazz-paperclip (built)"
+        }
+      ],
+      "purpose": "An experimental \"AI company\" orchestration platform: hire AI agents, give\nthem roles and goals, and let them collaborate on automated workflows.\nEarly-stage and evolving.\n",
+      "user_facing_capabilities": [
+        "Define agents with roles/goals and have them coordinate on tasks.",
+        "Kanban-style tracking of multi-agent work."
+      ],
+      "use_cases": [
+        "Experiment with autonomous multi-agent task automation."
+      ],
+      "dependencies": {
+        "required": [
+          "core"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference"
+        }
+      ],
+      "databases": []
+    }
+  },
+  "per_user_agents": {
+    "hermes": {
+      "name": "Hermes (Personal)",
+      "category": "Agents",
+      "tier": "lightweight",
+      "license": "upstream:Apache-2.0",
+      "edition": "bundled",
+      "built_from": "https://github.com/NousResearch",
+      "provisioned_by": "agents (agent-manager)",
+      "containers": [
+        {
+          "name": "hermes-agent (per user)",
+          "image": "razzfazz-stack-hermes-agent"
+        },
+        {
+          "name": "hermes-workspace (companion)",
+          "image": "razzfazz-stack-hermes-workspace"
+        }
+      ],
+      "purpose": "A self-improving Python AI agent (NousResearch) with a workspace UI —\nmemory browser, skills explorer, terminal, and multi-session support.\nProvisioned per user as an isolated personal assistant.\n",
+      "user_facing_capabilities": [
+        "A personal agent that learns/extends its own Python skills over time.",
+        "Browse its memory, explore/edit skills, drive it from a web terminal."
+      ],
+      "use_cases": [
+        "A long-lived personal assistant that accumulates skills and context."
+      ],
+      "dependencies": {
+        "required": [
+          "core",
+          "agents"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": []
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference (LLM_MODEL default qwen3.6)"
+        }
+      ],
+      "databases": []
+    },
+    "moltis": {
+      "name": "Moltis",
+      "category": "Agents",
+      "tier": "lightweight",
+      "license": "upstream:MIT",
+      "edition": "bundled",
+      "built_from": "https://github.com/moltis-org/moltis",
+      "provisioned_by": "agents (agent-manager)",
+      "containers": [
+        {
+          "name": "moltis (per user)",
+          "image": "razzfazz-stack-moltis"
+        }
+      ],
+      "purpose": "A Rust personal-agent server with a Matrix, Telegram and Discord gateway,\nso a user's agent is reachable from chat platforms. Integrates with the\ncognee MCP for long-term memory.\n",
+      "user_facing_capabilities": [
+        "Talk to your personal agent from Matrix/Telegram/Discord.",
+        "Persistent memory via cognee MCP (remember/recall)."
+      ],
+      "use_cases": [
+        "A chat-platform-native personal assistant/bot."
+      ],
+      "dependencies": {
+        "required": [
+          "core",
+          "agents"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "cognee",
+          "matrix"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference"
+        },
+        {
+          "service": "cognee-mcp",
+          "purpose": "memory remember/recall/search"
+        }
+      ],
+      "databases": []
+    },
+    "coding-agent-web": {
+      "name": "Coding Agents",
+      "category": "Developer Tools",
+      "tier": "lightweight",
+      "license": "mixed",
+      "edition": "mixed",
+      "provisioned_by": "agents (agent-manager)",
+      "containers": [
+        {
+          "name": "opencode",
+          "image": "razzfazz-coding-agent-opencode",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/sst/opencode"
+        },
+        {
+          "name": "codex",
+          "image": "razzfazz-coding-agent-codex",
+          "license": "upstream:Apache-2.0",
+          "edition": "bundled",
+          "built_from": "https://github.com/openai/codex"
+        },
+        {
+          "name": "gsd-pi",
+          "image": "razzfazz-coding-agent-user-defined (user install: @opengsd/gsd-pi)",
+          "license": "upstream:MIT",
+          "edition": "bundled",
+          "built_from": "https://github.com/open-gsd/gsd-pi"
+        },
+        {
+          "name": "coding-agent web terminal + shim (wiring)",
+          "image": "razzfazz-coding-agent-user-defined",
+          "license": "apache-2.0",
+          "edition": "community"
+        }
+      ],
+      "purpose": "A persistent per-user coding workspace: an in-browser tmux terminal with a\ndurable /workspace + /home volume, pre-wired (via a local-model shim) to run\na coding-agent CLI against the local GPUStack LLM. Split (#36 / PR #84) into\nper-type images — opencode (opencode-ai CLI), codex (@openai/codex), and a\nbare \"user-defined\" agent that lets a user bring + persist their own CLI\n(e.g. `npm i -g @opengsd/gsd-pi`, the retired gsd agent). All four build from\nthe shared Dockerfile; razzfazz.ai ships only the Apache-2.0 web-terminal\nwiring, and every bundled CLI keeps its own upstream licence.\n",
+      "user_facing_capabilities": [
+        "AI-assisted coding in a browser terminal (opencode / codex / your own CLI).",
+        "Persistent per-user workspace; bring-your-own agent survives restarts."
+      ],
+      "use_cases": [
+        "Personal AI pair-programmer with a durable workspace."
+      ],
+      "dependencies": {
+        "required": [
+          "core",
+          "agents"
+        ],
+        "recommended": [
+          "llm-manager"
+        ],
+        "optional": [
+          "gitea"
+        ]
+      },
+      "talks_to": [
+        {
+          "service": "gpustack",
+          "purpose": "LLM inference (coding model, via local shim)"
+        },
+        {
+          "service": "cognee-mcp",
+          "purpose": "memory (optional)"
+        },
+        {
+          "service": "gitea",
+          "purpose": "repo access (optional)"
+        }
+      ],
+      "databases": []
+    }
+  }
+}

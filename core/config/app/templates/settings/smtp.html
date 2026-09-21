@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block page_title %}Email (SMTP){% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Email (SMTP)</h1>
+    <p class="lede">Configure outbound email delivery</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+<form method="POST" class="settings-form">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <h2 class="section">SMTP Mode</h2>
+    <div class="card">
+        <div class="field">
+            <label><input type="radio" name="mode" value="relay" {% if config.mode == 'relay' %}checked{% endif %} onchange="toggleRelaySection()"> Relay (forward via external SMTP)</label>
+        </div>
+        <div class="field">
+            <label><input type="radio" name="mode" value="direct" {% if config.mode == 'direct' %}checked{% endif %} onchange="toggleRelaySection()"> Direct (send via MX records)</label>
+        </div>
+    </div>
+    <h2 class="section">Sender</h2>
+    <div class="card">
+        <div class="field">
+            <label>From address</label>
+            <input type="email" name="from" value="{{ config.from }}" placeholder="noreply@example.com">
+        </div>
+    </div>
+    <div id="relay-section" style="{% if config.mode == 'direct' %}display:none{% endif %}">
+        <h2 class="section">Relay Settings</h2>
+        <div class="card">
+            <div class="form-grid">
+                <div class="field">
+                    <label>SMTP Host</label>
+                    <input type="text" name="relay_host" value="{{ config.relay_host }}" placeholder="smtp.gmail.com">
+                </div>
+                <div class="field">
+                    <label>Port</label>
+                    <input type="text" name="relay_port" value="{{ config.relay_port }}" placeholder="587">
+                </div>
+                <div class="field">
+                    <label>Username</label>
+                    <input type="text" name="relay_username" value="{{ config.relay_username }}">
+                </div>
+                <div class="field">
+                    <label>Password</label>
+                    <input type="password" name="relay_password" placeholder="{{ 'Password is set' if config.relay_password_set else 'Enter password' }}">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn primary">Save</button>
+    </div>
+</form>
+
+<!-- Test email section -->
+<h2 class="section">Test Email</h2>
+<div class="card" style="margin-top:1.5rem">
+    <p class="hint" style="margin-bottom:0.75rem">
+        Send a test email to verify SMTP settings are working.
+    </p>
+    <div style="display:flex;gap:0.5rem;align-items:flex-end">
+        <div class="field" style="margin-bottom:0;flex:1">
+            <label>Recipient</label>
+            <input type="email" id="test-email-to" placeholder="admin@example.com">
+        </div>
+        <button class="btn ghost" onclick="sendTestEmail()" id="test-email-btn">Send Test Email</button>
+    </div>
+    <div id="test-email-result" style="margin-top:0.5rem;font-size:0.8125rem" class="hidden"></div>
+</div>
+
+<script>
+function toggleRelaySection() {
+    const mode = document.querySelector('input[name="mode"]:checked').value;
+    document.getElementById('relay-section').style.display = mode === 'relay' ? '' : 'none';
+}
+
+function sendTestEmail() {
+    const to = document.getElementById('test-email-to').value;
+    if (!to) { alert('Enter a recipient email address.'); return; }
+
+    const btn = document.getElementById('test-email-btn');
+    const result = document.getElementById('test-email-result');
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    result.className = 'hidden';
+
+    const formData = new FormData();
+    formData.append('to', to);
+
+    fetch('{{ url_for("settings.smtp_test") }}', { method: 'POST', headers: window.rzfzCsrfHeaders(), body: formData })
+        .then(r => r.json())
+        .then(data => {
+            result.className = data.success ? 'flash flash-success' : 'flash flash-error';
+            result.textContent = data.message;
+            btn.disabled = false;
+            btn.textContent = 'Send Test Email';
+        })
+        .catch(err => {
+            result.className = 'flash flash-error';
+            result.textContent = 'Request failed: ' + err.message;
+            btn.disabled = false;
+            btn.textContent = 'Send Test Email';
+        });
+}
+</script>
+{% endblock %}

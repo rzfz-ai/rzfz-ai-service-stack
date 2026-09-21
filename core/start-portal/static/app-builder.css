@@ -1,0 +1,295 @@
+/* #248 App Builder — dedicated stylesheet for the /admin/shortcuts editor.
+ *
+ * Scope note (multi-agent coordination): this file is owned by the #248
+ * App Builder rebuild. The parallel #299 portal-home reskin owns
+ * start-portal-overrides.css — this file must never duplicate rules that
+ * belong there, and start-portal-overrides.css must never gain
+ * App-Builder-specific rules. The two files share ONLY the #296 design
+ * tokens (--razz-red, --bg-card, --border, --radius, ...) already defined
+ * on :root by start-portal-overrides.css (loaded first — see
+ * admin_shortcuts.html's extra_css block) and, since #1054, the shared
+ * `.portal-app` / `.rail` / `.portal-main` shell — the dark icon-rail
+ * carrying the razzfazz brand image, defined there and reused as-is (never
+ * redefined here) so this page wears exactly the same identity as the
+ * portal home and the other rzfz.ai apps. The content beside the rail is
+ * plain: this file declares no background image of its own.
+ *
+ * Layout/visuals are adapted 1:1 from the operator-approved clickable
+ * prototype (docs/.../rzfz-app-builder.html, #248 sign-off) — same
+ * structure, same spacing scale — translated onto the #296 tokens instead
+ * of the prototype's own standalone :root block. Every selector is scoped
+ * under `.ab-app` so nothing here can leak onto/collide with the shared
+ * base CSS or the portal-home page.
+ */
+
+.ab-app {
+    position: relative;
+    z-index: 1;
+    font-family: var(--font);
+    color: var(--text);
+    min-height: 100vh;
+}
+
+/* ── Topbar ─────────────────────────────────────────────────────────── */
+
+.ab-topbar {
+    height: 54px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 22px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+}
+.ab-brand { display: flex; align-items: center; gap: 9px; }
+.ab-brand svg { width: 22px; height: 22px; fill: var(--razz-red); }
+.ab-bn { font-weight: 700; letter-spacing: -0.01em; }
+.ab-sub { color: var(--text-muted); font-weight: 600; margin-left: 4px; }
+.ab-back { color: var(--razz-red); font-weight: 600; text-decoration: none; font-size: 0.85rem; }
+.ab-back:hover { text-decoration: underline; }
+
+/* ── Shell: sidebar + two-pane builder ─────────────────────────────── */
+
+.ab-shell { display: flex; min-height: calc(100vh - 54px); }
+
+.ab-list {
+    width: 250px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.ab-list h2 {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-secondary); padding: 2px 6px; margin: 0;
+}
+.ab-newbtn {
+    background: var(--razz-red); color: #fff; border: 0; border-radius: var(--radius-sm);
+    padding: 9px; font-weight: 700; cursor: pointer; font-size: 0.85rem; font-family: inherit;
+}
+.ab-newbtn:hover { background: var(--razz-red-hover); }
+.ab-applist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ab-applist li.ab-item {
+    display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 8px;
+    cursor: pointer;
+}
+.ab-applist li.ab-item:hover { background: var(--bg-soft); }
+.ab-applist li.ab-item.sel { background: var(--razz-red-soft); }
+.ab-applist li.ab-off { opacity: 0.5; }
+.ab-applist .ab-ic {
+    width: 24px; height: 24px; border-radius: 6px; background: var(--bg-muted);
+    display: grid; place-items: center; font-size: 0.9rem; overflow: hidden; flex-shrink: 0;
+}
+.ab-applist .ab-ic img { width: 100%; height: 100%; object-fit: cover; }
+.ab-applist .ab-nm { font-weight: 600; font-size: 0.85rem; flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+.ab-applist .ab-del {
+    border: 0; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 0.9rem;
+    padding: 2px 6px; border-radius: 6px; flex-shrink: 0;
+}
+.ab-applist .ab-del:hover { color: var(--razz-red); background: var(--razz-red-soft); }
+.ab-empty {
+    color: var(--text-muted); font-size: 0.8rem; padding: 10px 6px; border: 1px dashed var(--border-strong);
+    border-radius: 8px; text-align: center; list-style: none; margin-top: 8px;
+}
+
+.ab-builder { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-width: 0; }
+.ab-cfg { padding: 22px 26px; overflow-y: auto; min-width: 0; }
+.ab-cfg h1 { font-size: 1.35rem; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 2px; }
+.ab-lede { color: var(--text-secondary); margin-bottom: 18px; }
+
+/* ── Step cards ─────────────────────────────────────────────────────── */
+
+.ab-step {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; margin-bottom: 16px;
+}
+.ab-sh { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.ab-sn {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--razz-red); color: #fff;
+    font-weight: 700; font-size: 0.75rem; display: grid; place-items: center; flex-shrink: 0;
+}
+.ab-st { font-weight: 700; font-size: 1rem; }
+.ab-stsub { color: var(--text-muted); font-size: 0.78rem; margin-left: auto; }
+
+/* ── Step 1: template gallery ───────────────────────────────────────── */
+
+.ab-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.ab-tpl {
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 7px; background: var(--bg-card); transition: 0.12s;
+    text-align: left; font-family: inherit; width: 100%;
+}
+.ab-tpl:hover { border-color: var(--razz-red); box-shadow: 0 4px 14px rgba(205, 23, 25, 0.08); transform: translateY(-1px); }
+.ab-tpl.sel { border-color: var(--razz-red); box-shadow: 0 0 0 3px var(--razz-red-soft); }
+.ab-tpl .ab-ti { font-size: 1.5rem; }
+.ab-tpl .ab-tt { font-weight: 700; font-size: 0.9rem; }
+.ab-tpl .ab-td { color: var(--text-secondary); font-size: 0.76rem; line-height: 1.4; }
+.ab-tpl.ab-blank { border-style: dashed; justify-content: center; align-items: center; text-align: center; color: var(--text-muted); }
+
+/* ── Fields ─────────────────────────────────────────────────────────── */
+
+.ab-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.ab-field:last-child { margin-bottom: 0; }
+.ab-field label { font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); }
+.ab-hint { font-size: 0.72rem; color: var(--text-muted); margin: 0; }
+.ab-error { color: var(--error); }
+
+.ab-app input[type=text], .ab-app textarea, .ab-app select {
+    font-family: inherit; font-size: 0.9rem; padding: 9px 11px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: var(--bg-card); color: var(--text); width: 100%;
+    box-sizing: border-box;
+}
+.ab-app input[type=text]:focus, .ab-app textarea:focus, .ab-app select:focus {
+    outline: none; border-color: var(--razz-red); box-shadow: 0 0 0 3px var(--razz-red-soft);
+}
+.ab-app textarea { resize: vertical; min-height: 58px; }
+
+/* #sc-kind / #sc-visibility are the technical <select> elements the
+ * clickable type-cards / visibility buttons DRIVE (same "friendly widget
+ * drives the hidden technical field" idiom already used for
+ * #sc-model-select -> #sc-model-id). They stay in the DOM — several
+ * regression guards assert their exact `<select id="...">` opening tag, so
+ * they carry no other attribute — and are hidden purely via CSS. */
+#sc-kind, #sc-visibility { display: none; }
+
+/* ── Step 2: icon picker ────────────────────────────────────────────── */
+
+.ab-iconpick { display: flex; gap: 14px; align-items: flex-start; }
+.ab-iconprev {
+    width: 64px; height: 64px; border-radius: 16px; background: var(--bg-muted); display: grid;
+    place-items: center; font-size: 2rem; flex-shrink: 0; overflow: hidden; border: 1px solid var(--border);
+}
+.ab-iconprev img { width: 100%; height: 100%; object-fit: cover; }
+.ab-iconpanel { flex: 1; min-width: 0; }
+.ab-icontabs { display: inline-flex; background: var(--bg-muted); border-radius: var(--radius-sm); padding: 2px; margin-bottom: 10px; }
+.ab-icontabs button {
+    border: 0; background: transparent; padding: 5px 12px; border-radius: 5px; cursor: pointer;
+    font-weight: 600; color: var(--text-muted); font-size: 0.8rem; font-family: inherit;
+}
+.ab-icontabs button.on { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+.ab-emojigrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); gap: 5px; max-height: 120px; overflow-y: auto; }
+.ab-emojigrid button {
+    border: 1px solid transparent; background: var(--bg-soft); border-radius: 8px; font-size: 1.15rem;
+    padding: 6px 0; cursor: pointer; line-height: 1;
+}
+.ab-emojigrid button:hover { border-color: var(--razz-red); }
+.ab-emojigrid button.on { border-color: var(--razz-red); background: var(--razz-red-soft); }
+.ab-curated { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 6px; }
+.ab-curated button {
+    border: 1px solid var(--border); background: var(--bg-card); border-radius: 10px; height: 46px;
+    display: grid; place-items: center; cursor: pointer; padding: 6px;
+}
+.ab-curated button:hover, .ab-curated button.on { border-color: var(--razz-red); background: var(--razz-red-soft); }
+.ab-curated img { width: 24px; height: 24px; }
+.ab-upload {
+    border: 2px dashed var(--border-strong); border-radius: var(--radius); padding: 18px; text-align: center;
+    color: var(--text-muted); cursor: pointer; display: block;
+}
+.ab-upload:hover { border-color: var(--razz-red); color: var(--razz-red); }
+.ab-upload b { color: var(--text); }
+.ab-uploadhint { font-size: 0.72rem; }
+
+/* ── Step 3: type cards ─────────────────────────────────────────────── */
+
+.ab-types { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.ab-type {
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 11px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 3px;
+}
+.ab-type:hover { border-color: var(--razz-red); }
+.ab-type.on { border-color: var(--razz-red); background: var(--razz-red-soft); }
+.ab-type.ab-disabled { cursor: not-allowed; opacity: 0.6; }
+.ab-type.ab-disabled:hover { border-color: var(--border); }
+.ab-tn { font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; }
+.ab-tsd { font-size: 0.72rem; color: var(--text-muted); line-height: 1.35; }
+.ab-badge {
+    font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 1px 6px; border-radius: var(--radius-pill); background: #fbeed6; color: #C77A00;
+}
+
+/* ── Step 4: access ─────────────────────────────────────────────────── */
+
+.ab-vis { display: flex; gap: 8px; flex-wrap: wrap; }
+.ab-vis button {
+    border: 1px solid var(--border); background: var(--bg-card); border-radius: var(--radius-sm);
+    padding: 8px 12px; cursor: pointer; font-weight: 600; font-size: 0.83rem; font-family: inherit;
+}
+.ab-vis button.on { border-color: var(--razz-red); background: var(--razz-red-soft); color: var(--razz-red); }
+.ab-groups {
+    max-height: 150px; overflow-y: auto; border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); padding: 8px; margin-top: 6px;
+}
+.ab-groups label { font-weight: 400; margin: 2px 0; display: flex; gap: 6px; align-items: center; font-size: 0.85rem; }
+.ab-who {
+    margin-top: 12px; font-size: 0.78rem; color: var(--text-secondary); background: var(--bg-soft);
+    border-radius: var(--radius-sm); padding: 10px 12px;
+}
+.ab-avs { display: flex; margin-top: 6px; }
+.ab-av {
+    width: 26px; height: 26px; border-radius: 50%; background: var(--razz-red); color: #fff;
+    display: grid; place-items: center; font-size: 0.62rem; font-weight: 700; border: 2px solid var(--bg-soft);
+    margin-left: -6px;
+}
+.ab-av:first-child { margin-left: 0; }
+
+/* ── Actions ────────────────────────────────────────────────────────── */
+
+.ab-actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.ab-btn {
+    border: 1px solid var(--border-strong); background: var(--bg-card); border-radius: var(--radius-sm);
+    padding: 10px 18px; font-weight: 700; cursor: pointer; font-size: 0.88rem; color: var(--text);
+    font-family: inherit;
+}
+.ab-btn.ab-primary { background: var(--razz-red); border-color: var(--razz-red); color: #fff; }
+.ab-btn.ab-primary:hover { background: var(--razz-red-hover); }
+.ab-btn.ab-ghost { color: var(--razz-red); border-color: transparent; background: transparent; }
+.ab-chk { display: flex; align-items: center; gap: 7px; margin-left: auto; font-size: 0.83rem; color: var(--text-secondary); }
+
+.ab-members, .ab-test {
+    margin-top: 14px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg-soft);
+    font-size: 14px; word-break: break-word;
+}
+.ab-members ul { margin: 6px 0 0; padding-left: 18px; }
+
+/* ── Live preview pane ──────────────────────────────────────────────── */
+
+.ab-preview { padding: 22px 20px; border-left: 1px solid var(--border); position: sticky; top: 0; align-self: flex-start; }
+.ab-preview h3 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 0 0 4px; }
+.ab-pnote { font-size: 0.74rem; color: var(--text-muted); margin-bottom: 14px; }
+.ab-tile {
+    position: relative; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+.ab-ico {
+    width: 46px; height: 46px; border-radius: 12px; background: var(--bg-muted); display: inline-flex;
+    align-items: center; justify-content: center; font-size: 1.5rem; overflow: hidden;
+}
+.ab-ico img { width: 100%; height: 100%; object-fit: cover; }
+.ab-tname { font-weight: 700; font-size: 1rem; }
+.ab-tdesc { color: var(--text-secondary); font-size: 0.82rem; line-height: 1.45; flex: 1; min-height: 34px; }
+.ab-tfoot { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
+.ab-chip {
+    font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px;
+    border-radius: var(--radius-pill); background: var(--razz-red-soft); color: var(--razz-red);
+}
+.ab-open { color: var(--razz-red); font-weight: 700; font-size: 0.8rem; }
+.ab-prun { margin-top: 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+.ab-rh { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 8px; }
+.ab-prun input { margin-bottom: 8px; }
+.ab-rb {
+    background: var(--razz-red); color: #fff; border: 0; border-radius: var(--radius-sm); padding: 8px 14px;
+    font-weight: 700; font-size: 0.8rem; cursor: pointer; width: 100%; font-family: inherit;
+}
+.ab-prun input:disabled, .ab-rb:disabled { opacity: 0.55; cursor: not-allowed; }
+
+@media (max-width: 980px) {
+    .ab-builder { grid-template-columns: 1fr; }
+    .ab-preview { border-left: none; border-top: 1px solid var(--border); position: static; }
+}
+@media (max-width: 720px) {
+    .ab-shell { flex-direction: column; }
+    .ab-list { width: auto; border-right: none; border-bottom: 1px solid var(--border); }
+}

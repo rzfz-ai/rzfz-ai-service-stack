@@ -1,0 +1,23 @@
+# LiteLLM PURE-ROUTER config — TEMPLATE.
+# The manager GENERATES the live router-config.yaml (app/router_config.py, task
+# R1) from llm_manager_db state into the shared llm-manager-router-config
+# volume. This example documents the shape LiteLLM expects. LiteLLM here does
+# ONLY routing/LB/failover — no end-customer keys, no spend tracking (the
+# manager owns that).
+model_list:
+  - model_name: rzfz-chat
+    litellm_params:
+      model: openai/qwen3.6
+      api_base: http://amd-box-1:8080/v1
+      api_key: none
+router_settings:
+  routing_strategy: latency-based-routing
+  num_retries: 2
+  allowed_fails: 2
+  cooldown_time: 30
+  redis_host: valkey
+  redis_port: 6379
+general_settings:
+  master_key: os.environ/LITELLM_INTERNAL_KEY   # known only to the manager
+litellm_settings:
+  drop_params: true

@@ -1,0 +1,26 @@
+# INIT_VERSION <sha256 over core/Authentik/blueprints/base/*.yaml NOT in the profile-toggle re-copy list>
+# Rewrite this line only together with an INIT_VERSION bump (test_1310_init_version_follows_base_blueprints.py).
+# 2026-09-05 (#1176 / PR #1344): 33-llm-manager-ui + 34-hub moved INTO the profile-toggle re-copy list, so they left the pinned SET; no pinned file's content changed and no INIT_VERSION bump is due — the hash below was the same 4.5 over the smaller set.
+# NOTE: the re-copy list ships a file only on a PROFILE TOGGLE (init-authentik.sh PROFILES_CHANGED_ONLY); a content change to 33/34 still needs an INIT_VERSION bump, or a box without a profile change never receives it.
+# 2026-09-05 (#1493): a SECOND scope. The re-copy list ships a file only on a PROFILE TOGGLE, so the 26 files in it
+# reach a box that never toggles exactly as often as the pinned 8 do without a bump: never. `base` = the blueprints a
+# toggle never re-copies; `recopy` = the ones it re-copies. Both digests cover the file NAMES, so moving a file from
+# one set to the other changes BOTH lines — the #1344 escape hatch (move it into the list instead of bumping) is shut.
+# 2026-09-05 (#1444 / cutover C4): bumped to 4.6 — 33-llm-manager-ui.yaml changes CONTENT (external_host follows the
+# new LLM_DOMAIN) and lives in the re-copy list, so without the bump the change reaches no box that does not toggle a
+# profile. `base` is unchanged (no file in that set was touched); `recopy` follows the new content of 33.
+# 2026-09-08 (#1635): 02-groups.yaml gains the three agent quota-tier groups
+# (agent-basic / agent-power / agent-admin). It is NOT in the profile-toggle
+# re-copy list, so only an INIT_VERSION bump delivers them — without it a normal
+# user keeps resolving to no tier and every agent card stays "Restricted".
+# 2026-09-12 (#1982): 37-wazuh.yaml changes CONTENT — a new scopemapping plus the wazuh-oidc
+# provider swapping authentik's default 'profile' mapping for it, so a Super Admin reaches the
+# Wazuh API as `admin`. It lives in the re-copy list, so without the bump the change reaches no
+# box that does not toggle the wazuh profile, and such a console keeps saying "no agents
+# registered" while its alerts keep arriving — the failure looks like health.
+# 2026-09-18 (#2247): 02-groups.yaml changes CONTENT — every razzfazz.ai group gains the
+# attribute goauthentik.io/user/token-maximum-lifetime = days=30 (operator decision, Jira
+# RZFZAI-1971); without it Authentik clamps every API token to 30 minutes on every write. It
+# is NOT in the re-copy list, so only the bump to 4.9 delivers the attribute to an installed box.
+base 4.9 5dc0f442613d3a1efc6d3fb42be7e6a11bba2853bcc7fc7ad8d63c4595ffb91a
+recopy 4.9 ccb1fd11687832a8f9f69ee53ce61e0922f734177a74d79904611027fb7c76a0

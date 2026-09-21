@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{# #982 Task 5: landing/overview doc pane — ports the prototype's right-hand
+   "Start here" article. The rail + sub-nav come entirely from base.html's
+   `layout` override; this template only supplies the doc pane content. #}
+
+{% block help_content %}
+<div class="inner">
+    <div class="eyebrow">Start here</div>
+    <h1>rzfz.ai Box — Help &amp; Documentation</h1>
+    <div class="meta">
+        Signed in as <strong>{{ username }}</strong>
+        <span class="chip">&#10003; Offline &middot; cached locally</span>
+    </div>
+    <p>Everything your box can do is documented here, on the box, and served
+       entirely from local files — no internet needed. Use the topics on the
+       left to browse; each topic opens its pages in the sub-navigation
+       beside it, and the search box full-text-searches every guide,
+       tutorial and per-app help page at once.</p>
+    <div class="callout">
+        <b>Fully offline.</b> These pages are synced to the box's local
+        cache; the search index is built from the same files, so search
+        keeps working air-gapped.
+    </div>
+    <h2>Two-level navigation</h2>
+    <p>The dark rail holds the top-level <b>topics</b>. Pick one and its
+       <b>pages</b> appear in the light sub-nav column — the same concept as
+       the Agent Manager. Collapse the rail with <code>&laquo;</code> to get
+       icon-only topics and more reading width.</p>
+    <h2>Search everything</h2>
+    <p>Type into the search box in the top bar — results come from a local
+       full-text index over every cached doc, so you find the right page by
+       any word in it, not just its title.</p>
+    {% if is_admin %}
+    <h2>Cache administration</h2>
+    <p>As a stack admin you can review and refresh the cached documentation
+       from <a href="{{ url_for('admin_cache') }}">Cache admin</a>.</p>
+    {% endif %}
+</div>
+{% endblock %}

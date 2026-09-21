@@ -1,0 +1,118 @@
+{# #959 Task A2: Admin reskinned onto the shared dark-rail shell
+   (base_shell.html, Task A1). System Overview becomes `.stat` tiles; both
+   tables get an `overflow-x:auto` wrapper + the shared `.admin-table`
+   styling. Every existing parity hook is preserved verbatim (see
+   tests/unit/agent-manager/test_959_identity_reskin.py::
+   test_admin_parity_hooks_survive_reskin and
+   tests/unit/agent-manager/test_959_shell.py). #}
+{% extends "base_shell.html" %}
+
+{% block page_title %}Agent Manager Admin{% endblock %}
+{% block crumb %} · <span class="sub">Admin</span>{% endblock %}
+
+{% block am_content %}
+    <a href="{{ url_for('dashboard.index') }}" style="color: var(--text-dim); text-decoration: none; font-size: 0.85rem;">&larr; User Dashboard</a>
+
+    <section class="card" style="margin-top: 12px;">
+        <h3>System Overview</h3>
+        <div class="stat-grid">
+            <div class="stat"><div class="n">{{ total }}<span class="stat-of"> / {{ max_instances }}</span></div><div class="l">Instances</div></div>
+            <div class="stat"><div class="n">{{ agent_types|length }}</div><div class="l">Agent types</div></div>
+            <div class="stat"><div class="n">{{ tiers|length }}</div><div class="l">Quota tiers</div></div>
+        </div>
+        <a href="{{ url_for('admin.audit_log') }}" class="btn btn-sm" style="margin-top: 12px; display: inline-block;">View Audit Log</a>
+    </section>
+
+    <section class="card">
+        <h3>All Instances</h3>
+        <div style="overflow-x: auto;">
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Agent</th>
+                    <th>State</th>
+                    <th>Container</th>
+                    <th>Created</th>
+                    <th>Last Accessed</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for inst in instances %}
+                <tr>
+                    <td>{{ inst.user_slug }}</td>
+                    <td>{{ inst.type_display_name }}</td>
+                    <td><span class="badge {{ inst.state }}">{{ inst.state }}</span></td>
+                    <td><code>{{ inst.container_name }}</code></td>
+                    <td>{{ inst.created_at.strftime('%Y-%m-%d %H:%M') if inst.created_at else '-' }}</td>
+                    <td>{{ inst.last_accessed.strftime('%Y-%m-%d %H:%M') if inst.last_accessed else '-' }}</td>
+                    <td>
+                        {% if inst.state == 'running' %}
+                        <!-- #1957: an admin may start, stop and resize ANY user's agent through the
+                             regular lifecycle routes (audited as admin.<route>); force-stop/-delete stay
+                             the last resort. -->
+                        <button class="btn btn-sm" onclick="agentAction('start', '{{ inst.id }}')">Start</button>
+                        <button class="btn btn-sm" onclick="agentAction('stop', '{{ inst.id }}')">Stop</button>
+                        <button class="btn btn-sm" onclick="agentMemory('{{ inst.id }}', '{{ inst.mem_limit_mb or '' }}')">Memory…</button>
+                        <button class="btn btn-sm" onclick="adminAction('force-stop', '{{ inst.id }}')">Force stop</button>
+                        {% endif %}
+                        <button class="btn btn-sm btn-danger" onclick="if(confirm('Force delete?')) adminAction('force-delete', '{{ inst.id }}')">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </section>
+
+    <section class="card">
+        <h3>Quota Tiers</h3>
+        <div style="overflow-x: auto;">
+        <table class="admin-table">
+            <thead>
+                <tr><th>Tier</th><th>Max/Type</th><th>Max Heavy</th><th>Allowed Types</th><th>Priority</th></tr>
+            </thead>
+            <tbody>
+                {% for t in tiers %}
+                <tr>
+                    <td>{{ t.display_name }} <code>({{ t.id }})</code></td>
+                    <td>{{ t.max_per_type }}</td>
+                    <td>{{ t.max_heavy }}</td>
+                    <td>{{ t.allowed_types|join(', ') if t.allowed_types else 'all' }}</td>
+                    <td>{{ t.priority }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </section>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// #1957: the regular lifecycle routes, which accept an admin for any user's
+// agent on start/stop/memory only (audited as admin.<route>).
+function agentAction(route, instanceId, body) {
+    const opts = { method: 'POST' };
+    if (body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
+    fetch('/api/' + route + '/' + instanceId, opts)
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => { if (!ok) { alert((d && (d.message || d.error)) || (route + ' failed')); } location.reload(); })
+        .catch(e => alert(route + ' failed: ' + e));
+}
+function agentMemory(instanceId, currentMb) {
+    const cur = currentMb ? Math.round(currentMb / 1024) : '';
+    const v = prompt('Memory limit in GB for this agent' + (cur ? ' (currently ' + cur + ' GB)' : ''), cur);
+    if (v === null) return;
+    const gb = parseInt(v, 10);
+    if (!(gb > 0)) { alert('Enter a whole number of GB'); return; }
+    agentAction('memory', instanceId, { mem_gb: gb });
+}
+function adminAction(action, instanceId) {
+    fetch('/admin/api/' + action + '/' + instanceId, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => { if (data.error) alert(data.error); else location.reload(); });
+}
+</script>
+{% endblock %}

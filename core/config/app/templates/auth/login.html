@@ -1,0 +1,18 @@
+{# rzfz.ai Configuration login.
+
+   Extends the shared razzfazz_common razz_login.html partial — local-auth
+   gate before the Configuration Portal lets the operator change anything.
+   Visual + form structure live in the partial; this template just sets
+   the title + heading. Inherited by Jinja's ChoiceLoader from
+   razzfazz_common (registered in create_base_app).
+#}
+{% extends "razz_login.html" %}
+
+{% block title %}rzfz.ai Management — Login{% endblock %}
+{% block heading %}Configuration{% endblock %}
+
+{# CFG-1 (#1018) — the break-glass login POST is state-changing and is
+   covered by the app-wide CSRF hook, so the form must carry the token or
+   the recovery path itself would 403. The GET that renders this page mints
+   the session token. #}
+{% block form_fields %}<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">{% endblock %}

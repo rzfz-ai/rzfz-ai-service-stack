@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# rzfz — the unified CLI for the rzfz.ai service stack (#34)
+# ==============================================================================
+# One entry point replacing the ~16 razzfazz-*.sh scripts:
+#
+#   rzfz <command> [args...]        e.g.  rzfz upgrade --check
+#   rzfz help                       list commands
+#
+# PHASE 1 (2026.07 rework): each subcommand DELEGATES to the existing
+# razzfazz-*.sh so behaviour is identical and risk is minimal. Phase 2 moves the
+# logic into cli/ and turns razzfazz-*.sh into thin shims → rzfz. See
+# .gsd/reports/2026.07-rework-execution-plan.md.
+#
+# Testability: set RZFZ_DRY=1 to print the resolved target + args instead of
+# executing (used by tests/test-rzfz-cli.sh).
+# ==============================================================================
+set -euo pipefail
+
+# Resolve a SYMLINK before deriving the root. `BASH_SOURCE[0]` is the path the
+# shell was invoked with, so for `/usr/local/bin/rzfz -> <stack>/rzfz` it is the
+# SYMLINK — and `dirname` of it is `/usr/local/bin`. Every delegation below is
+# `$RZFZ_ROOT/cli/<x>.sh`, so the CLI would then look for `/usr/local/bin/cli/`
+# and fail with "No such file or directory": a message that looks like a broken
+# stack rather than a missing install step.
+#
+# Measured 2026-09-10 (agent-seqis) before the fix:
+#     ln -s <repo>/rzfz /tmp/fakebin/rzfz
+#     cd /tmp && RZFZ_DRY=1 PATH=/tmp/fakebin:$PATH rzfz status
+#     -> would exec: /tmp/fakebin/cli/status.sh          # does not exist
+#
+# This matters because the customer documentation invokes `rzfz` BARE
+# (`rzfz status`, `rzfz backup backup`, `rzfz upgrade` — 369 call sites across
+# docs/enterprise/), i.e. it assumes the CLI is on PATH, and the only sane way
+# to put it there is a symlink. DevBox-Vuko measured on 0.91 that it is on PATH
+# nowhere at all. Whether the install SHOULD create that entry is a separate
+# question; this line is what makes the answer "yes" implementable at all, and
+# it is a no-op when there is no symlink.
+#
+# `readlink -f` is coreutils — Debian/Ubuntu, which is what the installers
+# already require (they check `dpkg`). It follows a whole chain of links, so a
+# distro that stacks `/usr/bin -> /bin` is covered too.
+RZFZ_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# command -> target script (relative to RZFZ_ROOT). Phase 2 repoints these into cli/.
+declare -A RZFZ_CMD=(
+    [init]=cli/init.sh
+    [setup]=cli/setup.sh
+    [upgrade]=cli/upgrade.sh
+    [post-install]=cli/post-install.sh
+    [backup]=cli/backup.sh
+    [status]=cli/status.sh
+    [logs]=cli/logs.sh
+    [package]=cli/package.sh
+    [checksum]=cli/checksum.sh
+    [test]=cli/test.sh
+    [probe]=cli/probe.sh
+    [verify-images]=cli/verify-images.sh
+    [verify-models]=cli/verify-models.sh
+    [adopt-models]=cli/adopt-models.sh
+    [set-admin-password]=cli/set-admin-password.sh
+    [set-password]=cli/set-password.sh
+    [rotate-secret]=cli/rotate-secret.sh
+    [security-check]=cli/security-check.sh
+    [provision-sso-users]=cli/provision-sso-users.sh
+    [rename-hex-oidc-users]=cli/rename-hex-oidc-users.sh
+    [worker-join]=cli/worker-join.sh
+    [node-init]=cli/node-init.sh
+    [hub-credentials]=cli/hub-credentials.sh
+    # #252: agent-safe lifecycle — all four verbs share cli/lifecycle.sh,
+    # which reads the verb from RZFZ_VERB (exported below before exec).
+    [stop]=cli/lifecycle.sh
+    [start]=cli/lifecycle.sh
+    [restart]=cli/lifecycle.sh
+    [down]=cli/lifecycle.sh
+)
+declare -A RZFZ_DESC=(
+    [init]="First-time setup wizard (validate prereqs, generate secrets, start stack)"
+    [setup]="Post-install config: secrets, API keys, SMTP, TLS, checksums, factory reset"
+    [upgrade]="Upgrade the stack (git/offline package, .env migration, rebuild, verify)"
+    [post-install]="Provision models + configure services after install"
+    [backup]="Backup / restore / list Docker volumes"
+    [status]="Show stack + service status"
+    [logs]="Collect container logs + system info into an archive"
+    [package]="Build an offline upgrade package from a git tag (developer machine)"
+    [checksum]="SHA256 governance snapshots of compose/Dockerfiles/scripts/blueprints"
+    [test]="Run the test suites"
+    [probe]="Run the acceptance probes the Configuration Portal queued (host side, #1223)"
+    [verify-images]="Assert every expected image (all profiles) is present locally — offline-readiness gate"
+    [verify-models]="Assert every standard-model GGUF is present in the gpustack-data volume — offline model-readiness gate"
+    [adopt-models]="Hand GPUStack's weights to the LLM Manager without downloading them again (2026.09 migration)"
+    [set-admin-password]="Reset a per-app admin password"
+    [set-password]="Set a named user's password (by email) in one local-auth app — password on stdin (#54)"
+    [rotate-secret]="Rotate a stack secret"
+    [security-check]="Run the host/stack security self-check"
+    [provision-sso-users]="Provision Authentik-group members into Dify/Cognee (no-OIDC apps)"
+    [rename-hex-oidc-users]="One-time fix: rename pre-#218 Gitea accounts named after the Authentik OIDC sub to their readable username"
+    [worker-join]="Join this box to an LLM Manager as a worker (#419; run the console's join command)"
+    [node-init]="Install this box as a THIN inference node — no stack, worker-agent only (#549 R0)"
+    [hub-credentials]="Mint the fleet hub's /v2 docker-API credential (hub.<domain>, #559)"
+    [stop]="Stop the stack AND the managed agents (containers kept) — agent-safe (#252)"
+    [start]="Start the stack, wait for the core, revive the agents from the last stop"
+    [restart]="rzfz stop + rzfz start"
+    [down]="compose down (volumes KEPT, agents only stopped — NEVER --remove-orphans/-v)"
+)
+
+# Dev-only subcommands (#26/#27): builder/QA tooling a CUSTOMER box must neither
+# advertise nor dispatch. `package` is the offline-package builder (its own help
+# says "developer machine"); `test` runs the internal test suites. They stay fully
+# runnable on a DEV checkout — only un-advertised on customer boxes.
+RZFZ_DEV_CMDS=(package test)
+
+# A box is DEV when RZFZ_DEV=1 is exported OR the internal .gsd/ tree is present.
+# .gsd/ never ships to the public Codeberg export (publish-public.sh HARD GATE 1),
+# so a customer install is never DEV and the dev commands are always hidden there.
+rzfz_is_dev() {
+    [[ "${RZFZ_DEV:-}" == "1" ]] && return 0
+    [[ -d "$RZFZ_ROOT/.gsd" ]] && return 0
+    return 1
+}
+
+# 0 (true) → this command is hidden/blocked on THIS box.
+rzfz_cmd_hidden() {
+    rzfz_is_dev && return 1          # dev box: nothing hidden
+    local c
+    for c in "${RZFZ_DEV_CMDS[@]}"; do [[ "$1" == "$c" ]] && return 0; done
+    return 1
+}
+
+rzfz_usage() {
+    cat <<EOF
+rzfz — the rzfz.ai service-stack CLI
+
+Usage:
+  rzfz <command> [args...]
+  rzfz help                 Show this help
+  rzfz <command> --help     Help for a command
+
+Commands:
+EOF
+    local c
+    for c in $(printf '%s\n' "${!RZFZ_CMD[@]}" | sort); do
+        rzfz_cmd_hidden "$c" && continue
+        printf '  %-20s %s\n' "$c" "${RZFZ_DESC[$c]:-}"
+    done
+}
+
+main() {
+    local cmd="${1:-help}"
+    case "$cmd" in
+        -h|--help|help|"") rzfz_usage; return 0 ;;
+        --list)
+            # Emit the whole (filtered) list in ONE write. A per-line echo loop
+            # SIGPIPEs when a consumer (`… | grep -q`) closes the pipe early —
+            # under the caller's `pipefail` that surfaces as a false "missing".
+            local c out=""
+            for c in $(printf '%s\n' "${!RZFZ_CMD[@]}" | sort); do
+                rzfz_cmd_hidden "$c" && continue
+                out+="$c"$'\n'
+            done
+            printf '%s' "$out"
+            return 0 ;;
+    esac
+    local script="${RZFZ_CMD[$cmd]:-}"
+    # A dev-only command on a customer box is treated exactly like an unknown one.
+    if [[ -z "$script" ]] || rzfz_cmd_hidden "$cmd"; then
+        echo "rzfz: unknown command '$cmd'" >&2
+        echo "Run 'rzfz help' for the list of commands." >&2
+        return 2
+    fi
+    shift
+    local target="$RZFZ_ROOT/$script"
+    if [[ "${RZFZ_DRY:-}" == "1" ]]; then
+        echo "would exec: $target $*"
+        return 0
+    fi
+    if [[ ! -x "$target" ]]; then
+        echo "rzfz: target for '$cmd' not found/executable: $target" >&2
+        return 1
+    fi
+    export RZFZ_VERB="$cmd"   # #252: lifecycle.sh reads the verb from here
+    exec "$target" "$@"
+}
+
+main "$@"

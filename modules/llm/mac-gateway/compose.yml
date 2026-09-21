@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# MAC LLM GATEWAY (LiteLLM) — profile: mac-llm  [opt-in, OFF by default]
+# ------------------------------------------------------------------------------
+# Fronts one-or-more Macs running Ollama (Apple-Silicon / MLX) as a SECOND
+# OpenAI-compatible endpoint — load-balanced + health-checked. GPUStack is
+# UNTOUCHED: this is a second endpoint alongside gpustack:9090/v1-openai, never
+# a replacement.
+#
+# Config is the bind-mounted, per-box config.yaml (gitignored). The Config
+# Portal edits it (P2); in P1 you hand-copy config.example.yaml -> config.yaml
+# and fill in your Macs. Because the config is a bind-mounted FILE, config.yaml
+# MUST already exist before you enable the `mac-llm` profile — otherwise Docker
+# creates an empty directory in its place and LiteLLM fails to start.
+#
+# Design: .gsd/reports/2026.08-mac-ollama-gateway-design.md
+# Plan:   .gsd/reports/2026.08-mac-ollama-gateway-plan.md
+#
+# SECURITY: the gateway is INTERNAL-ONLY in P1 (no Caddy route). It is reached
+# in-network as llm-mac-gateway:4000 and requires the MAC_GATEWAY_MASTER_KEY
+# (a stack secret). The host bind is loopback-only for operator debugging. An
+# SSO-gated external route (llm-mac.<domain>) is deferred to P3 (design §9).
+# NOTE: the container reaches each Mac over the host LAN in PLAINTEXT (Ollama
+# has no auth) — firewall every Mac to accept :11434 only from this box's IP.
+# ==============================================================================
+services:
+  llm-mac-gateway:
+    # Pinned via LITELLM_VERSION (.env). LiteLLM ships production "-stable"
+    # images as ghcr.io/berriai/litellm:main-v<X.Y.Z>-stable. SHIP GATE: the
+    # release security review must confirm/repin this to a reviewed tag or a
+    # @sha256 digest before any GA (new compose service → pre-tag-check trips).
+    image: ghcr.io/berriai/litellm:${LITELLM_VERSION:-main-v1.83.7-stable}
+    profiles: ["mac-llm"]
+    container_name: llm-mac-gateway
+    restart: unless-stopped
+    networks:
+      - default
+    ports:
+      # Loopback-only host bind (operator debug + P1 live smoke). In-network
+      # consumers use the Docker DNS name llm-mac-gateway:4000 instead.
+      - "127.0.0.1:${MAC_GATEWAY_PORT:-4000}:4000"
+    environment:
+      # The master_key in config.yaml is `os.environ/MAC_GATEWAY_MASTER_KEY`.
+      MAC_GATEWAY_MASTER_KEY: ${MAC_GATEWAY_MASTER_KEY:-}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      # Relative to THIS file's dir (compose `include` resolves included-file
+      # relative paths against the included file). Per-box, gitignored.
+      - ./config.yaml:/app/config.yaml:ro
+    mem_limit: 1g
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /health/liveliness is LiteLLM's unauthenticated liveness probe.
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.build_opener(u.ProxyHandler({})).open('http://localhost:4000/health/liveliness',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 20s

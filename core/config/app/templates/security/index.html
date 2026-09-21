@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block page_title %}Security Documentation{% endblock %}
+
+{% block page_content %}
+<div class="page">
+    <h1>Security Documentation</h1>
+    <p class="lede">Customer-facing security architecture & posture handover document.</p>
+</div>
+
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+    <div style="display:flex;gap:2rem;flex-wrap:wrap;font-size:0.875rem">
+        <div><strong>Stack version:</strong> <code>{{ doc_meta.get('stack_version', 'unknown') }}</code></div>
+        <div><strong>Last generated:</strong> {{ doc_meta.get('generated', 'unknown') }}</div>
+        <div><strong>Source of truth:</strong> <code>docs/security-architecture.md</code></div>
+    </div>
+    <div style="margin-top:0.5rem;font-size:0.8125rem;color:var(--text-muted)">
+        This document is rendered from the repo. To refresh it, re-run:
+        <code style="font-size:0.8rem">python3 .claude/skills/security-documentation/scripts/generate-security-arch.py</code>
+        then <code style="font-size:0.8rem">docker compose up -d --force-recreate razzfazz-config</code>.
+    </div>
+    </div>
+</div>
+
+<div class="card markdown-body">
+<div class="card-body">
+{{ doc_html | safe }}
+</div>
+</div>
+
+<style>
+.markdown-body h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.4rem; margin-top: 0; }
+.markdown-body h2 { font-size: 1.35rem; margin-top: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+.markdown-body h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+.markdown-body table { border-collapse: collapse; margin: 1rem 0; width: 100%; font-size: 0.875rem; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+.markdown-body th { background: var(--bg-soft); font-weight: 600; }
+.markdown-body code { background: var(--bg-soft); padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.875em; }
+.markdown-body pre { background: var(--bg-soft); padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+.markdown-body pre code { background: transparent; padding: 0; }
+.markdown-body ul, .markdown-body ol { padding-left: 1.75rem; }
+.markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+.markdown-body a { color: var(--razz-red); text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+</style>
+{% endblock %}

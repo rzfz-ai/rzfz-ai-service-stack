@@ -1,0 +1,123 @@
+{# M026 S09 #5: extends the shared razz_base.html shell (S08).
+
+   Override the `layout` block (added by rc6.7 #54 fix) instead of
+   `content`. The default razz_base layout wraps `content` in
+   .razz-container (max-width 1100px), which is right for help/setup/
+   backup/license but wrong for config — config has a fixed 240px sidebar
+   + main layout that must span the full viewport. Capping at 1100px
+   squeezed everything into the left third of the page (rc6.7 #54).
+
+   Block structure exposed to child templates (.html files in dashboard/,
+   settings/, backup/, governance/, modules/, security/, logs/, docs/):
+     page_title   — page <title> text; appended with " — rzfz.ai"
+     page_content — the per-page main content (rendered inside <main>)
+     page_extra_css — optional per-page additional <link> tags
+
+   NOTE: child templates were renamed in S09 from {% block title %}
+   → {% block page_title %} and {% block content %} → {% block page_content %}
+   so the outer config-shell `title` and `content` blocks (which override
+   razz_base's same-named blocks) are not clobbered. 18 child templates
+   were touched by that rename (mechanical, content-preserving). After the
+   rc6.7 #54 fix we override `layout`, not `content`, but the per-page
+   {% block page_content %} hook is unchanged.
+
+   The razzfazz-base.css link is owned by razz_base.html — do not re-link.
+   Local styles.css is loaded AFTER it via extra_css so config-specific
+   selectors win.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}{% block page_title %}Management{% endblock %} — rzfz.ai{% endblock %}
+
+{% block extra_css %}
+    {# Cache-bust per release: without this, browsers keep serving the old
+       styles.css across upgrades, so CSS fixes look "not applied" until a
+       manual hard-refresh (#216 follow-up — the release-notes scroll fix was
+       correct on-box but the browser served the cached pre-fix CSS). #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v={{ stack_version|default('0') }}">
+    {% block page_extra_css %}{% endblock %}
+{% endblock %}
+
+{# CFG-1 (#1018) — CSRF. Two carriers, both fed by the same session token:
+
+   1. `<meta name="csrf-token">` — read by static/main.js (and the inline
+      fetch() blocks in backup/, logs/, settings/, mac_backends/) which send
+      it as the `X-CSRF-Token` header. Same idiom as start-portal's
+      index.html since #388.
+   2. `hx-headers` on <body> — HTMX inherits attributes down the DOM, so
+      EVERY hx-post/hx-put/hx-delete anywhere on the page carries the header
+      without each element having to remember. Routes added later are
+      covered by construction.
+
+   Plain HTML form elements carry the hidden `_csrf_token` field
+   instead (see the per-template fields) — a form submit is a browser
+   navigation, not a JS request, so it can't send a header. #}
+{% block extra_head %}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    {# Defined in <head> — BEFORE any per-page inline <script> and before
+       main.js — so every fetch() caller on every page can reach it without
+       worrying about script order. #}
+    <script>
+        window.rzfzCsrfToken = function () {
+            var m = document.querySelector('meta[name="csrf-token"]');
+            return m ? m.getAttribute('content') : '';
+        };
+        window.rzfzCsrfHeaders = function (extra) {
+            var h = {'X-CSRF-Token': window.rzfzCsrfToken()};
+            if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) { h[k] = extra[k]; } } }
+            return h;
+        };
+    </script>
+{% endblock %}
+
+{% block body_attrs %} hx-headers='{"X-CSRF-Token": "{{ csrf_token() }}"}'{% endblock %}
+
+{# config has no top header — the sidebar IS the navigation chrome. #}
+{% block header %}{% endblock %}
+
+{% block layout %}
+<div class="app">
+    <nav class="sidebar">
+        {% include "components/nav.html" %}
+    </nav>
+    {# #300-followup: master-detail Settings sub-pane, a flex sibling of the
+       rail (rail -> subnav -> content). Only rendered on settings routes
+       (/settings/* or /mac-backends) — everywhere else the shell stays the
+       plain rail -> content two-column layout it already was. #}
+    {% if request.path.startswith('/settings') or request.path.startswith('/mac-backends') %}
+    <nav class="subnav" aria-label="Settings">
+        {% include "components/settings_subnav.html" %}
+    </nav>
+    {% endif %}
+    <div class="main">
+        <div class="topbar">
+            <span class="crumb">{% block crumb %}{{ self.page_title() }}{% endblock %}</span>
+            <div class="topbar-actions">
+                <a href="#" onclick="showReleaseNotes();return false" class="btn ghost sm">Release Notes</a>
+                <a href="/api/docs/getting-started" target="_blank" class="btn ghost sm">Getting Started</a>
+                <span class="who"><span class="avatar">{{ (session.get('admin_username') or 'A')[0]|upper }}</span>{{ session.get('admin_username') or 'admin' }}</span>
+            </div>
+        </div>
+        <main class="content">
+            {% if env_mount and env_mount.stale %}
+            <div class="flash flash-error env-mount-banner" role="alert">
+                <strong>The Configuration Portal cannot write
+                {% for f in env_mount.files if f.stale %}<code>{{ f.name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</strong>
+                — {% for f in env_mount.files if f.stale %}{{ f.reason }}{% if not loop.last %}; {% endif %}{% endfor %}.
+                Module toggles and settings saves will fail until the portal container is recreated once
+                (the stack and the host file are fine):
+                <code>{{ env_mount.recreate }}</code> — run in the stack directory on the host. (#1189)
+            </div>
+            {% endif %}
+            {% block page_content %}{% endblock %}
+        </main>
+    </div>
+</div>
+{% include "components/apply_dialog.html" %}
+{% include "components/release_notes_whats_new.html" %}
+{% endblock %}
+
+{% block extra_js %}
+    <script src="{{ url_for('static', filename='htmx.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+{% endblock %}

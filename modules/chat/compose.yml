@@ -1,0 +1,351 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# CHAT MODULE (OpenWebUI & Pipelines)
+# ==============================================================================
+# Profile: chat
+# Description: User-friendly Chat Interface and Pipeline processing.
+# Config: .env (global)
+# Dependencies: postgres, llm-backend (optional)
+# ==============================================================================
+services:
+  # ==========================================
+  # OpenWebUI: legacy peewee migratehistory reconciler
+  # ==========================================
+  # OpenWebUI 0.9.x runs BOTH alembic (which owns the schema) and a vestigial
+  # legacy peewee migration runner. On an upgrade from a pre-alembic OpenWebUI
+  # (e.g. 2026.04-ga) the peewee `migratehistory` table is left with only
+  # 001_initial_schema while alembic brings the schema fully to head — so the
+  # peewee runner replays its column-adding migrations (002_add_local_sharing →
+  # `chat.share_id`, …) onto a schema that already has them and crash-loops the
+  # container ("column ... already exists"). This one-shot marks the FROZEN
+  # legacy peewee migrations (001–018; OpenWebUI moved to alembic afterwards) as
+  # applied so the vestigial runner skips them. Guarded + idempotent: only acts
+  # when an EXISTING alembic-managed OpenWebUI DB has a stale peewee history —
+  # a no-op on fresh installs (no migratehistory table yet) and when the history
+  # is already complete. Mirrors the authentik-migrate-reconcile pattern.
+  openwebui-migrate-reconcile:
+    image: postgres:17.10
+    profiles: ["chat"]
+    container_name: openwebui-migrate-reconcile
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        # This runs BEFORE OpenWebUI 0.9.x starts. A pre-alembic OpenWebUI
+        # (2026.04-ga) carried NO migratehistory table at all — 0.9.x's peewee
+        # runner CREATEs it, records 001, then crashes adding 002's chat.share_id
+        # (already present in the old schema) — all within one OpenWebUI startup,
+        # leaving no window to intercept. So we must pre-create + populate
+        # migratehistory here so 0.9.x's `CREATE TABLE IF NOT EXISTS` finds it and
+        # its runner sees 001-018 already done and skips them (alembic owns the
+        # real schema). Discriminator: an existing chat table whose share_id
+        # column exists but whose 002 migration is unrecorded. Idempotent: no-op
+        # on a fresh DB (no chat table) and when 002 is already recorded. The
+        # migratehistory DDL mirrors peewee-migrate's own (id serial PK, name
+        # varchar(255), migrated_at timestamp).
+        has_chat=$$(psql -tA -c "SELECT to_regclass('public.chat')")
+        if [ "$$has_chat" != "chat" ]; then
+          echo "openwebui-reconcile: no chat table (fresh DB) — nothing to do"; exit 0
+        fi
+        has_share=$$(psql -tA -c "SELECT 1 FROM information_schema.columns WHERE table_name='chat' AND column_name='share_id' LIMIT 1")
+        if [ -z "$$has_share" ]; then
+          echo "openwebui-reconcile: chat.share_id absent — not an affected pre-alembic DB — nothing to do"; exit 0
+        fi
+        has_002=$$(psql -tA -c "SELECT 1 FROM migratehistory WHERE name='002_add_local_sharing' LIMIT 1" 2>/dev/null || true)
+        if [ -n "$$has_002" ]; then
+          echo "openwebui-reconcile: legacy migration 002 already recorded — nothing to do"; exit 0
+        fi
+        echo "openwebui-reconcile: pre-alembic schema (chat.share_id exists, 002 unrecorded) — seeding migratehistory with frozen legacy migrations"
+        psql -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS migratehistory (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, migrated_at TIMESTAMP NOT NULL DEFAULT now());"
+        psql -v ON_ERROR_STOP=1 -c "INSERT INTO migratehistory(name, migrated_at) SELECT v.name, now() FROM (VALUES ('001_initial_schema'),('002_add_local_sharing'),('003_add_auth_api_key'),('004_add_archived'),('005_add_updated_at'),('006_migrate_timestamps_and_charfields'),('007_add_user_last_active_at'),('008_add_memory'),('009_add_models'),('010_migrate_modelfiles_to_models'),('011_add_user_settings'),('012_add_tools'),('013_add_user_info'),('014_add_files'),('015_add_functions'),('016_add_valves_and_is_active'),('017_add_user_oauth_sub'),('018_add_function_is_global')) AS v(name) WHERE NOT EXISTS (SELECT 1 FROM migratehistory m WHERE m.name = v.name);"
+    environment:
+      PGHOST: postgres
+      PGUSER: ${OPENWEBUI_DB_USER:-${POSTGRES_USER:-docker}}
+      PGDATABASE: ${OPENWEBUI_DB:-openwebui_db}
+      PGPASSWORD: ${OPENWEBUI_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ==========================================
+  # OpenWebUI: The Chat Interface
+  # ==========================================
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:${OPENWEBUI_VERSION:-0.11.3}
+    profiles: ["chat"]
+    container_name: openwebui
+    restart: unless-stopped
+    # Operator hotfix 2026-05-15 (after prod bulk-upload of 8 docs hit
+    # "Too many open files" calling gpustack:9090 for embeddings):
+    # default Docker nofile=1024 is exhausted by parallel doc-extraction
+    # × embedding-socket × vector-DB-write fan-out. Raised to 65535
+    # (matching the kernel's typical fs.file-max headroom). See
+    # BSB-FIX-C-BUG-01 for the related "no client-side timeout" gap
+    # that compounds this — DoclingLoader holds connections open without bound.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    ports:
+      - "127.0.0.1:${OPENWEBUI_PORT:-8080}:8080"
+    env_file:
+      - ../../.env
+    environment:
+      # Database connection (using variables from .env)
+      - 'DATABASE_URL=postgresql://${OPENWEBUI_DB_USER:-${POSTGRES_USER:-docker}}:${OPENWEBUI_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}@postgres:5432/${OPENWEBUI_DB:-openwebui_db}'
+      
+      # External API connections
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
+      # OpenAI-compatible endpoints. Default = GPUStack only (existing boxes
+      # unchanged). When the `mac-llm` profile is enabled, the operator/Config
+      # Portal sets OWUI_OPENAI_BASE_URLS to a ;-separated list appending the
+      # Mac gateway as a 2nd endpoint (paired 1:1 with OWUI_OPENAI_KEYS), e.g.
+      #   OWUI_OPENAI_BASE_URLS=http://gpustack:9090/v1-openai;http://llm-mac-gateway:4000/v1
+      #   OWUI_OPENAI_KEYS=${GPUSTACK_API_KEY};${MAC_GATEWAY_MASTER_KEY}
+      # A disabled gateway is unreachable, so never append it unless mac-llm is on.
+      # #320 (operator option 1): when the llm-manager profile is active,
+      # post-install appends http://llm-manager:8080/v1 with a minted SERVICE
+      # key (cost-centre stack/openwebui) — the manager's /v1 hot path meters
+      # + enforces, so OWUI traffic lands in the chargeback under that
+      # service identity.
+      # #1252: `-`, NOT `:-`. The `:-` form substitutes on an EMPTY value too,
+      # so a box whose `.env` says "not wired yet" (both keys present and
+      # blank — the state a Manager box is in until post-install resolves the
+      # manager's service key) silently received the GPUStack endpoint and the
+      # `gpustack_CHANGEME_AFTER_FIRST_START` placeholder in its container env,
+      # while openwebui_db held the correct manager connection. Two truths, and
+      # the .env one is what an upgrade re-seeds from. An explicitly EMPTY value
+      # now reaches OWUI as empty ("assert nothing, use the persisted config");
+      # the GPUStack default still applies when the key is entirely ABSENT,
+      # which is the legacy .env that predates it (`config/.env.example` and
+      # `config/migrations/env-changes.json` both ship the keys, so every
+      # current box takes the explicit path).
+      - OPENAI_API_BASE_URLS=${OWUI_OPENAI_BASE_URLS-http://llm:8080/v1}   # #1445: canonical LLM endpoint (the manager, #979)
+      # rc6.7 #62: OpenWebUI 0.6.x requires OPENAI_API_KEYS (plural)
+      # matched 1:1 with OPENAI_API_BASE_URLS — without it the connection
+      # sends no auth and GPUStack rejects with 401, yielding "no models"
+      # in the UI. Wire to GPUSTACK_API_KEY (the live admin key written
+      # by razzfazz-init.sh / razzfazz-post-install.sh after the GPUStack
+      # bootstrap). The legacy GPUSTACK_OPENAI_API_KEY env (still set to
+      # the placeholder `gpustack_CHANGEME_AFTER_FIRST_START`) is dead
+      # code and removed from .env.example by the same migration.
+      - OPENAI_API_KEYS=${OWUI_OPENAI_KEYS-${GPUSTACK_API_KEY:-}}
+      - ENABLE_OLLAMA_API=false
+
+      # RAG embedding via GPUStack qwen3-embedding (2026.06-ga.3). Replaces
+      # OpenWebUI's built-in local sentence-transformers (dim 384) with the
+      # fleet-standard qwen3-embedding served by GPUStack (OpenAI-compatible,
+      # dim 2560, 32K ctx) so OWUI RAG matches cognee/lightrag — see
+      # core/llm/standard-models.yaml defaults.embedding.
+      # NOTE (existing boxes): OpenWebUI persists RAG config in its DB
+      # (ENABLE_PERSISTENT_CONFIG default), so these envs only seed a FRESH
+      # install. On an already-initialised box, switch it under
+      # Admin → Settings → Documents → Embedding (engine=OpenAI,
+      # model=qwen3-embedding) AND re-index all knowledge collections — the
+      # dim change 384→2560 makes existing vectors incompatible.
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_EMBEDDING_MODEL=qwen3-embedding
+      # #320: env seam — RAG stays on GPUStack by default; a box that moves
+      # embeddings to the llm-manager line overrides these two (they were
+      # hardcoded before, which blocked any second serving line).
+      - RAG_OPENAI_API_BASE_URL=${OWUI_RAG_OPENAI_BASE_URL:-http://llm:8080/v1}   # #1445
+      - RAG_OPENAI_API_KEY=${OWUI_RAG_OPENAI_KEY:-}   # #1445: the manager's service key (post-install mints it); a GPUStack key would be a wrong key, not a fallback
+      # #23: docling as the OWUI document content extractor. Empty default =
+      # OWUI's built-in extractor (safe when the docling profile isn't enabled);
+      # razzfazz-post-install sets OWUI_CONTENT_EXTRACTION_ENGINE=docling when the
+      # docling profile is active, making docling the default extractor there.
+      - CONTENT_EXTRACTION_ENGINE=${OWUI_CONTENT_EXTRACTION_ENGINE:-}
+      - DOCLING_SERVER_URL=${OWUI_DOCLING_SERVER_URL:-http://docling:5001}
+
+      # M033 S12: Cognee memory pipe (chat/functions/cognee_pipe.py) reads
+      # these to authenticate to the in-stack Cognee API. COGNEE_ADMIN_PASSWORD
+      # is the fleet bootstrap password (aligned by M033 S17). Empty values
+      # make the pipe show a "not configured" notice instead of erroring.
+      # Mirror knowledge/cognee/compose.yml's DEFAULT_USER_EMAIL / _PASSWORD
+      # exactly so the pipe logs in with the same credentials Cognee seeded.
+      - COGNEE_BASE_URL=http://cognee:8000
+      - COGNEE_ADMIN_EMAIL=razzfazz-ai-admin@${MAIN_DOMAIN:-razzfazz-box.local}
+      - COGNEE_ADMIN_PASSWORD=${COGNEE_ADMIN_PASSWORD:-${AUTHENTIK_BOOTSTRAP_PASSWORD:-}}
+
+      # Security & App Settings
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      # ga.1 (§16.3 handover): default the NATIVE email/password signup form
+      # CLOSED. This is independent of SSO — new SSO users are provisioned via
+      # ENABLE_OAUTH_SIGNUP (below), so closing the native form does NOT break
+      # OIDC login. Was hardcoded `true` (open native registration on every box,
+      # mitigated only by the forward_auth gate); now defaults closed and stays
+      # operator-overridable via .env for a deliberately non-SSO box.
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-false}
+      - WEBUI_NAME=razzfazz.ai
+      
+      # OAuth / SSO (Google) - enabled when GOOGLE_CLIENT_ID is set
+      # Empty values disable Google OAuth
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+
+      # Native OIDC via Authentik (ENABLE_OPENWEBUI_OIDC=true)
+      # When enabled: users are auto-provisioned on first OIDC login.
+      # Caddy forward-auth is retained as a defense-in-depth outer layer.
+      # Client ID/Secret are set by the Authentik OAuth2Provider blueprint (19-openwebui-oidc.yaml).
+      - OAUTH_PROVIDER_NAME=Authentik
+      # 0.11.0 added ENABLE_OAUTH — a master on/off switch for OAuth/OIDC sign-in
+      # (PersistentConfig oauth.enable). Upstream default is True (existing
+      # provider configs keep working); we set it explicitly so a future upstream
+      # default-flip cannot silently kill SSO. #249 (2026.09 OWUI 0.11 bump).
+      - ENABLE_OAUTH=True
+      - OAUTH_CLIENT_ID=${OPENWEBUI_OIDC_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OPENWEBUI_OIDC_CLIENT_SECRET:-}
+      - OPENID_PROVIDER_URL=https://${AUTHENTIK_DOMAIN:-auth.localhost}/application/o/openwebui-oidc/.well-known/openid-configuration
+      # `groups` is requested so Authentik's razzfazz.ai groups scope mapping
+      # (core/Authentik/blueprints/base/06-oauth-groups-scope.yaml) emits the
+      # user's group names for True SSO group->role mapping (#33).
+      - OAUTH_SCOPES=${OWUI_OAUTH_SCOPES:-openid email profile groups}
+      - OAUTH_USERNAME_CLAIM=preferred_username
+      - OAUTH_EMAIL_CLAIM=email
+      # ---- True SSO group->role mapping (#33) --------------------------------
+      # Map an Authentik GROUP -> Open WebUI role. When enabled, on every OIDC
+      # login OWUI reads OAUTH_ROLES_CLAIM (`groups`) and:
+      #   - grants ADMIN if the user is in any OAUTH_ADMIN_ROLES group
+      #     (default: the SSO admin group, razzfazz.ai Super Admins)
+      #   - grants USER if in any OAUTH_ALLOWED_ROLES group
+      #   - otherwise denies (pending) the login
+      # The admin group is config-driven (SSO_ADMIN_GROUP), never a hardcoded user.
+      # NOTE: default OFF for upgrade safety — enabling it re-derives the role of
+      # EVERY user from their groups on next login, so an existing OWUI admin who
+      # is NOT in the admin group would be demoted. Ensure your operator account
+      # is in "razzfazz.ai Super Admins" before setting this true.
+      - ENABLE_OAUTH_ROLE_MANAGEMENT=${ENABLE_OWUI_OAUTH_ROLE_MANAGEMENT:-false}
+      - OAUTH_ROLES_CLAIM=${OWUI_OAUTH_ROLES_CLAIM:-groups}
+      - OAUTH_ALLOWED_ROLES=${OWUI_OAUTH_ALLOWED_ROLES:-razzfazz.ai Chat Users,razzfazz.ai Super Admins}
+      - OAUTH_ADMIN_ROLES=${OWUI_OAUTH_ADMIN_ROLES:-${SSO_ADMIN_GROUP:-razzfazz.ai Super Admins}}
+      # init seeds a local admin (razzfazz-ai-admin@${MAIN_DOMAIN}) whose email
+      # matches the Authentik OIDC identity. Merge by email so the first native
+      # OIDC login signs INTO that existing admin instead of 400-ing with "This
+      # email is already registered" (#30 — the whole point is to remove OWUI's
+      # second login). Safe here: Authentik is the single trusted IdP and the
+      # email claim is authoritative (same trust model as vaultwarden's
+      # SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION). Behind Caddy forward-auth too.
+      - OAUTH_MERGE_ACCOUNTS_BY_EMAIL=${OAUTH_MERGE_ACCOUNTS_BY_EMAIL:-true}
+      # ENABLE_OAUTH_SIGNUP controls whether new users can register via OAuth/OIDC login.
+      # Set to true by razzfazz-init.sh when ENABLE_GOOGLE_OAUTH or ENABLE_OPENWEBUI_OIDC is true.
+      - ENABLE_OAUTH_SIGNUP=${ENABLE_OAUTH_SIGNUP:-false}
+      # #659: an OAuth-auto-created user lands as OWUI's builtin default
+      # 'pending' and waits for an admin — on an SSO box the Authentik
+      # forward_auth + IdP binding ARE the admission decision, so init/
+      # upgrade set this to 'user' whenever SSO is on. Non-SSO boxes keep
+      # OWUI's own default.
+      - DEFAULT_USER_ROLE=${OWUI_DEFAULT_USER_ROLE:-pending}
+      # Trust Caddy's self-signed CA so OWUI (authlib/httpx) can fetch the OIDC
+      # discovery metadata from https://${AUTHENTIK_DOMAIN}/.../openwebui-oidc/...
+      # on TLS_MODE=internal. Without it /oauth/oidc/login 500s with
+      # httpx.ConnectError [SSL: CERTIFICATE_VERIFY_FAILED]. (#30; mirrors gitea/
+      # vaultwarden.) On Let's Encrypt the cert is publicly trusted; harmless there.
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/caddy-ca.crt
+      - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/caddy-ca.crt
+
+      # SMTP: Configure via Admin Panel > Settings > General > Email
+      # Use smtp-relay:587 as host (internal relay, no auth needed)
+    volumes:
+      - open-webui-data:/app/backend/data
+      # Caddy internal CA for self-signed OIDC discovery trust (#30; see SSL_CERT_FILE).
+      - ../../certs/caddy-ca.pem:/usr/local/share/ca-certificates/caddy-ca.crt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openwebui-migrate-reconcile:
+        condition: service_completed_successfully
+      pipelines:
+        condition: service_started
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+
+  # ==========================================
+  # Pipelines: Custom Logic & Filtering
+  # ==========================================
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:${PIPELINES_VERSION:-git-039f9c5}
+    profiles: ["chat"]
+    container_name: pipelines
+    restart: unless-stopped
+    volumes:
+      - pipelines-data:/app/pipelines
+    environment:
+      - PIPELINES_API_KEY=${PIPELINES_API_KEY:-}
+      # Observability valves, named explicitly so the governed privacy toggle
+      # is visible HERE and not only in the Pipelines admin UI. env_file below
+      # would carry them anyway; the point is that a reader of this file can
+      # see what the OpenLIT filter captures.
+      - OPENLIT_OTLP_ENDPOINT=${OPENLIT_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}
+      - OBSERVABILITY_PII_FILTER=${OBSERVABILITY_PII_FILTER:-false}
+      # 0 = no prompt/completion text leaves the box (metrics still flow).
+      - OBSERVABILITY_EXCERPT_MAX_CHARS=${OBSERVABILITY_EXCERPT_MAX_CHARS:-2000}
+    env_file:
+      - ../../.env
+
+  # ==========================================
+  # OpenWebUI Seed Sidecar (M019 S01)
+  # ==========================================
+  # One-shot container that seeds bundled Functions/Tools (Duty A, via the
+  # OpenWebUI REST API) and Pipelines (Duty B, into the pipelines-data volume,
+  # then triggers a `pipelines` container restart). Idempotent: re-runs are
+  # no-ops unless RAZZFAZZ_FORCE_RESEED=1 or a bundled file's `version:` is
+  # newer than what's in the openwebui DB.
+  #
+  # Bind-mounts the chat/{functions,tools,pipelines} dirs read-only and
+  # mounts the pipelines-data named volume read-write for Duty B.
+  # Mounts /var/run/docker.sock so it can `docker restart pipelines`.
+  openwebui-seed:
+    build:
+      context: ./seeder
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["chat"]
+    container_name: openwebui-seed
+    restart: "no"
+    # #1016: default + docker-ctl (the seeder resolves the live GPUStack key via
+    # the socket proxy during its one-shot run).
+    networks:
+      - default
+      - docker-ctl
+    # Marker for the Config UI dashboard so a cleanly-exited oneshot
+    # doesn't get counted as a missing container in the running/total
+    # health counter (35/36 'degraded' bug).
+    labels:
+      razzfazz.init: "true"
+    depends_on:
+      openwebui:
+        condition: service_started
+      pipelines:
+        condition: service_started
+      docker-socket-proxy:
+        condition: service_started
+    environment:
+      OPENWEBUI_URL: http://openwebui:8080
+      ADMIN_EMAIL: razzfazz-ai-admin@${MAIN_DOMAIN:-razzfazz-box.local}
+      ADMIN_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      ADMIN_NAME: "razzfazz.ai Admin"
+      RAZZFAZZ_FORCE_RESEED: ${RAZZFAZZ_FORCE_RESEED:-0}
+      OPENWEBUI_SEED_RESTART_PIPELINES: ${OPENWEBUI_SEED_RESTART_PIPELINES:-1}
+      PIPELINES_CONTAINER: pipelines
+      # #706: the seeder's only docker call is `docker restart pipelines`
+      # (seed.py) — the docker-cli honours DOCKER_HOST, and the proxy allows
+      # restarts. No raw socket in a one-shot that runs as root at every
+      # `up`.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    volumes:
+      - ./functions:/app/functions:ro
+      - ./tools:/app/tools:ro
+      - ./pipelines:/app/pipelines:ro
+      - pipelines-data:/app/pipelines-target
+
+networks:
+  # #1016 — isolated control-plane net for the socket proxy (declared in
+  # core/compose.yml). Compose merges this identical name-keyed declaration.
+  docker-ctl:
+    name: docker-ctl
+    driver: bridge
+    internal: true
