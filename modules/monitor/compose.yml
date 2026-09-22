@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# MONITORING MODULE (Komodo)
+# ==============================================================================
+# Profile: monitor
+# Infrastructure monitoring and alerting.
+# ==============================================================================
+services:
+  postgres-komodo:
+    image: ghcr.io/ferretdb/postgres-documentdb:${KOMODO_DB_VERSION:-17-0.107.0-ferretdb-2.7.0}
+    profiles: ["monitor"]
+    container_name: postgres-komodo
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-docker}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_DB=postgres
+      # F-018: Removed POSTGRES_HOST_AUTH_METHOD=trust — password auth is enforced
+      # via POSTGRES_PASSWORD (default scram-sha-256 when password is set)
+    volumes:
+      - postgres-komodo-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docker} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      # #182: DO NOT stop komodo's postgres during the volume archive. Like the
+      # core postgres, postgres-komodo-data is now EXCLUDED from the tar by the
+      # default BACKUP_EXCLUDE_REGEXP and captured LOGICALLY instead — the
+      # archive-pre hook runs `pg_dumpall` on postgres-komodo →
+      # databases/postgres_komodo.sql. offen therefore never tars the live
+      # komodo pgdata, so it can't hit the pg_wal-recycle race that failed the
+      # nightly backup (#157) and there's no need to stop it (no monitoring
+      # blip). HARD INVARIANT: only safe while postgres-komodo-data stays out of
+      # the tar — if it's re-included, restore this label to `true`. See the
+      # #182 note in core/compose.yml postgres + config/.env.example.
+      - "docker-volume-backup.stop-during-backup=false"
+
+  ferretdb:
+    image: ghcr.io/ferretdb/ferretdb:${FERRETDB_VERSION:-2.7.0}
+    profiles: ["monitor"]
+    container_name: ferretdb
+    restart: unless-stopped
+    environment:
+      - FERRETDB_POSTGRESQL_URL=postgres://${POSTGRES_USER:-docker}:${POSTGRES_PASSWORD:-}@postgres-komodo:5432/postgres?sslmode=disable
+      # #2267: FerretDB phones its telemetry beacon on start (measured: 9 packets
+      # to an Azure address from an air-gapped box). Off on every box, not only
+      # offline ones — nothing in this stack consumes it. DO_NOT_TRACK is the
+      # universal switch FerretDB also honours.
+      - FERRETDB_TELEMETRY=disable
+      - DO_NOT_TRACK=1
+    depends_on:
+      postgres-komodo:
+        condition: service_healthy
+
+  komodo-core:
+    image: ghcr.io/moghtech/komodo-core:${KOMODO_VERSION:-2.3.3}
+    profiles: ["monitor"]
+    container_name: komodo-core
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      # #252: Komodo v2.2.0 core reads KOMODO_PASSKEYS (plural); the .env holds
+      # KOMODO_PASSKEY (singular, generated at init + backfilled on upgrade).
+      # Map it so core authenticates to periphery with the SHARED passkey instead
+      # of falling back to per-host ed25519 keys ("invalid public key").
+      - KOMODO_PASSKEYS=${KOMODO_PASSKEY}
+    ports:
+      - "127.0.0.1:${KOMODO_PORT:-8180}:8180"
+    depends_on:
+      - ferretdb
+
+  komodo-periphery:
+    image: ghcr.io/moghtech/komodo-periphery:${KOMODO_VERSION:-2.3.3}
+    profiles: ["monitor"]
+    container_name: komodo-periphery
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      # #252: periphery reads PERIPHERY_PASSKEYS — accept the same shared passkey
+      # as komodo-core (${KOMODO_PASSKEY} from .env) so core authenticates via
+      # passkey instead of the ed25519 key-based fallback.
+      - PERIPHERY_PASSKEYS=${KOMODO_PASSKEY}
+    ports:
+      # F-007: Bind to localhost only — Periphery should not be reachable from external network
+      - "127.0.0.1:${KOMODO_PERIPHERY_PORT:-8120}:8120"
+    volumes:
+      # SECURITY: ro — Komodo periphery reads container state for monitoring display.
+      # If Komodo needs to manage containers (start/stop/restart), this must be changed to rw.
+      - /var/run/docker.sock:/var/run/docker.sock:ro

@@ -1,0 +1,136 @@
+# syntax=docker/dockerfile:1
+# ============================================================================
+# GPUStack 0.7.1 + custom CUDA llama.cpp (b9851, sm_120) — the NVIDIA/Blackwell
+# STABLE inference path (profile `llm-legacy` + HARDWARE=nvidia since #1448).
+#
+# Why this exists (2026.09, #946):
+#   Upstream gpustack/gpustack:v0.7.1 ships a CUDA `llama-box` whose bundled
+#   llama.cpp is too old for Blackwell (compute capability sm_120 / RTX PRO
+#   6000). Stock 0.7.1 therefore fails to serve on Blackwell out of the box.
+#   The `llm` profile's gpustack v2.1.x is a dead end (retired upstream) and
+#   is NOT installed on NVIDIA anymore. This image is the CUDA analogue of
+#   `Dockerfile.vulkan` (0.7.1 + AMD Vulkan for Strix Halo): same gpustack
+#   0.7.1 control plane, but the bundled `llama-box` runner is replaced with a
+#   from-source llama.cpp b9851 built for CUDA arch 120 (Blackwell).
+#
+# Proven on the RTX PRO 6000 (Blackwell) box: GGUF chat + vision + MTP,
+# 598-run soak. This Dockerfile persists that box-local recipe into source —
+# folding the box's two-stage `.so.MAJOR` SONAME-symlink fix (originally a
+# separate Dockerfile.sofix, needed because the first copy pass dropped the
+# versioned symlinks and llama-server exited 127) into one clean build.
+#
+# Build (context is llm/gpustack so llama-box-wrapper.sh is reachable):
+#   docker build -t razzfazz-gpustack:cuda \
+#       -f modules/llm/gpustack/Dockerfile.cuda modules/llm/gpustack
+#
+# To bump llama.cpp: change LLAMA_CPP_TAG and re-run the DevBox/box acceptance
+# (chat + vision + MTP on/off diff), never casually — b9851 is the research-
+# anchored llama.cpp tag for the Qwen3 family (#609). The Vulkan path pins its
+# own llama.cpp tag independently; do NOT assume the two move together.
+#
+# Base images (nvidia/cuda:12.8.1-devel-ubuntu22.04, gpustack/gpustack:v0.7.1)
+# are not yet digest-pinned — tracked as a #946 follow-up: capture the exact
+# digests from the RTX-box build (the sandbox here has no registry egress) and
+# pin them `FROM ...@sha256:...` like Dockerfile.vulkan, for reproducibility.
+#
+# The CUDA generation of the BUILDER is load-bearing (#894, verified live on an
+# RTX PRO 6000 Blackwell Server Edition): stock 0.7.1 bundles llama-box v0.0.171
+# built on **cuda-12.4**, whose `CUDA ARCHS` stop at 900 — it detects the
+# Blackwell, offloads to it, and then crashes on the first `llama_decode` (no
+# sm_120 kernel, no PTX forward-compat). **12.8 is the first CUDA that emits
+# sm_120**, so the builder base below must never drop below 12.8. It must
+# equally never cross to 13.x: the runner is grafted into the 0.7.1 image and
+# resolves that image's `libcudart.so.12` (CUDA 12.x runtime major compat) —
+# 12.x → 12.x is precisely what makes this a one-backend swap instead of a
+# CUDA-13 rebuild. Guarded by
+# tests/unit/consistency/test_894_blackwell_cuda128.py; the manifest records the
+# same pin (config/manifests/versions.json, custom_built.razzfazz-gpustack-cuda).
+#
+# Host prerequisites: NVIDIA driver with CUDA >= 12.8 runtime + the
+# nvidia-container-toolkit (the container ships no libcuda; it is injected by
+# the `nvidia` container runtime at run time — see compose `runtime: nvidia`).
+# ============================================================================
+
+# ── Stage 1: build llama.cpp b9851 for CUDA sm_120 (Blackwell) ──────────────
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+ARG LLAMA_CPP_TAG=b9851
+
+# nodejs 20 is REQUIRED (not optional): llama.cpp b9851's `llama-server` cmake
+# target builds AND embeds the SvelteKit webui via scripts/ui-assets.cmake
+# (llama-ui-embed). Without node the build fails at ~3% with
+# "UI: llama-ui-embed failed (1) / missing required asset(s): loading.html".
+# A #947 review-suggested "drop unused nodejs" was WRONG and broke the Blackwell
+# build empirically (#948) — node stays. Ubuntu 22.04's apt node is too old for
+# the webui build, so nodesource setup_20.x is used (gnupg for its key).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git patchelf libcurl4-openssl-dev ca-certificates curl gnupg \
+  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --branch ${LLAMA_CPP_TAG} --depth 1 https://github.com/ggml-org/llama.cpp.git /src
+
+# Patch: null-valued optional params (frequency_penalty/top_p/… = null) must be
+# treated as "not provided" (use default), matching old llama-box / OpenAI
+# semantics. GPUStack's Playground sends these as null; b9851 otherwise 400s
+# downstream. Skip null items in both OAI copy loops (completion + chat) in
+# server-common.cpp. The `test` asserts the patch landed on exactly 2 sites so
+# an upstream refactor that moves the loop fails the build loudly (not silently).
+RUN perl -pi -e 's/(for \(const auto & item : body\.items\(\)\) \{)/$1\n            if (item.value().is_null()) { continue; }/' /src/tools/server/server-common.cpp \
+  && test "$(grep -c "item.value().is_null()" /src/tools/server/server-common.cpp)" = "2"
+
+WORKDIR /src
+# The CUDA devel image ships only libcuda STUBS (no driver). Symlink the stub
+# .so.1 and allow undefined shlib symbols so the link succeeds; the real
+# libcuda.so.1 is injected by the nvidia container runtime at run time.
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 \
+  && cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_RPC=ON \
+      -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=ON \
+      -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs -Wl,--allow-shlib-undefined" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,--allow-shlib-undefined" \
+  && cmake --build build -j"$(nproc)" -t llama-server
+
+# Collect llama-server + rpc-server + all shared libs, rpath'd to $ORIGIN so
+# they resolve siblings without LD_LIBRARY_PATH gymnastics.
+RUN mkdir -p /out && cp -L build/bin/llama-server /out/ \
+  && (cp -L build/bin/rpc-server /out/ 2>/dev/null || true) \
+  && cp -a build/bin/*.so* /out/ 2>/dev/null || true \
+  && cd /out && for f in *; do patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true; done \
+  && ls -la /out
+
+# ── Stage 2: graft the custom CUDA runner into gpustack 0.7.1 ────────────────
+FROM gpustack/gpustack:v0.7.1
+
+COPY --from=builder /out/ /tmp/b9851/
+COPY llama-box-wrapper.sh /tmp/llama-box-wrapper.sh
+
+# Replace gpustack's bundled CUDA llama-box binaries with our b9851 build,
+# install the wrapper as `llama-box` (it strips llama-box-only args + the
+# host-RAM-hostile --no-mmap/--no-warmup defaults, and delegates to the real
+# rpc-server when invoked as llama-box-rpc-server), and — critically — recreate
+# the .so.MAJOR -> .so.FULL SONAME symlinks the copy pass would otherwise drop
+# (this was the box's separate Dockerfile.sofix; folded in here). Verify with
+# ldd that nothing but libcuda (runtime-injected) is missing, so a broken graft
+# fails the BUILD, not the first inference request.
+RUN set -e; \
+    TP=/usr/local/lib/python3.11/dist-packages/gpustack/third_party/bin/llama-box; \
+    D="$TP/llama-box-v0.0.171-linux-amd64-cuda"; \
+    cp -f /tmp/b9851/*.so* "$D"/ 2>/dev/null || true; \
+    cp -f /tmp/b9851/llama-server "$D"/llama-server; \
+    (cp -f /tmp/b9851/rpc-server "$D"/rpc-server 2>/dev/null || true); \
+    ln -sf llama-server "$D/llama-box-rpc-server"; \
+    cp -f /tmp/llama-box-wrapper.sh "$D/llama-box"; \
+    chmod -R a+rx "$D"; \
+    ln -sfn "$D" "$TP/llama-box-default"; \
+    cd "$D"; \
+    for f in libllama-common.so.0.0.1 libllama.so.0.0.1 libmtmd.so.0.0.1 \
+             libggml.so.0.15.3 libggml-base.so.0.15.3 libggml-cpu.so.0.15.3 \
+             libggml-cuda.so.0.15.3 libggml-rpc.so.0.15.3; do \
+      [ -f "$f" ] && ln -sf "$f" "${f%.so.*}.so.0"; \
+    done; \
+    missing=$(LD_LIBRARY_PATH="$D" ldd ./llama-server | grep -i "not found" | grep -v libcuda.so.1 || true); \
+    [ -z "$missing" ] && echo "ldd clean (libcuda runtime-injected by nvidia runtime)" \
+      || { echo "MISSING: $missing"; exit 1; }; \
+    rm -rf /tmp/b9851 /tmp/llama-box-wrapper.sh; \
+    ls -l "$D" | grep -iE "llama-box|llama-server|rpc" | head

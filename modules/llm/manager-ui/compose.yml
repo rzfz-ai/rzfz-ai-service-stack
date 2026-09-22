@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# llm-manager-ui (#254 Phase-3) — operator console for the LLM Manager.
+# ------------------------------------------------------------------------------
+# A static React/Vite SPA served by nginx. Caddy fronts it at
+# llm-manager.<domain>/ behind Authentik SSO and routes /api,/v1,/metrics,/docs
+# to the manager; this container only serves the built SPA + assets. Part of the
+# `llm-manager` profile (ships with the manager). New compose service → the
+# release security review must confirm the pin/bind before GA (pre-tag-check).
+# ==============================================================================
+services:
+  llm-manager-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: razzfazz-llm-manager-ui:latest
+    profiles: ["llm-manager"]
+    container_name: llm-manager-ui
+    restart: unless-stopped
+    networks:
+      - default
+    ports:
+      # Loopback-only host bind for operator debug; Caddy reaches it in-network
+      # as llm-manager-ui:8080.
+      - "127.0.0.1:${LLM_MANAGER_UI_PORT:-8092}:8080"
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true

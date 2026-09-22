@@ -1,0 +1,56 @@
+version: 1
+metadata:
+  name: "Google - Flows"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # Define the Flow
+  - model: authentik_flows.flow
+    identifiers:
+      slug: google-domain-enrollment
+    attrs:
+      name: "Google Domain Enrollment"
+      title: "Herzlich willkommen bei razzfazz.ai"
+      designation: enrollment
+      authentication: none
+      denied_action: message_continue
+      policy_engine_mode: any
+      layout: sidebar_left
+
+  # Define the Stage: Create User
+  - model: authentik_stages_user_write.userwritestage
+    identifiers:
+      name: "Auto Create Google User"
+    attrs:
+      user_creation_mode: create_when_required
+      create_users_group: !Find [authentik_core.group, [name, "razzfazz.ai Chat Users"]]
+      user_path_template: "goauthentik.io/sources/%(source_name)s/%(username)s"
+      user_type: internal
+
+  # Bind Stage to Flow
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, google-domain-enrollment]]
+      stage: !Find [authentik_stages_user_write.userwritestage, [name, "Auto Create Google User"]]
+    attrs:
+      order: 0
+      policy_engine_mode: any
+      
+  # Bind Policy to Flow (The Corporate Domain Check)
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, google-domain-enrollment]]
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, "Is Corporate Domain"]]
+    attrs:
+      enabled: true
+      order: 0
+      timeout: 30
+
+  # Bind Login Stage to Flow (Order 100)
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, google-domain-enrollment]]
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, "default-source-authentication-login"]]
+    attrs:
+      order: 100
+      policy_engine_mode: any

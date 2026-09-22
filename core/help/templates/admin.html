@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+
+{# M026 S07 #2: per-page styles moved to static/help-overrides.css. #}
+
+{% block extra_head %}
+<script>
+function refreshApp(appId, btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Refreshing...';
+    btn.classList.add('refreshing');
+
+    fetch('/api/refresh/' + appId, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                btn.textContent = '⏳ In progress...';
+                // Poll for completion
+                pollStatus(appId, btn);
+            } else {
+                alert('Error: ' + data.message);
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh';
+                btn.classList.remove('refreshing');
+            }
+        })
+        .catch(err => {
+            alert('Network error: ' + err);
+            btn.disabled = false;
+            btn.textContent = '🔄 Refresh';
+            btn.classList.remove('refreshing');
+        });
+}
+
+function refreshAll(btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Refreshing all...';
+
+    fetch('/api/refresh-all', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                // Disable all individual refresh buttons
+                document.querySelectorAll('.refresh-btn').forEach(b => {
+                    b.disabled = true;
+                    b.classList.add('refreshing');
+                });
+                // Start polling
+                pollAllStatus(btn);
+            } else {
+                alert('Error: ' + data.message);
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh All';
+            }
+        })
+        .catch(err => {
+            // #1055: without this the button was stuck on "⏳ Refreshing all..."
+            // after any transient network error, with no way back but a reload.
+            alert('Network error: ' + err);
+            btn.disabled = false;
+            btn.textContent = '🔄 Refresh All';
+        });
+}
+
+// #1055: a poll that errors must not silently stop — the button then stays
+// "⏳ In progress..." forever and the operator concludes the page is broken.
+// Retry on a transient fetch failure instead of dropping the chain.
+function pollStatus(appId, btn) {
+    setTimeout(() => {
+        fetch('/api/cache-status')
+            .then(r => r.json())
+            .then(data => {
+                const jobs = data.active_jobs || {};
+                if (appId in jobs || data.refresh_all_active) {
+                    pollStatus(appId, btn); // still running
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = '🔄 Refresh';
+                    btn.classList.remove('refreshing');
+                    location.reload();
+                }
+            })
+            .catch(() => pollStatus(appId, btn));
+    }, 3000);
+}
+
+// #1055: `active_jobs` is EMPTY between two per-app mirrors of a refresh-all,
+// so polling it alone declared the run finished early, reloaded the page and
+// re-enabled every button while mirror_all was still writing. The
+// refresh_all_active flag is true for the whole run.
+function pollAllStatus(btn) {
+    setTimeout(() => {
+        fetch('/api/cache-status')
+            .then(r => r.json())
+            .then(data => {
+                const jobs = data.active_jobs || {};
+                if (data.refresh_all_active || Object.keys(jobs).length > 0) {
+                    pollAllStatus(btn);
+                } else {
+                    location.reload();
+                }
+            })
+            .catch(() => pollAllStatus(btn));
+    }, 5000);
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="panel">
+    <h2>⚙️ Documentation Cache Management</h2>
+
+    <div class="toolbar">
+        <div class="connection-status">
+            <span class="status-indicator {% if online %}status-online{% else %}status-offline{% endif %}"></span>
+            {% if online %}
+                Internet: Connected
+            {% else %}
+                Internet: Offline — cache refresh unavailable
+            {% endif %}
+        </div>
+        <button class="button {% if not online %}button-secondary{% endif %}"
+                onclick="refreshAll(this)"
+                {% if not online or refresh_all_active %}disabled{% endif %}
+                {% if not online %}title="No internet connection"
+                {% elif refresh_all_active %}title="A full refresh is already running"{% endif %}>
+            🔄 Refresh All
+        </button>
+    </div>
+
+    {# #1055: the per-module PASS/FAIL of the last full run. mirror_all built
+       exactly this and then threw it away after one printed log line, so
+       "which modules did that refresh actually fix" was answerable only from
+       `docker logs`, and only until it rotated. #}
+    {% if refresh_all_active %}
+    <p class="auto-refresh-note" id="refresh-all-banner">
+        ⏳ A refresh of all documentation is running — single-module refreshes
+        are disabled until it finishes.
+    </p>
+    {% elif last_refresh_all %}
+    <p class="auto-refresh-note">
+        Last full refresh finished
+        {{ last_refresh_all.get('finished', '')[:16].replace('T', ' ') }} UTC —
+        {% if failed_modules %}
+            <strong style="color:#721c24;">{{ failed_modules|length }} module(s) need attention:
+            {{ failed_modules | map(attribute='id') | join(', ') }}</strong>.
+        {% else %}
+            all modules in a good state.
+        {% endif %}
+        {% if degraded_modules %}
+            <strong style="color:#8a5a00;">{{ degraded_modules|length }} served with
+            content-quality warnings:
+            {{ degraded_modules | map(attribute='id') | join(', ') }}</strong>.
+        {% endif %}
+    </p>
+    {% endif %}
+
+    <table class="cache-table">
+        <thead>
+            <tr>
+                <th>Application</th>
+                <th>License</th>
+                <th>Status</th>
+                <th>Last Updated</th>
+                <th>Size</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for app in apps %}
+            <tr>
+                <td>
+                    <div class="app-name">
+                        {% if app.get('icon') %}
+                        <img src="{{ app.icon }}" alt="">
+                        {% endif %}
+                        {{ app.name }}
+                    </div>
+                </td>
+                <td><span class="badge badge-info">{{ app.license }}</span></td>
+                {#- #1055: key the badge on the REAL mirror state, not on
+                    `cached`. `cached` means only "the directory has bytes in
+                    it", and a failed wget/monolith run leaves bytes behind —
+                    a truncated tree, a basic-auth challenge page, a rejected
+                    SPA shell — so every broken module reported "✓ Cached".
+                    The error row below was the only hint, and it sat under a
+                    green badge. State order matters: a failure outranks the
+                    presence of files. -#}
+                <td>
+                    {% set state = app.get('mirror_state') %}
+                    {% if state == 'refreshing' or app.get('refreshing') %}
+                        <span class="badge badge-warning">⏳ Refreshing...</span>
+                    {% elif state == 'local' %}
+                        <span class="badge badge-info">📄 Local page</span>
+                    {% elif state == 'failed' %}
+                        <span class="badge" style="background:#f8d7da;color:#721c24;">✗ Mirror failed</span>
+                    {% elif state == 'fallback' %}
+                        <span class="badge" style="background:#f8d7da;color:#721c24;">✗ Capture failed — local page served</span>
+                    {% elif state == 'unreadable' %}
+                        <span class="badge" style="background:#f8d7da;color:#721c24;">✗ Status unreadable</span>
+                    {% elif state == 'partial' %}
+                        <span class="badge badge-warning">⚠ Partial mirror</span>
+                    {% elif state == 'ok' %}
+                        <span class="badge badge-success">✓ Cached</span>
+                    {#- No mirror_state at all: a status dict from before this
+                        change (or a caller that supplies only the legacy
+                        fields). Keep the old rendering, with the one ordering
+                        bug fixed — an error outranks the mere presence of
+                        files. -#}
+                    {% elif app.get('error') %}
+                        <span class="badge" style="background:#f8d7da;color:#721c24;">✗ Error</span>
+                    {% elif app.get('local_only') %}
+                        <span class="badge badge-info">📄 Local page</span>
+                    {% elif app.get('cached') %}
+                        <span class="badge badge-success">✓ Cached</span>
+                    {% else %}
+                        <span class="badge badge-warning">⚠ Not cached</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if app.get('last_updated') %}
+                        {{ app.last_updated[:16].replace('T', ' ') }} UTC
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if app.get('size_mb', 0) > 0 %}
+                        {{ app.size_mb }} MB
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if app.get('local_only') %}
+                    <span style="color:#666;font-size:12px;">Ships with the box</span>
+                    {% else %}
+                    <button class="refresh-btn"
+                            onclick="refreshApp('{{ app.id }}', this)"
+                            {% if not online or app.get('refreshing') %}disabled{% endif %}>
+                        {% if app.get('refreshing') %}
+                            ⏳ In progress...
+                        {% else %}
+                            🔄 Refresh
+                        {% endif %}
+                    </button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if app.get('error') %}
+            <tr>
+                <td colspan="6" style="color:#721c24;font-size:13px;padding-left:40px;">
+                    Error: {{ app.error }}
+                </td>
+            </tr>
+            {% endif %}
+            {#- #1229: a mirror that IS served but failed a cosmetic gate rule
+                (unstyled pages) carries a WARNING, not an error. Without a row
+                of its own the operator saw "⚠ Partial mirror" with no reason
+                — the same blind badge #1055 removed for failures. -#}
+            {% if app.get('warning') %}
+            <tr>
+                <td colspan="6" style="color:#8a5a00;font-size:13px;padding-left:40px;">
+                    Warning: {{ app.warning }}
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <p class="auto-refresh-note">
+        💡 Documentation is cached locally for offline access. Use "Refresh" to download the latest version.
+    </p>
+</div>
+{% endblock %}

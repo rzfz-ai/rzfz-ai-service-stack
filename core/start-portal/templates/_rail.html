@@ -1,0 +1,150 @@
+{# #1054 — shared dark icon-rail for the Start Portal.
+
+   The operator-approved prototype gives every rzfz.ai app ONE identity: a
+   dark left rail carrying the razzfazz brand image (see `.rail::before` in
+   start-portal-overrides.css) with a plain light content area beside it —
+   the same shell the Config UI, Help Center, Licenses, Agent Manager and
+   LLM Manager already wear.
+
+   Included by BOTH portal pages so there is exactly one rail definition:
+     templates/index.html            (the portal home / workspace)
+     templates/admin_shortcuts.html  (the App Builder)
+
+   Caller-set variables (via `{% with %}` around the include):
+     rail_active      — 'home' | 'builder'; marks the current destination
+     rail_favorites   — truthy when the page HAS a favorites section to
+                        jump to (the anchor target only exists then)
+     rail_categories  — truthy when the page has category sections
+     rail_account     — true when the page also renders the #54 password
+                        modal + #299 profile dialog and loads their JS. The
+                        account <details> menu is only useful there; other
+                        pages get a plain avatar chip instead of controls
+                        that would do nothing.
+
+   Everything in the account menu (My Profile / Change password / Account
+   settings / Logout) is the #299/#54/CFG-29 markup moved VERBATIM out of
+   index.html's old top header — same classes, hrefs, data-hooks and no-JS
+   <details> pattern. Guarded by
+   tests/unit/razzfazz-start-portal/test_medwave_uploads_and_visibility.py
+   and tests/ui/razzfazz-start-portal/test_redesign.py.
+
+   `display_name` / `avatar_data_uri` are only passed by the index route, so
+   every read here is `or`-guarded (a bare `display_name[:1]` would raise
+   UndefinedError on the App Builder page). #}
+<aside class="rail" id="rail">
+    <div class="brand">
+        {# Spark at the rail head — the shared rzfz.ai mark (the PNG logo is
+           dark-on-transparent and would disappear on the dark rail). #}
+        <a class="spark" href="/" title="rzfz.ai Start Portal" aria-label="rzfz.ai Start Portal">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z"/></svg>
+        </a>
+        <span class="bn">rzfz.ai</span>
+        {# WIDE <-> NARROW. A real <button> (keyboard + AT reachable); the
+           glyph flips « <-> ☰ in start-portal-rail.js, which also remembers
+           the state in localStorage. #}
+        <button type="button" class="railtog" id="railtog"
+                aria-controls="rail" aria-expanded="true"
+                title="Collapse the rail" aria-label="Collapse the rail">&laquo;</button>
+    </div>
+    <div class="brand-sub">Start Portal</div>
+
+    <nav class="rnav" aria-label="Portal navigation">
+        <a class="rl{% if rail_active == 'home' %} on{% endif %}" href="/"
+           {% if rail_active == 'home' %}aria-current="page"{% endif %}>
+            <span class="ic" aria-hidden="true">&#9638;</span><span class="lb">Workspace</span>
+        </a>
+        {% if rail_favorites %}
+        <a class="rl" href="#favorites">
+            <span class="ic" aria-hidden="true">&hearts;</span><span class="lb">Favorites</span>
+        </a>
+        {% endif %}
+        {% if rail_categories %}
+        <a class="rl" href="#categories">
+            <span class="ic" aria-hidden="true">&#9636;</span><span class="lb">Categories</span>
+        </a>
+        {% endif %}
+        {# #185/#248 — admins reach the shortcut-tile editor (App Builder)
+           from here; same-host route, itself is_admin-gated server-side. #}
+        {% if user.is_admin %}
+        <a class="rl portal-manage-shortcuts{% if rail_active == 'builder' %} on{% endif %}"
+           href="/admin/shortcuts"
+           title="Create and manage shortcut tiles for your users"
+           {% if rail_active == 'builder' %}aria-current="page"{% endif %}>
+            <span class="ic" aria-hidden="true">&#9881;</span><span class="lb">Manage shortcuts</span>
+        </a>
+        {% endif %}
+    </nav>
+
+    {# ── Rail foot: the personal account menu ─────────────────────────── #}
+    <div class="rail-foot portal-acct">
+        {% if user.username %}
+        {% if rail_account %}
+        <details class="portal-acct-menu">
+            <summary class="portal-acct-summary" aria-label="Account menu">
+                <span class="portal-acct-avatar" aria-hidden="true">
+                    {% if avatar_data_uri %}<img src="{{ avatar_data_uri }}" alt="">
+                    {% else %}{{ (display_name or user.username)[:1]|upper }}{% endif %}
+                </span>
+                <span class="portal-acct-name">{{ display_name or user.username }}</span>
+            </summary>
+            <div class="portal-acct-dropdown">
+                {# #299 — native in-portal "My Profile" dialog: portal-local
+                   display name + avatar (does NOT write back to
+                   Authentik/SSO identity). #}
+                <button class="portal-my-profile portal-hdr-btn" type="button"
+                        data-profile-open>
+                    My Profile
+                </button>
+                {# #54 — surface the central password broker. Same-host
+                   route, SSO-gated; lets any signed-in user change their own
+                   local-auth password (Dify/Cognee/optional Authentik)
+                   instead of having to know the bare /password URL. Opens the
+                   in-page password modal (data-pw-open). The href stays
+                   /password as a progressive-enhancement fallback: with JS
+                   disabled the link navigates to the full page. #}
+                <a class="portal-change-pw portal-hdr-btn" href="/password" data-pw-open
+                   title="Change your password">
+                   Change password
+                </a>
+                {# CFG-29 — Authentik self-service. MFA re-enrollment after a
+                   lost device, session revocation and API-token management
+                   live in Authentik's user interface; the portal-local #299
+                   profile dialog and the #54 broker do not cover them. #}
+                <a class="portal-acct-settings portal-hdr-btn"
+                   href="https://auth.{{ main_domain }}/if/user/#/settings"
+                   target="_blank" rel="noopener"
+                   title="MFA devices, sessions and API tokens (Authentik)">
+                   Account settings
+                </a>
+                {# S11.2 #5 / ga.2 (#220) — logout MUST hit the forward-auth
+                   outpost sign_out on THIS domain, not the Authentik core
+                   invalidation flow. The start portal is protected by Caddy
+                   forward-auth to the Authentik outpost, which keeps its OWN
+                   per-domain proxy-session cookie.
+                   `/if/flow/default-invalidation-flow/` ends only the core
+                   IdP session — the outpost proxy cookie survives, so
+                   forward-auth silently re-admits the user (looks
+                   still-logged-in) while the IdP session is gone: a broken
+                   half-logged-in state (prod-observed 2026-07-29).
+                   `/outpost.goauthentik.io/sign_out` clears the proxy session
+                   AND chains to the invalidation flow. Caddy routes
+                   `/outpost.goauthentik.io/*` on start.<domain> straight to
+                   authentik-server (Caddyfile), so this relative URL is
+                   correct. #}
+                <a class="portal-logout portal-hdr-btn" href="/outpost.goauthentik.io/sign_out"
+                   title="Sign out">
+                   Logout
+                </a>
+            </div>
+        </details>
+        {% else %}
+        {# Pages without the profile/password modals show WHO is signed in,
+           not controls that would silently do nothing. #}
+        <span class="rail-avatar" title="{{ user.username }}">
+            {{ user.username[:1]|upper }}
+        </span>
+        <span class="rail-who">{{ user.username }}</span>
+        {% endif %}
+        {% endif %}
+    </div>
+</aside>

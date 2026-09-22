@@ -1,0 +1,45 @@
+version: 1
+metadata:
+  name: "Module - SearXNG"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # Provider: Caddy Forward Auth for SearXNG
+  # ==========================================
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: "Caddy Forward Auth Provider for SearXNG"
+    attrs:
+      client_id: "searxng_app_client_id"
+      client_secret: "${SEARXNG_CLIENT_SECRET}"
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      external_host: "https://${SEARXNG_DOMAIN}"
+      mode: forward_single
+      intercept_header_auth: true
+      access_token_validity: "hours=24"
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: Proxy outpost"]]
+
+  # ==========================================
+  # Application: SearXNG
+  # ==========================================
+  # #1157: SearXNG was the only UI-bearing module without a tile/app — it ran
+  # as the search backend for Chat + Dify with no user-facing route. The v5
+  # taxonomy gives it a first-class entry in "3 Knowledge & Search".
+  - model: authentik_core.application
+    identifiers:
+      slug: searxng
+    attrs:
+      name: SearXNG
+      group: "3 Knowledge & Search"
+      provider: !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for SearXNG"]]
+      meta_launch_url: "blank://blank"
+      meta_description: "Private metasearch across the web — the search backend Chat and Dify use"
+      meta_publisher: "SearXNG"
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_search_icon.png"
+      open_in_new_tab: true
+      policy_engine_mode: any

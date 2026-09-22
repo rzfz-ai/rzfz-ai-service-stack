@@ -1,0 +1,308 @@
+{% extends "base.html" %}
+{% block page_title %}Backup{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Backup & Restore</h1>
+    <p class="lede">{{ backups | length }} backup{{ 's' if backups | length != 1 else '' }} available</p>
+</div>
+
+<!-- Schedule banner -->
+<div class="card" style="margin-bottom:1rem;border-left:4px solid var(--success)">
+    <div class="card-body" style="display:flex;justify-content:space-between;align-items:center;font-size:0.8125rem">
+        <div>
+            <strong>Schedule:</strong> {{ config.cron_expression }}
+            ({% if config.frequency == 'daily' %}Daily at {{ config.hour }}:{{ config.minute }}
+            {% elif config.frequency == 'weekly_sunday' %}Weekly Sunday at {{ config.hour }}:{{ config.minute }}
+            {% elif config.frequency == 'weekly_monday' %}Weekly Monday at {{ config.hour }}:{{ config.minute }}
+            {% elif config.frequency == 'monthly' %}Monthly 1st at {{ config.hour }}:{{ config.minute }}
+            {% else %}Custom{% endif %})
+            &middot; Encryption: {% if config.encryption_password_set %}<strong style="color:var(--success-fg)">Active (custom)</strong>{% else %}<strong style="color:var(--success-fg)">Active (admin password)</strong>{% endif %}
+        </div>
+        <a href="{{ url_for('backup.settings') }}" class="btn ghost sm">Settings</a>
+    </div>
+</div>
+
+<!-- Backups table -->
+<h2 class="section">Backups</h2>
+<div style="margin-bottom:0.5rem">
+    <input type="text" id="filterBackup" placeholder="Filter backups..." class="filter-search" onkeyup="filterBackups()" style="max-width:300px">
+</div>
+{% if backups %}
+<div class="table-wrap">
+    <table class="rz" id="backupsTable">
+        <thead><tr><th>Name</th><th>Type</th><th>Content</th><th>Date</th><th>Time</th><th>Size</th><th></th></tr></thead>
+        <tbody>
+            {% for b in backups %}
+            <tr onclick="selectBackup('{{ b.name }}', '{{ b.type }}')" style="cursor:pointer" class="backup-row">
+                <td><code style="font-size:0.75rem">{{ b.name }}</code></td>
+                <td>{% if b.type == 'Full' %}<span class="badge ok">{{ b.type }}</span>{% else %}<span class="badge info">{{ b.type }}</span>{% endif %}</td>
+                <td>{{ b.content }}</td>
+                <td>{{ b.date }}</td>
+                <td>{{ b.time }}</td>
+                <td>{{ b.size }}</td>
+                <td style="text-align:center">
+                    <button class="btn ghost sm" onclick="event.stopPropagation();confirmDelete('{{ b.name }}')" title="Delete">Del</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p style="padding:1rem;color:var(--text-muted)">No backups found.</p>
+{% endif %}
+
+<!-- Create + Restore grid -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0">
+    <!-- Create -->
+    <div>
+        <h2 class="section">Create Backup</h2>
+        <div class="card">
+            <div class="card-body">
+            <div class="field">
+                <label>Type</label>
+                <select id="backupType" onchange="document.getElementById('partialTarget').style.display=this.value==='partial'?'':'none'">
+                    <option value="full">Full Backup</option>
+                    <option value="partial">Partial Backup</option>
+                </select>
+            </div>
+            <div class="field" id="partialTarget" style="display:none">
+                <label>Volume / Target Name</label>
+                <input type="text" id="backupTarget" placeholder="e.g. postgres-data">
+            </div>
+            <button class="btn primary" onclick="createBackup()">Create Backup</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Restore -->
+    <div>
+        <h2 class="section">Restore Backup</h2>
+        <div class="card">
+            <div class="card-body">
+            <div class="field">
+                <label>Selected backup</label>
+                <input type="text" id="restoreFile" readonly placeholder="Click a backup row above">
+            </div>
+            <input type="hidden" id="restoreType" value="">
+            <div class="field" id="restoreTargetGroup" style="display:none">
+                <label>Target volume</label>
+                <input type="text" id="restoreTarget">
+            </div>
+            <button class="btn danger" id="restoreBtn" onclick="initiateRestore()" disabled>Restore</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- rc6.7 #8: env-snapshots panel — these are encrypted snapshots of the
+     `.env` (+ a few sibling files) written by `migrate_env` from
+     `razzfazz-upgrade.sh`. Useful as a reference of what `.env` looked
+     like before each upgrade-time migration. Restore semantics are
+     manual today (operator copies the desired snapshot back over `.env`
+     after decryption); the table is read-only for now. -->
+<h2 class="section">Env-snapshots ({{ env_snapshots|length }})</h2>
+<p style="font-size:0.8125rem;color:var(--text-muted);margin-bottom:0.5rem">
+    Automatic snapshots of <code>.env</code> taken by <code>razzfazz-upgrade.sh</code>
+    before each <code>migrate_env</code> run. Stored at
+    <code>backups/env-snapshots/</code>. Encrypted with
+    <code>BACKUP_ENCRYPTION_PASSWORD</code> (when set).
+</p>
+{% if env_snapshots %}
+<div class="table-wrap">
+    <table class="rz">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Reason</th>
+                <th>Size</th>
+                <th>Encryption</th>
+                <th>Filename</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in env_snapshots %}
+            <tr>
+                <td>{{ s.date }}</td>
+                <td>{{ s.time }}</td>
+                <td>{{ s.reason or '—' }}</td>
+                <td>{{ s.size_kb }} KiB</td>
+                <td>
+                    {% if s.encrypted %}
+                    <span class="badge ok">🔒 encrypted</span>
+                    {% else %}
+                    <span class="badge warn">plaintext</span>
+                    {% endif %}
+                </td>
+                <td style="font-family:var(--mono);font-size:0.75rem">{{ s.name }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p style="font-size:0.8125rem;color:var(--text-muted);margin:0.5rem 0">
+    No env-snapshots yet. They appear automatically after the first
+    <code>migrate_env</code> run during an upgrade.
+</p>
+{% endif %}
+
+<!-- Operation logs -->
+<h2 class="section">Operation Logs</h2>
+<div class="card">
+    <div class="card-body">
+    <div style="display:flex;justify-content:flex-end">
+        <button class="btn ghost sm" onclick="clearLogs()">Clear</button>
+    </div>
+    <pre class="terminal-output" id="logBox" style="min-height:300px;max-height:500px;white-space:pre-wrap;word-break:break-word;margin-top:0.5rem">Loading logs...</pre>
+    </div>
+</div>
+
+<!-- Safety modal -->
+<div id="safetyModal" class="apply-overlay hidden" onclick="closeSafetyModal()">
+    <div class="apply-dialog" onclick="event.stopPropagation()">
+        <div class="apply-header">
+            <h2 style="color:var(--error)">Full Restore — Data Loss Warning</h2>
+            <button class="apply-close" onclick="closeSafetyModal()">&times;</button>
+        </div>
+        <div class="apply-phase">
+            <p style="margin-bottom:0.75rem">This will <strong>overwrite ALL existing data</strong> with the backup contents.</p>
+            <div class="field">
+                <label>Type <strong>"I am totally sure"</strong> to proceed</label>
+                <input type="text" id="confirmText" autocomplete="off">
+            </div>
+            <div class="apply-actions">
+                <button class="btn ghost" onclick="closeSafetyModal()">Cancel</button>
+                <button class="btn danger" onclick="confirmRestore()">Confirm Restore</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function filterBackups() {
+    const q = document.getElementById('filterBackup').value.toLowerCase();
+    document.querySelectorAll('.backup-row').forEach(row => {
+        row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+}
+
+function selectBackup(filename, type) {
+    document.getElementById('restoreFile').value = filename;
+    document.getElementById('restoreType').value = type.toLowerCase();
+    document.querySelectorAll('.backup-row').forEach(r => r.style.background = '');
+    if (event && event.currentTarget) event.currentTarget.style.background = '#ffe6e6';
+    document.getElementById('restoreBtn').disabled = false;
+    if (type.toLowerCase() === 'partial') {
+        document.getElementById('restoreTargetGroup').style.display = '';
+        const match = filename.match(/^partial-(.+)-(\d{4}-\d{2}-\d{2}-\d{4})/);
+        document.getElementById('restoreTarget').value = match ? match[1] : '';
+    } else {
+        document.getElementById('restoreTargetGroup').style.display = 'none';
+    }
+}
+
+function createBackup() {
+    const type = document.getElementById('backupType').value;
+    const target = document.getElementById('backupTarget') ? document.getElementById('backupTarget').value : '';
+    const formData = new FormData();
+    formData.append('type', type);
+    if (target) formData.append('target', target);
+    fetch('{{ url_for("backup.create") }}', { method: 'POST', headers: window.rzfzCsrfHeaders(), body: formData })
+        .then(r => {
+            if (!r.ok && r.status === 403) { alert('Session expired. Please refresh the page.'); return; }
+            return r.json().catch(() => ({ status: 'error', message: 'Unexpected response (session may have expired)' }));
+        })
+        .then(d => { if (d) pollLogs(); })
+        .catch(err => alert('Error: ' + err));
+}
+
+function initiateRestore() {
+    const type = document.getElementById('restoreType').value;
+    if (type === 'full') {
+        document.getElementById('safetyModal').classList.remove('hidden');
+    } else {
+        submitRestore();
+    }
+}
+
+function closeSafetyModal() {
+    document.getElementById('safetyModal').classList.add('hidden');
+    document.getElementById('confirmText').value = '';
+}
+
+function confirmRestore() {
+    const text = document.getElementById('confirmText').value;
+    if (text === 'I am totally sure') {
+        closeSafetyModal();
+        submitRestore(text);
+    } else {
+        alert('Confirmation phrase incorrect.');
+    }
+}
+
+function submitRestore(confirmation) {
+    const formData = new FormData();
+    formData.append('file', document.getElementById('restoreFile').value);
+    formData.append('restore_type', document.getElementById('restoreType').value);
+    formData.append('restore_target', document.getElementById('restoreTarget') ? document.getElementById('restoreTarget').value : '');
+    if (confirmation) formData.append('confirmation', confirmation);
+    fetch('{{ url_for("backup.restore") }}', { method: 'POST', headers: window.rzfzCsrfHeaders(), body: formData })
+        .then(r => r.json())
+        .then(d => { alert(d.message); pollLogs(); })
+        .catch(err => alert('Error: ' + err));
+}
+
+function confirmDelete(filename) {
+    if (!confirm('Delete backup "' + filename + '"? This cannot be undone.')) return;
+    const formData = new FormData();
+    formData.append('file', filename);
+    fetch('{{ url_for("backup.delete") }}', { method: 'POST', headers: window.rzfzCsrfHeaders(), body: formData })
+        .then(r => r.json())
+        .then(d => { setTimeout(() => window.location.reload(), 500); })
+        .catch(err => alert('Error: ' + err));
+}
+
+function clearLogs() {
+    // #1312 re-review, finding 5: this used to clear the box unconditionally.
+    // The route now answers 502 when the truncation did not happen, and
+    // wiping the display on that answer told the operator the log was cleared
+    // while the container still held every line — pollLogs() then refilled it
+    // three seconds later, so the only visible symptom was a flicker.
+    fetch('{{ url_for("backup.clear_logs") }}', { method: 'POST', headers: window.rzfzCsrfHeaders() })
+        .then(r => r.json().catch(() => ({})).then(d => {
+            if (!r.ok) {
+                alert('Could not clear the log: ' + (d.error || 'HTTP ' + r.status));
+                return;
+            }
+            document.getElementById('logBox').textContent = '';
+        }))
+        .catch(err => alert('Could not clear the log: ' + err));
+}
+
+function pollLogs() {
+    fetch('{{ url_for("backup.logs") }}')
+        .then(r => {
+            if (!r.ok) return 'Log fetch failed (HTTP ' + r.status + ')';
+            return r.text();
+        })
+        .then(text => {
+            if (!text) return;
+            const box = document.getElementById('logBox');
+            if (text.includes('<!DOCTYPE') || text.includes('<html')) {
+                if (!box.textContent.trim()) box.textContent = 'Waiting for logs...';
+                return;
+            }
+            if (text.trim()) {
+                box.textContent = text;
+                box.scrollTop = box.scrollHeight;
+            }
+        })
+        .catch(() => {});
+}
+
+setInterval(pollLogs, 3000);
+pollLogs();
+</script>
+{% endblock %}

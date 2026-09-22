@@ -1,0 +1,109 @@
+<div class="brand">
+    <svg class="brand-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z"/></svg>
+    <span class="brand-name">rzfz.ai</span>
+</div>
+<div class="brand-sub">Settings</div>
+
+<!-- Version info. Release Notes / Getting Started now live in the topbar
+     (base.html) — kept out of the rail header here to avoid duplicating the
+     same two actions in both the sidebar and the topbar (#300 Task 1.3). -->
+<div class="nav-version">
+    <div class="nav-version-num">{{ stack_version }}</div>
+</div>
+
+<!-- #300 rail reorg (approved prototype match): the old OVERVIEW / MODULES /
+     SETTINGS / OPERATIONS / SECURITY / DOCUMENTATION / SYSTEM section-header
+     blocks are gone. The prototype's flat icon-nav, grouped only by thin
+     dividers, replaces them. Every route + profile/doc gate below is
+     UNCHANGED from the pre-reorg nav — only the presentation (grouping,
+     icons, labels) changed. See tests/unit/razzfazz-config/
+     test_300_nav_gating.py for the gate-preservation contract. -->
+<div class="railnav">
+    <a href="{{ url_for('dashboard.index') }}" class="nav {% if request.path == '/' %}active{% endif %}">
+        <span class="nav-ico">▚</span><span>Dashboard</span>
+    </a>
+    <a href="{{ url_for('modules.overview') }}" class="nav {% if request.path.startswith('/modules') %}active{% endif %}">
+        <span class="nav-ico">▦</span><span>Modules</span><span class="nav-count">{{ nav_module_counts.enabled }}/{{ nav_module_counts.total }}</span>
+    </a>
+    {# #300-followup (double-highlight fix, operator feedback): the 9 flat
+       Settings-and-friends entries (Settings, Authentication, Email (SMTP),
+       GPUStack, Secrets, the old Domain/TLS duplicate, RAG models, Personal
+       Agents, MCP Integrations, Sideload Model, and Mac LLM further below)
+       collapse into ONE rail item. It activates for the WHOLE /settings/*
+       (+ /mac-backends, Mac LLM is a settings surface too) group; the
+       individual sub-pages now live in the secondary sub-pane
+       (components/settings_subnav.html, included from base.html only on
+       settings routes) which highlights the EXACT current sub-page. This is
+       what stops /settings/domain from lighting up two rail entries at
+       once (old "Settings" AND the old duplicate Domain/TLS label both
+       pointed at settings.domain). #}
+    <a href="{{ url_for('settings.domain') }}" class="nav {% if request.path.startswith('/settings') or request.path.startswith('/mac-backends') %}active{% endif %}">
+        <span class="nav-ico">⚙</span><span>Settings</span>
+    </a>
+
+    <div class="nav-divider"></div>
+
+    <a href="{{ url_for('backup.index') }}" class="nav {% if '/backup' in request.path %}active{% endif %}">
+        <span class="nav-ico">⭯</span><span>Backup</span>
+    </a>
+    <a href="{{ url_for('governance.index') }}" class="nav {% if '/governance' in request.path %}active{% endif %}">
+        <span class="nav-ico">§</span><span>Governance</span>
+    </a>
+    <a href="{{ url_for('logs.index') }}" class="nav {% if request.path.startswith('/logs') %}active{% endif %}">
+        <span class="nav-ico">▤</span><span>Log snapshots</span>
+    </a>
+    <a href="{{ url_for('offline.index') }}" class="nav {% if request.path.startswith('/offline') %}active{% endif %}">
+        <span class="nav-ico">⇅</span><span>Offline / Network</span>
+    </a>
+    <a href="{{ url_for('network_policy.index') }}" class="nav {% if request.path.startswith('/network-policy') %}active{% endif %}">
+        <span class="nav-ico">◫</span><span>Network policy</span>
+    </a>
+    {# Mac LLM moved into the Settings sub-pane (components/settings_subnav.html)
+       — it's a backend/settings surface, gated on the same mac-llm profile
+       it always was, just relocated out of the flat rail list per the
+       Settings-collapse fix above. #}
+    {# #185: discoverable deep-link to the portal shortcuts admin. The admin CRUD
+       lives in the Start Portal (it owns the shortcuts table); the Config UI only
+       links out, so it takes on no Postgres dependency. Opens in a new tab. #}
+    {% if main_domain %}
+    <a href="https://start.{{ main_domain }}/admin/shortcuts" target="_blank" rel="noopener" class="nav">
+        <span class="nav-ico">↗</span><span>Shortcuts &#8599;</span>
+    </a>
+    {% endif %}
+
+    <div class="nav-divider"></div>
+
+    {% if security_doc_available %}
+    <a href="{{ url_for('security.index') }}" class="nav {% if request.path.startswith('/security') %}active{% endif %}">
+        <span class="nav-ico">🛡</span><span>Security</span>
+    </a>
+    {% endif %}
+    <a href="{{ url_for('docs.index') }}" class="nav {% if '/docs' in request.path %}active{% endif %}">
+        <span class="nav-ico">📖</span><span>Docs &amp; Licenses</span>
+    </a>
+    <a href="{{ url_for('licenses.index') }}" class="nav {% if '/licenses' in request.path %}active{% endif %}">
+        <span class="nav-ico">⚖</span><span>Licenses</span>
+    </a>
+</div>
+
+<!-- #300 operator feedback: no in-app login (Authentik-gated at the proxy),
+     so a logout link is deliberately absent. Factory Reset (destructive)
+     moved here — reachable but de-emphasised, out of the main flat list. -->
+<div class="sidebar-foot">
+    {# #1876/#1200: the Portal's address is SETTINGS_DOMAIN, injected by
+       _nav_extras. `config.<domain>` is the RETIRED host (301 for one cycle)
+       and must not be advertised here. Never rebuilt from main_domain — an
+       operator may point SETTINGS_DOMAIN somewhere else entirely. #}
+    {% if settings_domain %}{{ settings_domain }}{% else %}Configuration portal{% endif %}
+    <br>
+    <a href="{{ url_for('settings.factory_reset') }}" class="{% if '/factory-reset' in request.path %}active{% endif %}">Factory Reset</a>
+</div>
+
+<!--
+    The Release Notes + What's New overlays used to live here. They were
+    rendering inside .sidebar which creates a containing block for
+    position:fixed descendants, so inset:0 resolved to the nav column
+    instead of the viewport. Markup moved to
+    components/release_notes_whats_new.html and included from base.html at
+    body-root so the overlay fills the full viewport.
+-->

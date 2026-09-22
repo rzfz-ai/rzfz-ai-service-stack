@@ -1,0 +1,43 @@
+# ==============================================================================
+# PDF PROCESSING MODULE (Stirling-PDF)
+# ==============================================================================
+# Profile: stirling-pdf
+# Full-featured PDF manipulation web UI with 50+ operations.
+# User-facing at pdf.<domain> behind Authentik SSO.
+# SECURITY_ENABLELOGIN=false — Authentik handles all authentication.
+# ==============================================================================
+services:
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:2.14.3
+    profiles: ["stirling-pdf"]
+    container_name: stirling-pdf
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${STIRLING_PDF_PORT:-8181}:8080"
+    volumes:
+      - stirling-pdf-config:/configs
+      - stirling-pdf-logs:/logs
+    environment:
+      # Authentik handles all authentication — disable built-in login
+      DOCKER_ENABLE_SECURITY: "false"
+      SECURITY_ENABLELOGIN: "false"
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8080/api/v1/info/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  stirling-pdf-config:
+  stirling-pdf-logs:
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge

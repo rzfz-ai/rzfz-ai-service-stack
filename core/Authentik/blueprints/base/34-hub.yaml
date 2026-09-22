@@ -1,0 +1,47 @@
+version: 1
+metadata:
+  name: "Module - Fleet Hub (registry UI)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # Provider: Caddy Forward Auth for the fleet hub's Zot web UI
+  # (hub.<domain>, #559/#568 R5). ONLY the browser surface — the /v2 docker
+  # API on the same host is machine-authed by the manager's /api/hub-auth and
+  # never reaches Authentik. init-authentik.sh auto-attaches every
+  # ProxyProvider to the embedded outpost.
+  # ==========================================
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: "Caddy Forward Auth Provider for Fleet Hub"
+    attrs:
+      client_id: "hub_app_client_id"
+      client_secret: "${LLM_HUB_CLIENT_SECRET}"
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      external_host: "https://${LLM_HUB_DOMAIN}"
+      mode: forward_single
+      intercept_header_auth: true
+      access_token_validity: "hours=24"
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: Proxy outpost"]]
+
+  # ==========================================
+  # Application: Fleet Hub (registry browser). Hidden from the library
+  # (meta_launch_url blank://blank, M028 pattern) — reached at hub.<domain>.
+  # ==========================================
+  - model: authentik_core.application
+    identifiers:
+      slug: fleet-hub
+    attrs:
+      name: "Fleet Hub"
+      group: "7 LLM Infrastructure"
+      provider: !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Fleet Hub"]]
+      meta_launch_url: "blank://blank"
+      meta_description: "The master's OCI registry — browse runner images and model artifacts."
+      meta_publisher: "razzfazz.ai"
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_llm_icon.png"
+      open_in_new_tab: true
+      policy_engine_mode: any

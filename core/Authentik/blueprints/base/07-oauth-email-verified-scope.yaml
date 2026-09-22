@@ -1,0 +1,50 @@
+version: 1
+metadata:
+  name: "Base - OAuth email scope w/ email_verified=true (Vaultwarden SSO first-login)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2 scope mapping: email (+ email_verified=true)
+  # ==========================================
+  # Vaultwarden's SSO BLOCKS first login ("verify your email") when the IdP does
+  # not assert `email_verified: true` in the ID token. The Vaultwarden flag
+  # SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION only covers an ABSENT claim — not an
+  # explicit `false` — and Authentik's built-in "OpenID 'email'" scope mapping
+  # emits `email_verified: False` verbatim (confirmed on 2026.5.5). So we assert
+  # it EXPLICITLY here.
+  #
+  # This is a correct trust assertion: an Authentik-authenticated user has already
+  # proven control of their account within Authentik's own boundary, so at the
+  # point Authentik mints this token the email is verified for our purposes.
+  #
+  # WHY THIS MAPPING EMITS THE FULL `email` CLAIM (not just email_verified):
+  # Authentik builds claims in authentik/providers/oauth2/views/userinfo.py::
+  # get_claims() by iterating `ScopeMapping.objects.filter(...).order_by("scope_name")`
+  # and deep-merging each mapping's dict (last writer wins per key). The ordering
+  # key is scope_name ONLY — so two mappings that both use scope_name "email"
+  # (the built-in one and this one) have an UNDEFINED relative order (a DB
+  # tiebreak), and whichever Postgres happens to return last wins `email_verified`.
+  # Relying on "attach after the default so it wins" is therefore NOT sound — a
+  # VACUUM / dump-restore / different insert order could silently flip it back to
+  # False. The robust fix: this mapping supplies the ENTIRE `email` scope
+  # (email + email_verified=true) and the Vaultwarden provider does NOT attach the
+  # built-in "OpenID 'email'" mapping at all (see 20-vaultwarden.yaml) — so there
+  # is exactly ONE email-scope mapping and the result is deterministic. #211.
+  #
+  # Kept name "…: email_verified" for continuity; it now owns the whole email
+  # scope for the providers that attach it (today: Vaultwarden only). Harmless for
+  # any other app that might attach it — it emits the standard email claim set.
+  # ==========================================
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers:
+      name: "razzfazz.ai OAuth Mapping: email_verified"
+    attrs:
+      name: "razzfazz.ai OAuth Mapping: email_verified"
+      scope_name: "email"
+      description: "razzfazz.ai: email scope asserting email_verified=true (deterministic single source; unblocks Vaultwarden SSO first login) — #211"
+      expression: |
+        return {
+            "email": request.user.email,
+            "email_verified": True,
+        }

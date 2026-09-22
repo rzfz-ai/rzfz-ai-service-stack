@@ -1,0 +1,74 @@
+{# A single tile. The whole card is an <a>, with the pin control as a nested
+   <button> that stops event propagation so toggling the pin doesn't
+   navigate. data-tile-id is what SortableJS reads when the user reorders.
+   The is_live_agent class triggers the spinner pattern from rc6.7 #91
+   (poll /api/ready/<id>) so newly-started agents show a "Starting…" state
+   until the inner app is actually serving.
+   S11.3 #7 #8: heart icon for favorites + tooltip on hover from manifest
+   description. #}
+<a class="portal-tile{% if tile.is_live_agent %} portal-tile-live portal-tile-pending{% endif %}"
+   href="{{ tile.url }}"
+   target="_blank"
+   rel="noopener"
+   data-tile-id="{{ tile.id }}"
+   {% if tile.is_live_agent %}data-instance-id="{{ tile.instance_id }}"{% endif %}
+   {% if tile.description %}title="{{ tile.description }}"{% endif %}
+   aria-label="{{ tile.name }}{% if tile.description %} — {{ tile.description }}{% endif %}">
+    <button type="button"
+            class="portal-tile-pin{% if tile.pinned %} portal-tile-pinned{% endif %}"
+            data-pin-tile="{{ tile.id }}"
+            aria-label="{% if tile.pinned %}Unpin{% else %}Pin to favorites{% endif %} {{ tile.name }}"
+            title="{% if tile.pinned %}Unpin{% else %}Pin to favorites{% endif %}">♥</button>
+    {% if tile.icon_data_uri %}
+    {# #248 App Builder (additive; note for rebase against the parallel #299
+       reskin touching this same partial) — a shortcut whose icon is a
+       client-uploaded image (shortcuts.py::icon_tile_fields) renders that
+       data URI directly, same slot the emoji/PNG branches use below. #}
+    <img class="portal-tile-icon" src="{{ tile.icon_data_uri }}" alt="" loading="lazy">
+    {% elif tile.icon_emoji %}
+    {# #185 — razzfazz-shortcuts tiles render an emoji glyph instead of a PNG
+       asset (the admin picks an emoji per shortcut; curated-PNG/upload is P3). #}
+    <span class="portal-tile-icon portal-tile-icon-emoji" aria-hidden="true">{{ tile.icon_emoji }}</span>
+    {% elif tile.icon == '__svg_manage_auth__' %}
+    {# S11.3 #11 — Manage Authentication tile renders an inline SVG glyph
+       (key + person) instead of a PNG asset. Lighter footprint, no new
+       image file needed. #}
+    <span class="portal-tile-icon portal-tile-icon-svg" aria-hidden="true">
+        <svg viewBox="0 0 64 64" fill="currentColor">
+            <circle cx="22" cy="22" r="10" fill="none" stroke="currentColor" stroke-width="3"/>
+            <path d="M8 56 c0 -10 7 -18 14 -18 s14 8 14 18" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            <circle cx="48" cy="40" r="6" fill="none" stroke="currentColor" stroke-width="3"/>
+            <path d="M52 40 L 60 40 M58 40 L58 44 M54 40 L54 43" stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none"/>
+        </svg>
+    </span>
+    {% else %}
+    <img class="portal-tile-icon"
+         src="/static/icons/razzfazz-ai_{{ tile.icon|default('home') }}_icon.png"
+         alt=""
+         loading="lazy">
+    {% endif %}
+    <span class="portal-tile-name">{{ tile.name }}</span>
+    {# #299 tile-reskin-to-prototype — the rich-card description (prototype
+       .tdesc). Every tile type (manifest, live agent, shortcut) carries a
+       `description` by the time it reaches this template — see app.py's
+       manifest loader / _agent_to_tile / shortcuts.shortcuts_as_tiles. #}
+    {% if tile.description %}
+    <span class="portal-tile-desc">{{ tile.description }}</span>
+    {% endif %}
+    {# #299 tile-reskin-to-prototype — the rich-card footer (prototype
+       .tfoot): the tool/rzfz.ai disambiguation chip on the left, "Open →"
+       (or "Run →" for admin-curated shortcuts) on the right. The chip
+       branches are unchanged from #299 Phase 2 (presentation-only; no
+       effect on visibility gating or routing) — only their position moved
+       into this footer row. #}
+    <span class="portal-tile-foot">
+        {% if tile.chip_kind == 'native' %}
+        <span class="portal-tile-chip portal-tile-chip-native">rzfz.ai</span>
+        {% elif tile.chip %}
+        <span class="portal-tile-chip">{{ tile.chip }}</span>
+        {% else %}
+        <span class="portal-tile-chip-spacer" aria-hidden="true"></span>
+        {% endif %}
+        <span class="portal-tile-open">{% if tile.is_shortcut %}Run →{% else %}Open →{% endif %}</span>
+    </span>
+</a>
