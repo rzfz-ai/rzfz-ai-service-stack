@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# compose.no-build.yml  —  GENERATED, DO NOT EDIT BY HAND (#184 WS2a)
+# ==============================================================================
+# Regenerate:  python3 scripts/gen-nobuild-overlay.py --out compose.no-build.yml
+#
+# UNIVERSAL no-runtime-build overlay (composed in EVERY network mode:
+# online / proxied / offline). `build: !reset null` DROPS each custom-build
+# service's build context, so `docker compose up -d` / module enable / disable
+# can never build — a missing image fails clear (surfaced by `rzfz
+# verify-images`) instead of a silent internet-reaching build. `pull_policy:
+# never` keeps it from pulling too. Building happens ONLY at the explicit
+# install/package/upgrade `docker compose build` step, which strips this
+# overlay from COMPOSE_FILE (scripts/lib.sh::compose_file_strip_overlay).
+#
+# Added to COMPOSE_FILE by scripts/lib.sh::ensure_nobuild_overlay on every
+# init/upgrade. `!reset` needs Docker Compose >= 2.24 (fleet ships 2.40+).
+#
+# #2136: this overlay is appended LAST, after the per-hardware device overlay
+# (modules/llm/compose.devices.{cpu,amd,nvidia}.yml). It therefore FILLS GAPS
+# and NEVER OVERRIDES: `image:` appears only for a build-only service whose
+# base declares none (compose would derive <project>-<service>), and
+# `pull_policy: never` only where the base declares no pull_policy. Repeating
+# a base's `image:` here clobbered the CPU box's `gpustack/gpustack:*-cpu`
+# back to the AMD `razzfazz-gpustack:vulkan`, and repeating `pull_policy: never`
+# undid the CPU overlay's `pull_policy: !reset null` — the ga.15 `llm-cpu`
+# upgrade to 2026.09 then demanded an image a CPU box can neither build nor
+# pull (0.91, 2026-09-15). NVIDIA (`razzfazz-gpustack:cuda`) was hit the same
+# way; AMD escaped only because the clobbering value happened to be its own.
+# ==============================================================================
+
+services:
+  agent-manager:
+    build: !reset null
+  authentik-init:
+    build: !reset null
+    image: razzfazz-stack-authentik-init
+  backup:
+    build: !reset null
+  caddy:
+    build: !reset null
+    image: razzfazz-stack-caddy
+  coding-agent-codex-image:
+    build: !reset null
+  coding-agent-opencode-image:
+    build: !reset null
+  coding-agent-user-defined-image:
+    build: !reset null
+  coding-tools-image:
+    build: !reset null
+  cognee:
+    build: !reset null
+    image: razzfazz-stack-cognee
+  cognee-authshim-image:
+    build: !reset null
+  cognee-frontend:
+    build: !reset null
+    image: razzfazz-stack-cognee-frontend
+  dify-web:
+    build: !reset null
+    image: razzfazz-stack-dify-web
+  gpustack-legacy:
+    build: !reset null
+  hermes-agent-image:
+    build: !reset null
+  llm-manager:
+    build: !reset null
+    pull_policy: never
+  llm-manager-ui:
+    build: !reset null
+    pull_policy: never
+  llm-worker-agent:
+    build: !reset null
+    pull_policy: never
+  mcp-manager:
+    build: !reset null
+  mcp-test-echo-image:
+    build: !reset null
+  model-sync-legacy:
+    build: !reset null
+    image: razzfazz-stack-model-sync-legacy
+  moltis-image:
+    build: !reset null
+  openwebui-seed:
+    build: !reset null
+    image: razzfazz-stack-openwebui-seed
+  paperclip:
+    build: !reset null
+    image: razzfazz-stack-paperclip
+  paperclip-image:
+    build: !reset null
+  razzfazz-backup-management:
+    build: !reset null
+    image: razzfazz-stack-razzfazz-backup-management
+  razzfazz-config:
+    build: !reset null
+    image: razzfazz-stack-razzfazz-config
+  razzfazz-help:
+    build: !reset null
+    image: razzfazz-stack-razzfazz-help
+  razzfazz-licenses:
+    build: !reset null
+    image: razzfazz-stack-razzfazz-licenses
+  razzfazz-start-portal:
+    build: !reset null
+    image: razzfazz-stack-razzfazz-start-portal
+  wazuh-certs-generator:
+    build: !reset null

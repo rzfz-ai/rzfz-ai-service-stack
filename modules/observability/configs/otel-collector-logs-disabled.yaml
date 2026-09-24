@@ -1,0 +1,15 @@
+# ==============================================================================
+# OTel Collector logs overlay — DISABLED (default)
+# ==============================================================================
+# Merged on top of otel-collector-config.yaml when OTEL_LOG_EXPORT_ENABLED=false
+# (the default). It intentionally adds NOTHING — no filelog receiver, no
+# external exporter, no logs/external pipeline. Result: the collector runs
+# trace/metric/log-to-ClickHouse only (fixes #193) and NEVER touches
+# /var/lib/docker/containers or dials any external endpoint.
+#
+# This is why an unset OTEL_EXPORTER_OTLP_ENDPOINT can never break startup:
+# the external exporter block simply isn't present in the merged config.
+#
+# To turn external log shipping ON (#197): set OTEL_LOG_EXPORT_ENABLED=true and
+# OTEL_COLLECTOR_LOGS_OVERLAY=otel-collector-logs-export.yaml in .env.
+{}

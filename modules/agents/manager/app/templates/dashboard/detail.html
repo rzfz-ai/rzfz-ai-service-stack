@@ -1,0 +1,535 @@
+{# #959 Task A3: per-agent Settings reskinned onto the shared dark-rail shell
+   (base_shell.html, Task A1). Status/Terminal/Logs/Lifecycle/Update/Memory/
+   Name/Process-Limit/Danger-Zone become `.card`s (Danger Zone adds `.danger`,
+   per the approved prototype). Every existing parity hook — the type-`Delete`
+   confirm input, memory/name/PID controls, terminal wiring — is preserved
+   verbatim (see tests/unit/agent-manager/test_959_identity_reskin.py::
+   test_detail_reskinned_keeps_parity). #}
+{% extends "base_shell.html" %}
+
+{% block page_title %}{{ display_name }} - Settings{% endblock %}
+{% block crumb %} · <span class="sub">{{ display_name }}</span>{% endblock %}
+
+{% block am_extra_css %}
+    {# #244-Q3: xterm is VENDORED, not pulled from jsdelivr. The appliance ships
+       air-gapped (RAZZFAZZ_NETWORK_MODE=offline) and customer boxes sit behind
+       corporate proxies — on either, the CDN <script> silently failed, leaving
+       `window.Terminal` undefined and this terminal permanently blank with no
+       error the operator could act on. Same files the coding-agent web UI
+       already vendors (xterm 5.3.0 + addon-fit 0.8.0; the `Terminal` and
+       `FitAddon.FitAddon` globals are identical to the 5.5.0 build this
+       replaced). #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm.min.css') }}?v={{ stack_version|default('0') }}">
+{% endblock %}
+
+{% block am_content %}
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        {# #1986: back where the user came FROM, not always the overview. The
+           origin is an explicit allow-listed token, never request.referrer (absent
+           under some privacy settings, forgeable, and a silent behaviour change
+           later) and never a free `next=` URL (open redirect). #}
+        <a href="{{ back_url }}" style="color: var(--text-dim); text-decoration: none; font-size: 0.85rem;">&larr; {{ back_label }}</a>
+        <h1 style="font-size:1.2rem;">{{ display_name }}</h1>
+        <span class="badge {{ instance.state }}">{{ instance.state }}</span>
+    </div>
+
+    <section class="card">
+        <h3>Status</h3>
+        <table class="detail-table">
+            <tr><td>Instance ID</td><td><code style="font-size:11px">{{ instance.id }}</code></td></tr>
+            <tr><td>Container</td><td><code style="font-size:11px">{{ instance.container_name }}</code></td></tr>
+            <tr><td>State</td><td>{{ instance.state }}</td></tr>
+            <tr><td>Image Version</td><td><code>{{ instance.image_version or '(unknown — pre-M030 launch)' }}</code></td></tr>
+            <tr><td>Created</td><td>{{ instance.created_at }}</td></tr>
+            {% if instance.last_upgraded_at %}
+            <tr><td>Last Upgraded</td><td>{{ instance.last_upgraded_at }}</td></tr>
+            {% endif %}
+            {% if instance.started_at %}
+            <tr><td>Started</td><td>{{ instance.started_at }}</td></tr>
+            {% endif %}
+            {% if instance.stopped_at %}
+            <tr><td>Stopped</td><td>{{ instance.stopped_at }}</td></tr>
+            {% endif %}
+            <tr><td>Last Accessed</td><td>{{ instance.last_accessed }}</td></tr>
+            {% if stats %}
+            <tr><td>Memory</td><td>{{ stats.mem_usage_mb }} / {{ stats.mem_limit_mb }} MB ({{ stats.mem_percent }}%)</td></tr>
+            {% endif %}
+            {% if instance.error_message %}
+            <tr><td>Error</td><td class="error">{{ instance.error_message }}</td></tr>
+            {% endif %}
+        </table>
+    </section>
+
+    {% if instance.state == 'running' %}
+    <section class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h3 style="margin-bottom: 0;">Terminal</h3>
+            <button class="btn btn-secondary" id="btn-term" onclick="toggleTerminal()">Open Terminal</button>
+        </div>
+        <div id="terminal-container" style="display: none; border-radius: 8px; overflow: hidden;"></div>
+    </section>
+    {% endif %}
+
+    {% if logs %}
+    <section class="card">
+        <h3>Logs (last 200 lines)</h3>
+        <pre class="logs">{{ logs }}</pre>
+    </section>
+    {% endif %}
+
+    {# M030-S2: Lifecycle (non-destructive, reversible) — separated from
+       Danger Zone so Start/Stop don't sit next to Delete Instance. #}
+    <section class="card">
+        <h3>Lifecycle</h3>
+        <div style="display: flex; gap: 8px;">
+            {% if instance.state == 'running' %}
+            <button class="btn btn-secondary" onclick="agentAction('stop', '{{ instance.id }}')">Stop Instance</button>
+            {# ga.2 (#219): in-place restart — bounces a wedged agent without losing data. #}
+            <button class="btn btn-secondary" onclick="if(confirm('Restart this agent?\n\nThe process is bounced (a few seconds of downtime); your chats, skills, files, and config are preserved. Any in-progress task is interrupted.\n\nContinue?')) agentAction('restart', '{{ instance.id }}')">Restart Instance</button>
+            {% elif instance.state == 'stopped' %}
+            <button class="btn btn-primary" onclick="agentAction('start', '{{ instance.id }}')">Start Instance</button>
+            {% endif %}
+        </div>
+    </section>
+
+    {# ga.2 (#219): Update / Reinstall — the non-destructive image refresh.
+       The dashboard card shows an "Update" button only when a newer catalog
+       version is detected; this Settings-page control is ALSO available when
+       already current so a user can reinstall/refresh onto the current image
+       (picks up a rebuilt `:latest` tag — coding-tools/paperclip — and re-
+       injects freshly-resolved env). Backed by /api/upgrade, which preserves
+       all named volumes (chats/skills/files/config). Hidden while an instance
+       is provisioning/error — those states have no stable container to
+       recreate cleanly from here. #}
+    {% if instance.state in ('running', 'stopped') %}
+    <section class="card">
+        <h3>Update</h3>
+        {% if update_available %}
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            A newer version is available:
+            <code>{{ instance.image_version }}</code> &rarr; <code>{{ update_target_version }}</code>.
+            Updating preserves your chats, skills, files and config; the agent is briefly stopped (~30s downtime).
+        </p>
+        {# AGU-15: confirm copy + id in data-attributes, read as strings. #}
+        <button class="btn btn-primary"
+                data-instance-id="{{ instance.id }}"
+                data-confirm="Update this agent to {{ update_target_version }}?&#10;&#10;Your chats, skills, files, and config are preserved. The agent will be briefly stopped (~30s downtime).&#10;&#10;Continue?"
+                onclick="confirmAgentAction(this, 'upgrade')">Update to {{ update_target_version }}</button>
+        {% else %}
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            This agent is on <code>{{ instance.image_version or catalog_version or 'the current version' }}</code> (the latest available).
+            You can reinstall/refresh it onto the current image — this picks up a rebuilt image and re-applies configuration
+            without losing your chats, skills, files or config (~30s downtime).
+        </p>
+        <button class="btn btn-secondary"
+                data-instance-id="{{ instance.id }}"
+                data-confirm="Reinstall / refresh this agent onto the current image?&#10;&#10;Your chats, skills, files, and config are preserved. The agent will be briefly stopped (~30s downtime).&#10;&#10;Continue?"
+                onclick="confirmAgentAction(this, 'upgrade')">Reinstall / Refresh</button>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {# #36 / PR #84 — per-instance Memory control. Tier-gated: only power/admin
+       see the editable picker (the SERVER enforces the same gate in
+       provisioner.update_memory, and refuses a change that would exceed the
+       global budget / per-user cap). Applied live via `docker update` on a
+       running container; persisted so it survives a recreate. #}
+    {% if can_set_memory %}
+    <section class="card">
+        <h3>Memory</h3>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Current limit: <code>{{ current_mem or '—' }}</code>.
+            {% if instance.state == 'running' %}Changes apply live where possible;{% else %}Changes take effect on next start;{% endif %}
+            a raise that would exceed the shared budget or your personal cap is refused.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <select id="mem-gb-select">
+                {% for gb in mem_presets %}
+                <option value="{{ gb }}" {% if current_mem == (gb ~ 'g') %}selected{% endif %}>{{ gb }} GB</option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-primary" onclick="updateMemory('{{ instance.id }}')">Apply</button>
+            <span id="mem-result" style="font-size:0.85rem;color:var(--text-dim);"></span>
+        </div>
+    </section>
+    {% elif current_mem %}
+    <section class="card">
+        <h3>Memory</h3>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Memory limit: <code>{{ current_mem }}</code>. Ask an admin to change it.
+        </p>
+    </section>
+    {% endif %}
+
+    {# #233 — a name of your own. NOT tier-gated: it is cosmetic and scoped to
+       your own agent, so gating it would be governance theatre. The SERVER
+       still validates the content (control/formatting characters are refused —
+       this string is injected into the container as AGENT_LABEL and rendered
+       into a terminal title bar, where escape sequences are interpreted). #}
+    <section class="card">
+        <h3>Name</h3>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Shown in the portal tree, on the agents overview and on your start page.
+            Leave it empty to go back to “{{ type_info.display_name if type_info else instance.agent_type }}”.
+            The terminal’s own title bar picks a new name up the next time the agent restarts.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <input type="text" id="custom-name-input" maxlength="64"
+                   value="{{ custom_name }}"
+                   placeholder="{{ type_info.display_name if type_info else instance.agent_type }}"
+                   style="flex:1;max-width:320px;">
+            <button class="btn btn-primary" onclick="renameInstance('{{ instance.id }}')">Save name</button>
+        </div>
+        <div id="rename-result" style="margin-top:8px;font-size:0.85rem;"></div>
+    </section>
+
+    {# #232 — per-instance PID cap. Tier-gated exactly like Memory, and for the
+       same reason: PIDs are a shared kernel resource, so a raised cap is a
+       whole-box risk rather than a personal preference. The per-type value
+       (ga.9 / #221) is the default this overrides. #}
+    {% if can_set_pids %}
+    <section class="card">
+        <h3>Process limit</h3>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Maximum number of processes (PIDs) this agent may run — the guard that
+            stops a runaway or fork-bombing tool from taking the whole box down.
+            Current: <code>{{ current_pids or 'default' }}</code>.
+            MCP-heavy setups are what usually need this raised.
+            {% if instance.state == 'running' %}Applied live where the kernel allows it;
+            otherwise it takes effect on the next start.{% else %}Takes effect on the next start.{% endif %}
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <select id="pids-select">
+                {% for p in pids_presets %}
+                <option value="{{ p }}" {% if current_pids == p %}selected{% endif %}>{{ p }}</option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-primary" onclick="updatePids('{{ instance.id }}')">Apply</button>
+        </div>
+        <div id="pids-result" style="margin-top:8px;font-size:0.85rem;"></div>
+    </section>
+    {% elif current_pids %}
+    <section class="card">
+        <h3>Process limit</h3>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-top:0;">
+            Process (PID) limit: <code>{{ current_pids }}</code>. Ask an admin to change it.
+        </p>
+    </section>
+    {% endif %}
+
+    {# M030-S2: Danger Zone — Delete moved here (was on the agents
+       overview cards before, where one click would wipe weeks of
+       chats/skills/files). Now requires the user to type the case-
+       sensitive word "Delete" + see a per-agent state-loss list before
+       the confirm button enables. Server-side ?confirm=Delete gate
+       backstops the JS gate (api.py /api/delete/<id>). `.danger` per the
+       approved prototype (#959). #}
+    <section class="card danger-zone danger">
+        <h3>⚠ Danger Zone</h3>
+
+        <h4 style="margin-bottom:4px;">Delete Instance</h4>
+        <p style="margin-top:0;">Permanently delete this {{ type_info.display_name if type_info else instance.agent_type }} instance and ALL its personal data:</p>
+
+        <ul style="margin:8px 0 12px 18px;">
+            {# Per-agent state-loss items. Displayed verbatim so the user
+               sees what they're about to lose for THEIR specific agent
+               type. Add bullets per agent as new types ship. #}
+            {% if instance.agent_type == 'moltis' %}
+                <li>All your chats and conversation history</li>
+                <li>Trained skills, agent memory, and code-index</li>
+                <li>Per-user moltis config (TOML overrides, provider keys)</li>
+                <li>API keys you created in moltis (incl. the one OWUI uses)</li>
+                <li>All sandbox files and any generated artifacts</li>
+            {% elif instance.agent_type == 'hermes' %}
+                <li>All your chats with the Hermes agent</li>
+                <li>Workspace files (skills, training notes, projects)</li>
+                <li>Agent memory and personality state (SOUL.md, etc.)</li>
+            {% elif instance.agent_type == 'coding-tools' %}
+                <li>All your code in /workspace</li>
+                <li>opencode session history and chat threads</li>
+                <li>gsd state, task lists, and personal opencode/gsd config</li>
+                <li>Cached models</li>
+            {% elif instance.agent_type == 'openhands' %}
+                <li>All OpenHands conversations and session state</li>
+                <li>Project workspace files</li>
+                <li>OAuth tokens and connected-account credentials</li>
+            {% elif instance.agent_type == 'paperclip' %}
+                <li>All paperclip companies, agents, and their state</li>
+                <li>Generated artifacts and conversation history</li>
+                <li>Per-instance Postgres DB (will be dropped)</li>
+            {% else %}
+                <li>All chats, files, and config for this agent</li>
+                <li>Local databases and runtime state</li>
+            {% endif %}
+        </ul>
+
+        <p style="font-weight:600;color:var(--error);">This action CANNOT be undone — there is no automatic backup.</p>
+        <p style="font-size:13px;margin-bottom:16px;">If you want a backup first, ask an admin to snapshot this agent's volumes before you continue.</p>
+
+        <p style="margin-bottom:6px;">To confirm, type the word <strong style="font-family:'JetBrains Mono', monospace;">Delete</strong> below (case-sensitive):</p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <input type="text"
+                   id="delete-confirm-input"
+                   placeholder="type Delete"
+                   autocomplete="off"
+                   spellcheck="false"
+                   oninput="onDeleteConfirmInput()"
+                   style="flex:1;font-family:'JetBrains Mono', monospace;max-width:240px;">
+            <button id="delete-confirm-btn"
+                    class="btn btn-danger"
+                    disabled
+                    onclick="confirmAndDeleteInstance('{{ instance.id }}')"
+                    style="opacity:0.4;cursor:not-allowed;">Delete Instance</button>
+        </div>
+        <div id="delete-result" style="margin-top:12px;color:var(--error);"></div>
+    </section>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='vendor/xterm.min.js') }}?v={{ stack_version|default('0') }}"></script>
+<script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}?v={{ stack_version|default('0') }}"></script>
+<script>
+// AGU-15 (#1040): confirm text + instance id travel as `data-` attribute
+// VALUES and are read as strings — never handed to the JS parser after HTML
+// decoding, where an apostrophe in an interpolated value would terminate the
+// string literal it sat in.
+function confirmAgentAction(btn, action) {
+    const msg = btn.dataset.confirm;
+    if (msg && !confirm(msg)) return;
+    agentAction(action, btn.dataset.instanceId);
+}
+
+function agentAction(action, instanceId) {
+    // M030-S2: Delete must NOT go through this generic helper —
+    // confirmAndDeleteInstance() is the only way (type-to-confirm gate
+    // + ?confirm=Delete query param).
+    if (action === 'delete') {
+        alert('Use the "Delete Instance" button in the Danger Zone — it has the type-to-confirm gate.');
+        return;
+    }
+    fetch('/api/' + action + '/' + instanceId, { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                const msg = data.message || data.error || ('HTTP ' + status);
+                alert(action + ' failed: ' + msg);
+            } else {
+                location.href = '{{ url_for("dashboard.index") }}';
+            }
+        })
+        .catch(err => alert(action + ' failed: ' + err));
+}
+
+// #233 — save (or clear) this instance's name. The SERVER validates the
+// content; the browser only reports what it said. A name that only landed in
+// the browser would be worse than none, so the page reloads on success and
+// every surface re-reads the persisted value.
+function renameInstance(instanceId) {
+    const input = document.getElementById('custom-name-input');
+    const result = document.getElementById('rename-result');
+    result.style.color = '';
+    result.textContent = 'Saving…';
+    fetch('/api/rename/' + instanceId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: input.value }),
+    })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                result.style.color = '#dc2626';
+                result.textContent = data.message || data.error || ('HTTP ' + status);
+                return;
+            }
+            result.textContent = data.message || 'Saved.';
+            setTimeout(() => location.reload(), 1000);
+        })
+        .catch(err => { result.style.color = '#dc2626'; result.textContent = 'Failed: ' + err; });
+}
+
+// #232 — apply a PID-cap change (server-side tier-gated + bounds-checked).
+function updatePids(instanceId) {
+    const sel = document.getElementById('pids-select');
+    const result = document.getElementById('pids-result');
+    result.style.color = '';
+    result.textContent = 'Applying…';
+    fetch('/api/pids/' + instanceId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pids_limit: parseInt(sel.value, 10) }),
+    })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                result.style.color = '#dc2626';
+                result.textContent = data.message || data.error || ('HTTP ' + status);
+                return;
+            }
+            // Deliberately NOT reloading: the message distinguishes "applied
+            // live" from "applies on next start", and that difference is the
+            // one thing the user needs to read here.
+            result.textContent = data.message || 'Updated.';
+        })
+        .catch(err => { result.style.color = '#dc2626'; result.textContent = 'Failed: ' + err; });
+}
+
+// #36 / PR #84 — apply a memory change (server-side tier-gated + budget-checked).
+function updateMemory(instanceId) {
+    const sel = document.getElementById('mem-gb-select');
+    const result = document.getElementById('mem-result');
+    const memGb = parseInt(sel.value, 10);
+    result.textContent = 'Applying…';
+    fetch('/api/memory/' + instanceId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mem_gb: memGb }),
+    })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                result.style.color = '#dc2626';
+                result.textContent = data.message || data.error || ('HTTP ' + status);
+            } else {
+                result.style.color = '';
+                result.textContent = data.message || 'Updated.';
+                setTimeout(() => location.reload(), 1200);
+            }
+        })
+        .catch(err => { result.style.color = '#dc2626'; result.textContent = 'Failed: ' + err; });
+}
+
+// M030-S2: type-to-confirm Delete flow.
+function onDeleteConfirmInput() {
+    const input = document.getElementById('delete-confirm-input');
+    const btn = document.getElementById('delete-confirm-btn');
+    // Case-sensitive exact match — typing the word forces the user to
+    // read what they're confirming. Standard pattern from GitHub repo
+    // deletion, AWS account closure, etc.
+    const matches = (input.value === 'Delete');
+    btn.disabled = !matches;
+    btn.style.opacity = matches ? '1' : '0.4';
+    btn.style.cursor  = matches ? 'pointer' : 'not-allowed';
+}
+
+function confirmAndDeleteInstance(instanceId) {
+    const input = document.getElementById('delete-confirm-input');
+    if (input.value !== 'Delete') {
+        // Defense-in-depth — button shouldn't even be enabled here.
+        alert('Type "Delete" exactly to confirm.');
+        return;
+    }
+    const btn = document.getElementById('delete-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+    const result = document.getElementById('delete-result');
+    result.textContent = '';
+    // Server-side gate: ?confirm=Delete (case-sensitive). Backend
+    // rejects without it (api.py /api/delete/<id>).
+    fetch('/api/delete/' + instanceId + '?confirm=Delete', { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, status: r.status, data: data })))
+        .then(({ ok, status, data }) => {
+            if (!ok || data.error) {
+                const msg = data.message || data.error || ('HTTP ' + status);
+                result.textContent = 'Delete failed: ' + msg;
+                btn.disabled = false;
+                btn.textContent = 'Delete Instance';
+            } else {
+                // Success — back to dashboard. Don't show a toast first;
+                // the dashboard reload tells the operator it's gone.
+                location.href = '{{ url_for("dashboard.index") }}';
+            }
+        })
+        .catch(err => {
+            result.textContent = 'Delete failed: ' + err;
+            btn.disabled = false;
+            btn.textContent = 'Delete Instance';
+        });
+}
+
+let term = null;
+let ws = null;
+let termOpen = false;
+
+function toggleTerminal() {
+    const container = document.getElementById('terminal-container');
+    const btn = document.getElementById('btn-term');
+    if (termOpen) {
+        container.style.display = 'none';
+        termOpen = false;
+        btn.textContent = 'Open Terminal';
+        if (ws) { ws.close(); ws = null; }
+        if (term) { term.dispose(); term = null; }
+    } else {
+        container.style.display = 'block';
+        container.style.height = '400px';
+        termOpen = true;
+        btn.textContent = 'Close Terminal';
+        initTerminal();
+    }
+}
+
+function initTerminal() {
+    const container = document.getElementById('terminal-container');
+    container.innerHTML = '';
+
+    term = new Terminal({
+        theme: {
+            background: '#1a1a1a',
+            foreground: '#e0e0e0',
+            cursor: '#CD1719',
+            selectionBackground: '#CD171940',
+        },
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 13,
+        cursorBlink: true,
+        scrollback: 2000,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    fitAddon.fit();
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws/terminal/{{ instance.id }}');
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+    };
+    ws.onmessage = (e) => {
+        term.write(typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data));
+    };
+    ws.onclose = () => {
+        term.write('\r\n\x1b[33m[session ended — click "Open Terminal" to reconnect]\x1b[0m\r\n');
+    };
+    ws.onerror = () => {
+        term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n');
+    };
+
+    term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'input', data}));
+        }
+    });
+
+    // Resize
+    const ro = new ResizeObserver(() => {
+        fitAddon.fit();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+        }
+    });
+    ro.observe(container);
+
+    // Keepalive
+    const keepalive = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'ping'}));
+        } else {
+            clearInterval(keepalive);
+        }
+    }, 45000);
+    ws.addEventListener('close', () => clearInterval(keepalive));
+}
+</script>
+{% endblock %}

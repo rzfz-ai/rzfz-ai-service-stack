@@ -1,0 +1,123 @@
+{
+  "_comment": "SSOT for the rolling Business Source License (BSL 1.1) Change Dates. Each published release converts to its Change License (Apache-2.0) three years after its release date. razzfazz-licenses (core/licenses) and scripts/generate-versions-md.py read from here; scripts/prepare-release.sh / the release-cycle skill append a new entry on every GA tag. Never back-date; use the OFFICIAL release date (tag date is only an approximation).",
+  "change_license": "Apache-2.0",
+  "change_after_years": 3,
+  "releases": {
+    "2026.07-ga": {
+      "released": "2026-07-08",
+      "change_date": "2029-07-08"
+    },
+    "2026.07-ga.1": {
+      "released": "2026-07-07",
+      "change_date": "2029-07-07"
+    },
+    "2026.07-ga.2": {
+      "released": "2026-07-08",
+      "change_date": "2029-07-08"
+    },
+    "2026.07-ga.3": {
+      "released": "2026-07-09",
+      "change_date": "2029-07-09"
+    },
+    "2026.07-ga.4": {
+      "released": "2026-07-10",
+      "change_date": "2029-07-10"
+    },
+    "2026.07-ga.5": {
+      "released": "2026-07-10",
+      "change_date": "2029-07-10"
+    },
+    "2026.07-ga.6": {
+      "released": "2026-07-10",
+      "change_date": "2029-07-10"
+    },
+    "2026.07-ga.7": {
+      "released": "2026-07-11",
+      "change_date": "2029-07-11"
+    },
+    "2026.07-ga.8": {
+      "released": "2026-07-11",
+      "change_date": "2029-07-11"
+    },
+    "2026.07-ga.9": {
+      "released": "2026-07-11",
+      "change_date": "2029-07-11"
+    },
+    "2026.08-ga": {
+      "released": "2026-07-27",
+      "change_date": "2029-07-27"
+    },
+    "2026.08-ga.1": {
+      "released": "2026-07-28",
+      "change_date": "2029-07-28"
+    },
+    "2026.08-ga.10": {
+      "released": "2026-08-05",
+      "change_date": "2029-08-05"
+    },
+    "2026.08-ga.11": {
+      "released": "2026-08-06",
+      "change_date": "2029-08-06"
+    },
+    "2026.08-ga.12": {
+      "released": "2026-08-13",
+      "change_date": "2029-08-13"
+    },
+    "2026.08-ga.12-usbfix": {
+      "released": "2026-08-17",
+      "change_date": "2029-08-17"
+    },
+    "2026.08-ga.13": {
+      "released": "2026-08-20",
+      "change_date": "2029-08-20"
+    },
+    "2026.08-ga.14": {
+      "released": "2026-08-21",
+      "change_date": "2029-08-21"
+    },
+    "2026.08-ga.15": {
+      "released": "2026-08-21",
+      "change_date": "2029-08-21"
+    },
+    "2026.08-ga.3": {
+      "released": "2026-07-30",
+      "change_date": "2029-07-30"
+    },
+    "2026.08-ga.4": {
+      "released": "2026-07-30",
+      "change_date": "2029-07-30"
+    },
+    "2026.08-ga.5": {
+      "released": "2026-08-01",
+      "change_date": "2029-08-01"
+    },
+    "2026.08-ga.6": {
+      "released": "2026-08-02",
+      "change_date": "2029-08-02"
+    },
+    "2026.08-ga.7": {
+      "released": "2026-08-02",
+      "change_date": "2029-08-02"
+    },
+    "2026.08-ga.8": {
+      "released": "2026-08-03",
+      "change_date": "2029-08-03"
+    },
+    "2026.08-ga.9": {
+      "released": "2026-08-03",
+      "change_date": "2029-08-03"
+    },
+    "2026.09-ga": {
+      "released": "2026-09-21",
+      "change_date": "2029-09-21"
+    },
+    "2026.09-ga.1": {
+      "released": "2026-09-22",
+      "change_date": "2029-09-22"
+    },
+    "2026.09-ga.2": {
+      "released": "2026-09-23",
+      "change_date": "2029-09-23"
+    }
+  }
+}

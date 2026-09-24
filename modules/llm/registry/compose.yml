@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# LLM MODEL REGISTRY (Zot) — profile: llm-registry  [always-on since the 2026.09 cutover, #1443]
+# ------------------------------------------------------------------------------
+# Content-addressed OCI registry (Zot, Apache-2.0) that stores model artifacts
+# (GGUF / safetensors / mmproj) as OCI blobs. The LLM Manager (#254) records a
+# model's artifacts by digest; each fleet node pulls the blobs it needs BY
+# DIGEST from here into its models volume (worker-agent puller, P2-D2) — offline
+# safe, deduplicated across models sharing a layer.
+#
+# Operator decision 2026-08-11: Zot over MinIO — OCI content-addressing dedups
+# layers, single small static binary, air-gap friendly (seed the volume once,
+# no WAN needed to serve). See
+# .gsd/reports/2026.09-254-phase2-task-breakdown-2026-08-11.md.
+#
+# SECURITY: loopback-only host bind for operator/seed access; in-network nodes
+# reach it as llm-registry:5000. The SSO/ingress route (registry.<domain>) is
+# added with the manager ingress (Slice 6 / G1). New compose service → the
+# release security review must confirm the pin/bind posture before any GA
+# (pre-tag-check trips on this).
+#
+# KNOWN GAP — NODE-6, tracked in #1037. config.json carries NO `http.auth` and
+# NO `accessControl`, so INSIDE the stack network the registry is fully
+# anonymous: every container on a master box (open-webui, dify-*, the sandbox,
+# crawl4ai, per-user agent containers, …) can GET/PUT/DELETE /v2/** — read every
+# mirrored weight, overwrite a model artifact, or delete the cache. The only
+# gate today is at the Caddy edge (core/Caddy/Caddyfile, forward_auth →
+# /api/hub-auth), i.e. for REMOTE nodes only; the loopback host bind says
+# nothing about in-network reachability. Node-side digest verification catches a
+# swapped BLOB but not a swapped MANIFEST, which is where the digests come from.
+# The fix (Zot htpasswd + accessControl with a read-only node identity and a
+# read-write manager identity, or moving the registry onto an internal network
+# only llm-manager/llm-worker-agent join) changes credential provisioning and
+# compose topology on a live box and is deliberately NOT bundled with the
+# off-box code fixes.
+# ==============================================================================
+services:
+  llm-registry:
+    image: ghcr.io/project-zot/zot-linux-amd64:${ZOT_VERSION:-v2.1.21}
+    profiles: ["llm-registry"]
+    container_name: llm-registry
+    restart: unless-stopped
+    networks:
+      - default
+    ports:
+      # Loopback-only: operator seeding + smoke. In-network nodes use the
+      # Docker DNS name llm-registry:5000.
+      - "127.0.0.1:${LLM_REGISTRY_PORT:-8093}:5000"
+    volumes:
+      - ./config.json:/etc/zot/config.json:ro
+      - llm-registry-data:/var/lib/registry
+    # #1001: 512m OOM-killed Zot mid-upload on multi-GB model blobs (page cache
+    # from large-file I/O + dedupe blew past the cgroup limit; the kernel killed
+    # it partway, resetting the push and leaving an EMPTY manifest — the fleet's
+    # own served models (qwen3.6 34 GB, qwen3-embedding 4.4 GB) never cached,
+    # only the 609 MB reranker did). A model registry mirrors many-GB weights;
+    # 4g gives Zot room to receive them. Ceiling only (no big reservation) so
+    # small master boxes are unaffected until they actually mirror a large model.
+    mem_limit: 4g
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # #254: Zot ships as a DISTROLESS image (only the `zot` binary — no
+      # /bin/sh, no wget/curl), so an in-container exec healthcheck is
+      # impossible; the previous `/bin/sh -c wget …` form could never exec and
+      # produced a permanent false "unhealthy". Disable the exec probe (the
+      # container shows a plain "Up"). Readiness is observed out-of-band: the
+      # manager's registry client hits /v2/ and the worker-agent puller surfaces
+      # pull failures. Nothing depends_on this service being compose-healthy.
+      disable: true
+
+volumes:
+  llm-registry-data:

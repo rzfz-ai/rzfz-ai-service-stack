@@ -1,0 +1,149 @@
+# ==============================================================================
+# DOCUMENT CONVERSION MODULE (Docling Serve)
+# ==============================================================================
+# Profile: docling
+# Document conversion and understanding API with Gradio + Swagger UI.
+# User-facing at docling.<domain> behind Authentik SSO.
+#
+# Two pipelines available per request:
+#   - standard (default for clients that don't specify): built-in CPU layout
+#     model + RapidOCR. Always works, no extra deps.
+#   - vlm (opt-in via `pipeline=vlm` + `vlm_pipeline_preset=granite_docling`):
+#     uses granite-docling-258M auto-downloaded into the docling container's
+#     model cache (~500 MB) on first request. Single VLM call replaces
+#     layout+OCR+table-structure with much higher quality for complex
+#     layouts, multi-column docs, tables, math, handwriting.
+#
+# WHY NOT route docling at GPUStack's granite-docling endpoint? We tried
+# (compose history). docling-jobkit's `custom_vlm_presets` field is typed
+# `dict[str, Any]` and the manager doesn't validate the inner model_spec
+# dict into a `VlmModelSpec` object — so a server-configured custom preset
+# pointing at GPUStack's OpenAI-compatible endpoint blows up at request
+# time with `'dict' object has no attribute 'response_format'`. Same bug
+# hits the per-request `vlm_pipeline_custom_config` path. Until that's
+# fixed upstream we run the model inline. The 258M weights are tiny and
+# CPU inference is ~10-30s per page on this hardware — acceptable.
+# Tracked: docling-project/docling-jobkit dict→VlmConvertOptions coercion.
+#
+# #129 — RQ async engine (two-process). docling's default async engine is
+# LOCAL: in-memory, single-process. With UVICORN_WORKERS>1 the Gradio UI's
+# /v1/status/poll + /v1/result/<id> round-robin to a worker that doesn't hold
+# the job state → 404 → UI shows a bare "error" (the doc actually converted).
+# Fix: ENG_KIND=rq backs job state with the stack's valkey (DB 9), so any API
+# worker resolves status/result; a SEPARATE `docling-serve rq-worker` process
+# consumes the queue and does the conversion (that's now the real
+# conversion-concurrency knob — scale via DOCLING_RQ_WORKER_REPLICAS). The
+# uvicorn API keeps UVICORN_WORKERS for HTTP concurrency.
+# ==============================================================================
+
+# Shared image / volumes — the API and the rq-worker run the same image and
+# need the same model cache + scratch + German tessdata.
+x-docling-common: &docling-common
+  image: ghcr.io/docling-project/docling-serve-cpu:v1.32.0
+  profiles: ["docling"]
+  restart: unless-stopped
+  volumes:
+    - docling-scratch:/tmp/docling
+    - docling-models:/opt/app-root/src/.cache/docling/models
+    # German OCR for scanned/printed forms (PSA PDF->JSON demo): the upstream
+    # docling-serve-cpu image ships tesseract with only eng+osd traineddata.
+    # Mount the German model (tessdata_fast deu, ~1.5 MB, vendored from the
+    # tika image) into tesseract's TESSDATA_PREFIX so `ocr_preset=tesseract`
+    # + `ocr_lang=deu` works. Digital PDFs use the text layer (no OCR);
+    # handwriting uses the granite-docling VLM. Reproducible on every box via
+    # git (file committed under doc-processing/docling/tessdata/).
+    # Path is relative to THIS compose file's dir (doc-processing/docling/), so
+    # it must be ./tessdata/... NOT ./doc-processing/docling/tessdata/... — the
+    # latter resolved to a doubled path (doc-processing/docling/doc-processing/
+    # docling/tessdata) that doesn't exist, so Docker auto-created a root-owned
+    # empty dir and mounted THAT (German OCR silently broken + the root-owned
+    # dir aborted `git stash -u` on every upgrade). (#185)
+    - ./tessdata/deu.traineddata:/usr/share/tesseract/tessdata/deu.traineddata:ro
+
+# Shared model/engine config — IDENTICAL on the API and the worker so a job
+# enqueued by the API is converted the same way by the worker.
+x-docling-env: &docling-env
+  # Load built-in layout + OCR models at boot.
+  DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"
+  # Default OCR engine: RapidOCR — faster + more accurate than EasyOCR
+  # on clean text, already pre-installed in the docling-serve-cpu image.
+  DOCLING_SERVE_DEFAULT_OCR_KIND: "rapidocr"
+  # VLM bits: allow inline auto-download of granite-docling on first
+  # `pipeline=vlm` request. The image's default DOCLING_SERVE_ARTIFACTS_PATH
+  # restricts model loading to pre-cached models (and refuses to auto-
+  # download). Setting it empty here unsets the restriction; the cache
+  # still lives at the standard HF location inside the docling-models
+  # named volume, which we mount so the download survives recreates.
+  DOCLING_SERVE_ARTIFACTS_PATH: ""
+  DOCLING_SERVE_DEFAULT_VLM_PRESET: "granite_docling"
+  # Operator hotfix 2026-05-15: bump sync timeout (default 120s was hit by
+  # 8-doc OWUI bulk-upload).
+  DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+  # #129: RQ async engine backed by the stack's valkey (Redis-compatible),
+  # DB index 9 (0=authentik, 1-6/8=various, 7=onyx). Job state lives in valkey
+  # so every uvicorn API worker — and the rq-worker — share it.
+  DOCLING_SERVE_ENG_KIND: "rq"
+  DOCLING_SERVE_ENG_RQ_REDIS_URL: "redis://:${VALKEY_PASSWORD:-}@valkey:6379/9"
+
+services:
+  # ── API (uvicorn) — serves HTTP + Gradio UI, ENQUEUES jobs to RQ ────────────
+  docling:
+    <<: *docling-common
+    container_name: docling
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
+    environment:
+      <<: *docling-env
+      # HTTP concurrency (each worker ~500 MB model state). Memory-constrained
+      # boxes can override DOCLING_UVICORN_WORKERS=1 in .env. Conversion
+      # parallelism now lives in docling-rq-worker, not here.
+      UVICORN_WORKERS: "${DOCLING_UVICORN_WORKERS:-3}"
+      # Enable Gradio demo UI at /ui
+      DOCLING_SERVE_ENABLE_UI: "1"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://localhost:5001/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      valkey:
+        condition: service_started
+
+  # ── RQ worker — CONSUMES the queue and does the actual conversion ───────────
+  # This is the real conversion-concurrency knob: scale via
+  # DOCLING_RQ_WORKER_REPLICAS (default 2). No container_name (replicas need
+  # none), no host port, no UI.
+  docling-rq-worker:
+    <<: *docling-common
+    command: ["docling-serve", "rq-worker"]
+    environment:
+      <<: *docling-env
+    deploy:
+      replicas: ${DOCLING_RQ_WORKER_REPLICAS:-2}
+    healthcheck:
+      # The worker has no HTTP server; treat a live process as healthy.
+      test: ["CMD-SHELL", "pgrep -f 'docling-serve rq-worker' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      valkey:
+        condition: service_started
+      docling:
+        condition: service_started
+
+volumes:
+  docling-scratch:
+  docling-models:
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge

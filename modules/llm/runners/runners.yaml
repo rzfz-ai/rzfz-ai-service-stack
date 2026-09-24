@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+#
+# #1516 (operator decision E5) — the ONE source of truth for llama.cpp runner
+# images: which targets exist, what they are called, how they are built.
+#
+# Before this file the same tags were written down three times — in
+# `cli/post-install.sh` (build), again in its publish list, and again in
+# `modules/llm/node-agent/app/drivers/images.py` (what a node pulls). #1497 was
+# exactly that drift: the publish list named a runner nothing builds.
+#
+# ── the tag scheme ──────────────────────────────────────────────────────────
+# ONE repository, the target in the tag:
+#
+#     llama-runner:<engine-build>-<target>
+#
+# The engine build comes FIRST, so `docker images llama-runner` answers "are all
+# targets on the same llama.cpp?" at a glance. The rest names the toolkit and
+# the GPU architecture the binary was compiled for, so the tag alone says where
+# it runs. Rollback is another tag in the same repository, not another
+# repository.
+#
+# This replaces a scheme where the tag could not tell two INCOMPATIBLE binaries
+# apart: `llama-cuda-runner:b9851` (CUDA 12.8, sm_120) and
+# `llama-cuda-gb10-runner:b9851` (CUDA 13.0.2, sm_121a) carried the same tag and
+# differed only by repository name. Pulling the wrong one dies with
+# "CUDA error: no kernel image is available for execution on the device"
+# — measured on the GB10 (.191, 2026-09-05).
+#
+# Every tag is single-architecture by construction (the GB10 target is arm64,
+# the rest amd64), so the hub delivery needs NO multi-arch manifests for
+# runners; only the node-agent image does. Each target states this in `arch`
+# rather than leaving it to this comment: the offline packager fails closed on
+# a runner the packaging host COULD have built (#2154), and it can only tell
+# that from a cross-architecture target if the manifest says so.
+#
+# `legacy` is the pre-#1516 name. It is published as an alias for one cycle so
+# a box pinned via RAZZFAZZ_ENGINE_IMAGE_* keeps resolving.
+
+repository: llama-runner
+
+# The llama.cpp release every target should carry. A target that deliberately
+# lags (or follows an upstream image) says so in `engine_build`.
+engine_build: b9851
+
+targets:
+  - target: vulkan
+    tag: b9851-vulkan
+    hardware: amd
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-vulkan/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b9851}
+    legacy: llama-vulkan-runner:b9851
+    note: AMD Strix Halo (gfx1151) and any Vulkan-capable AMD GPU.
+
+  - target: vulkan
+    tag: b8943-vulkan
+    hardware: amd
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-vulkan/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b8943}
+    legacy: llama-vulkan-runner:b8943
+    note: Kept for rollback — the b9851 pin is one `docker tag` away.
+
+  - target: rocm7.2.1
+    tag: b9851-rocm7.2.1
+    hardware: amd
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-rocm/Dockerfile
+    build_args: {}
+    legacy: llama-rocm-runner:rocm-7.2.1
+    note: >-
+      Upstream toolbox image (kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1). The
+      old tag named only the ROCm version, so the engine build was invisible;
+      the new one carries both.
+
+  - target: cpu
+    tag: b10853-cpu
+    hardware: cpu
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-cpu/Dockerfile
+    build_args: {}
+    legacy: llama-cpu-runner:b10853
+    note: >-
+      Wraps ghcr.io/ggml-org/llama.cpp:server, pinned by digest to b10853
+      (llama.cpp commit 9dcf84e5) in the Dockerfile FROM so the CPU build is
+      reproducible instead of tracking a floating tag (#1782). The old note
+      claimed b8000 was "what that tag carried when it was pinned" — it never
+      was; :server floated and no b8000 image was ever built. Deliberately
+      behind the CUDA/Vulkan targets — CPU is the low-priority path.
+
+  - target: cuda12.8-sm120
+    tag: b9851-cuda12.8-sm120
+    hardware: cuda
+    arch: amd64
+    cuda_arch: "120"
+    # #1517: the CUDA compute capability this binary is FOR. `nvidia-smi
+    # --query-gpu=compute_cap` reports it, so the node picks its runner from the
+    # GPU itself instead of a hand-typed class name.
+    compute_cap: "12.0"
+    dockerfile: modules/llm/runners/llama-cuda/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b9851}
+    legacy: llama-cuda-runner:b9851
+    note: RTX PRO 6000 Blackwell — compute capability 12.0.
+
+  - target: cuda13.0-sm121a
+    tag: b9851-cuda13.0-sm121a
+    hardware: cuda
+    arch: arm64
+    cuda_arch: 121a-real
+    compute_cap: "12.1"
+    dockerfile: modules/llm/runners/llama-cuda-gb10/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b9851}
+    legacy: llama-cuda-gb10-runner:b9851
+    note: >-
+      GB10 / DGX-Spark class — compute capability 12.1, arm64. CUDA 12.8's nvcc
+      does not know sm_121 at all, which is why this cannot share the sm_120
+      image.

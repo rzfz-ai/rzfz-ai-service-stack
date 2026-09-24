@@ -1,0 +1,765 @@
+# ==============================================================================
+# WAZUH MODULE (Security Monitoring — SIEM/XDR)
+# ==============================================================================
+# Profile: wazuh
+# Description: Host intrusion detection, file-integrity monitoring, log
+#              correlation, and CIS/NIST/PCI compliance mappings.
+# Status: EXPERIMENTAL — hand-authored (multi-container, out of add-module
+#         skill Phase-1 scope per SKILL.md line 30). See docs/superpowers/
+#         plans/2026-08-29-855-wazuh-module-integration.md (Rev 2).
+# Config: .env (WAZUH_* variables)
+# Dependencies: none (no shared Postgres/Valkey — Wazuh uses its own indexer)
+# Upstream: https://github.com/wazuh/wazuh (server GPL-2.0; indexer + dashboard
+#           are OpenSearch forks, Apache-2.0) — shipped as separate, unmodified
+#           containerized services per the repo's copyleft policy.
+#
+# PATHS ARE 4.14-SPECIFIC. Wazuh moved the indexer's config under
+# /usr/share/wazuh-indexer/config/ between 4.9 and 4.14; do not copy paths
+# from an older reference compose.
+#
+# BIND PATHS ARE MODULE-RELATIVE (#55). Compose resolves `./configs/...`
+# against THIS file's directory (modules/apps/wazuh/), not the repo root.
+#
+# HOST PORT: the plan reserved 8202 for the dashboard; OPENUEM_OCSP_PORT=8202
+# landed since (#1075, config/.env.example:1241), so the dashboard takes the
+# next free slot in the 8200–8299 band, 8203. See the deviation note in the
+# #855 Task 1 commit body.
+#
+# Memory budget (onyx/vespa-class — DECISION-3, operator confirmed 2026-09-01):
+#   wazuh-indexer:    2GB limit (OpenSearch fork; heap capped at 1g)
+#   wazuh-manager:    2GB limit (analysisd/wazuh-db + rule engine)
+#   wazuh-dashboard:  1GB limit (Node.js frontend)
+#   one-shots:        256MB each, exit after their run
+#   Total steady-state: ~5GB
+#
+# NO `${VAR:?}` GUARDS IN THIS FILE (#855 rev-B, review blocker 1). This module
+# is pulled in by the top-level compose.yml `include:` UNCONDITIONALLY — an
+# include cannot be profile-gated — and Compose resolves `:?` at PARSE time,
+# BEFORE profile filtering. A `:?` on a wazuh secret therefore makes EVERY
+# `docker compose` invocation on EVERY box in the fleet fail rc=1 the moment
+# the secret is empty, including boxes that never enable the profile: reproduced
+# on Compose 2.40.3 with a profile-disabled service and an empty variable
+# (`config` and `up --dry-run` both rc=1). That is a box-wide brick on `rzfz
+# upgrade`, not a wazuh problem.
+#
+# The guards did not move, they moved DOWN a layer: every secret is validated at
+# RUNTIME with the identical `: "${VAR:?...}"` idiom inside
+# configs/wazuh_indexer/render-security-config.sh and
+# configs/wazuh_dashboard/render-dashboard-config.sh, both of which are
+# `service_completed_successfully` gates for the indexer, manager and dashboard.
+# An empty secret therefore still fails LOUD and still fails CLOSED — but only
+# in the module that owns it, and only when that module is actually enabled.
+# `test_855_wazuh_secret_generation.py` pins both halves of that contract.
+# ==============================================================================
+
+services:
+  # ─────────────────────────────────────────────
+  # Cert generator — one-shot. Writes the root CA + per-node certs into
+  # wazuh-certs-data. Never bakes secrets, never commits them.
+  #
+  # IDEMPOTENCY (WZ-7): the upstream entrypoint regenerates UNCONDITIONALLY —
+  # it has no "already generated" check. Without the guard below, every
+  # `docker compose up` would mint a NEW root CA, which invalidates every
+  # enrolled agent's key and breaks the manager<->indexer mTLS. The guard is
+  # ours, not the image's.
+  #
+  # PERMISSIONS (rewritten in rev-B — review blockers 2/3 + MEDIUM 9). The
+  # image's own entrypoint ends with
+  #   chmod -R 500 /certificates; chmod -R 400 /certificates/*
+  #   chown 1000:1000 /certificates/*        (indexer + dashboard)
+  #   chown 999:999   root-ca-manager.pem, wazuh-manager*.pem  (manager)
+  # which leaves the VOLUME ROOT `dr-x------ root:root`. Upstream survives that
+  # only because their reference compose host-bind-mounts individual FILES, so
+  # the daemon does the traversal as root. This module mounts DIRECTORIES
+  # (WZ-8), so the uid-1000 `cap_drop: ALL` consumers traverse it themselves —
+  # and cannot. We therefore append configs/wazuh_certs/distribute-certs.sh,
+  # which sorts the material into per-consumer subdirs that each service mounts
+  # via `volume: subpath:`. That also keeps the CA signing keys and admin-key
+  # out of every consumer path (MEDIUM 9), and pre-creates
+  # /wazuh-config-mount/etc for the uid-1000 securityconfig one-shot (blocker
+  # 2). It does NOT re-chmod the volume root back to something the generator
+  # cannot rewrite on the next run.
+  #
+  # AIR GAP (DECISION-7): this entrypoint downloads wazuh-certs-tool.sh from
+  # packages.wazuh.com and exits 1 if it cannot. That is a ONE-TIME, first-
+  # start requirement thanks to the guard. Connected boxes get the egress via
+  # the corporate-proxy overlay (Task 9b); offline/appliance boxes get the
+  # vendored tool in the package (D7 variant c, Task 25 Step 13b), with the
+  # pre-seed recipe as the proven fallback until then — see
+  # docs/enterprise/how-to/wazuh.md.
+  # ─────────────────────────────────────────────
+  wazuh-certs-generator:
+    # #1277: OUR image, not upstream's. Upstream's entrypoint downloads its cert
+    # tool from packages.wazuh.com at CONTAINER START — an offline box (#184)
+    # could therefore never enable wazuh, a proxy box (#181) hands that curl to
+    # the corporate proxy without our proxy env, and the validation rule #1259
+    # pinned our SANs against would change under us without a diff in this repo.
+    # The tool is baked and sha256-verified at BUILD time; see
+    # certs-generator/Dockerfile. Built at install/package/upgrade like every
+    # other custom image — `pull_policy: never` makes a missing image fail
+    # clear (#184 WS2a) instead of silently pulling upstream's.
+    build:
+      context: ./certs-generator
+      dockerfile: Dockerfile
+    image: razzfazz-wazuh-certs-generator:0.0.4
+    pull_policy: never
+    profiles: ["wazuh"]
+    container_name: wazuh-certs-generator
+    restart: "no"
+    # #1303: this is a razzfazz.init one-shot like every other bootstrap in
+    # the tree — it runs once, and what matters afterwards is its EXIT CODE.
+    # The marker's one production reader is the Portal dashboard
+    # (core/config/app/blueprints/dashboard.py): a labelled service that
+    # exited 0 is dropped from the container matrix and the health counter,
+    # one that exited NON-ZERO stays visible and counts as degradation.
+    # Without the label these two were judged by a name fallback that only
+    # matches `*-init`, so `wazuh-certs-generator` and `wazuh-securityadmin`
+    # were treated as ordinary containers. The point is a uniform verdict
+    # across modules — the exit-code gate that decides `rzfz post-install`
+    # for Wazuh is `verify_wazuh` in cli/post-install.sh, which keeps its
+    # own name list (#1315 review F2: an earlier version of this comment
+    # claimed a scripts/lib.sh header and a label-driven gate in `rzfz init`
+    # / `rzfz status`; neither exists in this tree).
+    labels:
+      razzfazz.init: "true"
+    mem_limit: 256m
+    # SECURITY: root inside container required by wazuh/wazuh-certs-generator
+    # (rev-B LOW 19 — this §F justification was the one missing from the module).
+    # The image declares no USER and its entrypoint chowns the material it
+    # generates to the CONSUMING images' uids (1000 indexer/dashboard, 999
+    # manager) — a non-root uid cannot do that, and the volume root it writes
+    # into is created root-owned by Docker on first use, so pinning a uid here
+    # would make the very first run fail. rev-B's distribute-certs.sh needs the
+    # same privilege for the same reason. S01.2 §F row 1 ("image expects root
+    # for its own setuid/init logic") — `user:` is OMITTED, which is that row's
+    # sanctioned pattern. Compensating controls: no-new-privileges, cap_drop
+    # ALL with only the three capabilities below, no published port, no docker
+    # socket, and the container is a one-shot that exits.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      # SECURITY: the upstream entrypoint chowns the generated material to the
+      # consuming images' UIDs (1000 indexer/dashboard, 999 manager) and then
+      # chmods it 0400/0500. CHOWN + FOWNER are what those two calls need;
+      # DAC_OVERRIDE lets the same root process re-read what it just made
+      # mode-0400. Nothing else is granted, and Task 24 Step 8 measures it.
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    volumes:
+      - wazuh-certs-data:/certificates
+      # rev-B blocker 2: the module's ONLY root container, so it is the only
+      # place that can create /wazuh-config-mount/etc owned by the uid-1000
+      # securityconfig one-shot. Read-write on purpose; nothing else here
+      # writes into it.
+      - wazuh-manager-config:/wazuh-config-mount
+      - ./configs/wazuh_certs_config.yml:/config/certs.yml:ro
+      - ./configs/wazuh_certs/distribute-certs.sh:/src/distribute-certs.sh:ro
+    entrypoint:
+      # The idempotency guard now short-circuits GENERATION only — the
+      # distribution step must run on every `up`, or a volume that predates
+      # rev-B never grows its dist/ tree and every consumer mount is empty.
+      - /bin/bash
+      - -c
+      - >-
+        if [ -f /certificates/root-ca.pem ]; then
+        echo "[wazuh-certs-generator] /certificates/root-ca.pem exists - keeping the existing PKI (idempotent, #855 WZ-7)";
+        else
+        /usr/local/bin/generate-certs.sh;
+        fi;
+        exec /bin/bash /src/distribute-certs.sh
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────
+  # Security-config render — one-shot, runs BEFORE the indexer.
+  # Generates internal_users.yml / config.yml / roles_mapping.yml from .env
+  # secrets so no shipped default hash survives (#855, WZ-1), and drops the
+  # manager's ossec.conf + generated authd.pass into /wazuh-config-mount.
+  # ─────────────────────────────────────────────
+  wazuh-securityconfig-init:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    profiles: ["wazuh"]
+    container_name: wazuh-securityconfig-init
+    restart: "no"
+    # #1303: this is a razzfazz.init one-shot like every other bootstrap in
+    # the tree — it runs once, and what matters afterwards is its EXIT CODE.
+    # The marker's one production reader is the Portal dashboard
+    # (core/config/app/blueprints/dashboard.py): a labelled service that
+    # exited 0 is dropped from the container matrix and the health counter,
+    # one that exited NON-ZERO stays visible and counts as degradation.
+    # Without the label these two were judged by a name fallback that only
+    # matches `*-init`, so `wazuh-certs-generator` and `wazuh-securityadmin`
+    # were treated as ordinary containers. The point is a uniform verdict
+    # across modules — the exit-code gate that decides `rzfz post-install`
+    # for Wazuh is `verify_wazuh` in cli/post-install.sh, which keeps its
+    # own name list (#1315 review F2: an earlier version of this comment
+    # claimed a scripts/lib.sh header and a label-driven gate in `rzfz init`
+    # / `rzfz status`; neither exists in this tree).
+    labels:
+      razzfazz.init: "true"
+    mem_limit: 256m
+    user: "1000:1000"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      - "WAZUH_AUTH_MODE=${WAZUH_AUTH_MODE:-forward_auth}"
+      - "WAZUH_INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-}"
+      - "WAZUH_DASHBOARD_PASSWORD=${WAZUH_DASHBOARD_PASSWORD:-}"
+      - "WAZUH_AUTHD_PASSWORD=${WAZUH_AUTHD_PASSWORD:-}"
+      # Not consumed by the render script — passed in ONLY so this one-shot can
+      # be the runtime fail-closed gate for it too (#855 rev-B blocker 1). The
+      # manager and the dashboard both take WAZUH_API_PASSWORD straight into an
+      # image entrypoint we do not control, so there was no other place to
+      # notice it was empty once the parse-time `:?` guard came out. Both of
+      # them depend on this one-shot completing successfully.
+      - "WAZUH_API_PASSWORD=${WAZUH_API_PASSWORD:-}"
+      - "WAZUH_OIDC_CLIENT_ID=${WAZUH_OIDC_CLIENT_ID:-wazuh}"
+      # Two fences, two variables (rev-B LOW 15): the second one widens the
+      # UNAUTHENTICATED 514 listener and nothing else.
+      - "WAZUH_ALLOWED_IPS=${WAZUH_ALLOWED_IPS:-}"
+      - "WAZUH_SYSLOG_ALLOWED_IPS=${WAZUH_SYSLOG_ALLOWED_IPS:-}"
+      - "AUTHENTIK_DOMAIN=${AUTHENTIK_DOMAIN:-}"
+      # #2002: alert mail. The render turns <email_notification> on when a
+      # recipient exists and leaves it off - saying so - when none does.
+      - "RAZZFAZZ_OPERATOR_EMAIL=${RAZZFAZZ_OPERATOR_EMAIL:-}"
+      - "ADMIN_CONTACT_EMAIL=${ADMIN_CONTACT_EMAIL:-}"
+      - "SMTP_FROM=${SMTP_FROM:-}"
+      - "WAZUH_EMAIL_ALERT_LEVEL=${WAZUH_EMAIL_ALERT_LEVEL:-12}"
+    depends_on:
+      # rev-B blocker 2: it does NOT need cert material — it needs the certs
+      # one-shot to have pre-created /wazuh-config-mount/etc for uid 1000.
+      # `/wazuh-config-mount` exists in no image, so Docker creates the fresh
+      # volume's mountpoint root:root 0755 and this container's `mkdir -p` died
+      # with EACCES, taking indexer/manager/dashboard down with it (they all
+      # gate on it). The certs one-shot is the module's only root container.
+      wazuh-certs-generator:
+        condition: service_completed_successfully
+    volumes:
+      - wazuh-indexer-security:/usr/share/wazuh-indexer/config/opensearch-security
+      - wazuh-manager-config:/wazuh-config-mount
+      - ./configs/wazuh_manager/ossec.conf:/src/ossec.conf:ro
+      - ./configs/wazuh_indexer/render-security-config.sh:/src/render.sh:ro
+    entrypoint: ["/bin/bash", "/src/render.sh"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────
+  # Security-index apply — one-shot, runs AFTER the indexer is healthy.
+  # First boot is covered by plugins.security.allow_default_init_securityindex;
+  # every LATER credential rotation only reaches the running cluster through
+  # securityadmin.sh (DECISION-12).
+  # ─────────────────────────────────────────────
+  wazuh-securityadmin:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    profiles: ["wazuh"]
+    container_name: wazuh-securityadmin
+    restart: "no"
+    # #1303: this is a razzfazz.init one-shot like every other bootstrap in
+    # the tree — it runs once, and what matters afterwards is its EXIT CODE.
+    # The marker's one production reader is the Portal dashboard
+    # (core/config/app/blueprints/dashboard.py): a labelled service that
+    # exited 0 is dropped from the container matrix and the health counter,
+    # one that exited NON-ZERO stays visible and counts as degradation.
+    # Without the label these two were judged by a name fallback that only
+    # matches `*-init`, so `wazuh-certs-generator` and `wazuh-securityadmin`
+    # were treated as ordinary containers. The point is a uniform verdict
+    # across modules — the exit-code gate that decides `rzfz post-install`
+    # for Wazuh is `verify_wazuh` in cli/post-install.sh, which keeps its
+    # own name list (#1315 review F2: an earlier version of this comment
+    # claimed a scripts/lib.sh header and a label-driven gate in `rzfz init`
+    # / `rzfz status`; neither exists in this tree).
+    labels:
+      razzfazz.init: "true"
+    mem_limit: 256m
+    user: "1000:1000"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    depends_on:
+      wazuh-indexer:
+        condition: service_healthy
+      wazuh-certs-generator:
+        condition: service_completed_successfully
+    volumes:
+      - wazuh-indexer-security:/usr/share/wazuh-indexer/config/opensearch-security:ro
+      # rev-B blocker 3 / MEDIUM 9: per-consumer subpath. This is the ONLY
+      # service that gets admin.pem/admin-key.pem — the cluster-admin
+      # credential — and it is a one-shot that exits.
+      - type: volume
+        source: wazuh-certs-data
+        target: /usr/share/wazuh-indexer/config/certs
+        read_only: true
+        volume:
+          subpath: dist/admin
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >-
+        JAVA_HOME=/usr/share/wazuh-indexer/jdk
+        bash /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh
+        -cd /usr/share/wazuh-indexer/config/opensearch-security
+        -icl -nhnv
+        -cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem
+        -cert /usr/share/wazuh-indexer/config/certs/admin.pem
+        -key /usr/share/wazuh-indexer/config/certs/admin-key.pem
+        -h wazuh-indexer -p 9200
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────
+  # Dashboard-config render — one-shot. opensearch_dashboards.yml carries the
+  # OIDC client secret, so it is generated, never tracked.
+  # ─────────────────────────────────────────────
+  wazuh-dashboard-config-init:
+    image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.14.7}
+    profiles: ["wazuh"]
+    container_name: wazuh-dashboard-config-init
+    restart: "no"
+    # #1303: this is a razzfazz.init one-shot like every other bootstrap in
+    # the tree — it runs once, and what matters afterwards is its EXIT CODE.
+    # The marker's one production reader is the Portal dashboard
+    # (core/config/app/blueprints/dashboard.py): a labelled service that
+    # exited 0 is dropped from the container matrix and the health counter,
+    # one that exited NON-ZERO stays visible and counts as degradation.
+    # Without the label these two were judged by a name fallback that only
+    # matches `*-init`, so `wazuh-certs-generator` and `wazuh-securityadmin`
+    # were treated as ordinary containers. The point is a uniform verdict
+    # across modules — the exit-code gate that decides `rzfz post-install`
+    # for Wazuh is `verify_wazuh` in cli/post-install.sh, which keeps its
+    # own name list (#1315 review F2: an earlier version of this comment
+    # claimed a scripts/lib.sh header and a label-driven gate in `rzfz init`
+    # / `rzfz status`; neither exists in this tree).
+    labels:
+      razzfazz.init: "true"
+    mem_limit: 256m
+    user: "1000:1000"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      - "WAZUH_AUTH_MODE=${WAZUH_AUTH_MODE:-forward_auth}"
+      - "WAZUH_OIDC_CLIENT_ID=${WAZUH_OIDC_CLIENT_ID:-wazuh}"
+      - "WAZUH_OIDC_CLIENT_SECRET=${WAZUH_OIDC_CLIENT_SECRET:-}"
+      - "WAZUH_DOMAIN=${WAZUH_DOMAIN:-}"
+      - "AUTHENTIK_DOMAIN=${AUTHENTIK_DOMAIN:-}"
+      # Maintainer's diagnostic, OFF unless set to exactly "true" in .env and
+      # this one-shot re-run. It renders a debug logger for the security plugin,
+      # which writes DECODED TOKEN CONTENTS into this container's log — the only
+      # way to tell "the claim was never emitted" from "the dashboard ignored
+      # it" when an SSO user lands role-less. Unset it and re-run to remove it.
+      - "WAZUH_DASHBOARD_DEBUG_SECURITY=${WAZUH_DASHBOARD_DEBUG_SECURITY:-false}"
+    volumes:
+      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/config
+      - ./configs/wazuh_dashboard/render-dashboard-config.sh:/src/render.sh:ro
+    entrypoint: ["/bin/bash", "/src/render.sh"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────
+  # Indexer — OpenSearch fork, stores/searches all Wazuh events
+  # ─────────────────────────────────────────────
+  wazuh-indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    profiles: ["wazuh"]
+    container_name: wazuh-indexer
+    hostname: wazuh-indexer
+    restart: unless-stopped
+    mem_limit: 2g
+    # SECURITY: upstream's own non-root UID. wazuh/wazuh-indexer runs as uid
+    # 1000 — evidenced by the certs image chowning the indexer's key material
+    # to 1000:1000 ("Setting UID indexer and dashboard",
+    # indexer-certs-creator/config/entrypoint.sh @ v4.14.7). Pinned explicitly
+    # rather than left implicit so a future image change fails loudly instead
+    # of silently reverting to root. S01.2 §F "image defines its own user".
+    # Verified on a real daemon at Task 24 Step 8.
+    user: "1000:1000"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - "bootstrap.memory_lock=false"
+    # WZ-17: `expose:` per Q12's contract — NOT a host bind. Operator recipe
+    # for cluster health is `docker exec wazuh-indexer curl ...` (Task 18).
+    expose:
+      - 9200
+    depends_on:
+      # The generated internal_users.yml / config.yml / roles_mapping.yml must
+      # be in the volume BEFORE the indexer seeds its security index.
+      wazuh-securityconfig-init:
+        condition: service_completed_successfully
+      wazuh-certs-generator:
+        condition: service_completed_successfully
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+      - ./configs/wazuh_indexer/opensearch.yml:/usr/share/wazuh-indexer/config/opensearch.yml:ro
+      # Writable: internal_users.yml / config.yml / roles_mapping.yml are
+      # GENERATED from .env secrets by wazuh-securityconfig-init (Task 5).
+      # Docker pre-populates this volume from the image on first use, so the
+      # other security files (roles.yml, action_groups.yml, tenants.yml) are
+      # the image's own.
+      - wazuh-indexer-security:/usr/share/wazuh-indexer/config/opensearch-security
+      # Directory, never a file path (WZ-8) — and since rev-B a per-consumer
+      # SUBPATH of the certs volume (blocker 3 / MEDIUM 9): root-ca.pem plus
+      # this node's own keypair, group-readable by uid 1000, no CA signing key
+      # and no admin credential. The daemon resolves the subpath as root, so
+      # this cap_drop-ALL uid-1000 process never has to traverse the
+      # 0500-root-owned volume root that upstream's entrypoint leaves behind.
+      - type: volume
+        source: wazuh-certs-data
+        target: /usr/share/wazuh-indexer/config/certs
+        read_only: true
+        volume:
+          subpath: dist/indexer
+      # #55 — three levels up from modules/apps/wazuh/ is the repo root.
+      # Written by cli/init.sh (#55 Step 7a) and rebuilt as a CA SUPERSET by
+      # scripts/lib.sh::ensure_oidc_ca_superset (#152); gitignored. The
+      # openid_auth_domain in the rendered config.yml points its
+      # pemtrustedcas_filepath straight at this path, which is how the
+      # indexer validates Authentik's JWKS endpoint in BOTH TLS modes.
+      #
+      # #1625: the target MUST live under OPENSEARCH_PATH_CONF
+      # (/usr/share/wazuh-indexer/config) — the opensearch-security plugin runs
+      # under the JVM SecurityManager, which grants FilePermission "read" only
+      # inside the config tree. With the CA at /usr/local/share/... the OIDC
+      # HTTPJwtKeyByOpenIdConnectAuthenticator threw AccessControlException at
+      # init ("access denied ... caddy-ca.crt read"), so openid_auth_domain
+      # never initialised and every dashboard SSO login 401'd — while `curl`
+      # (no JVM sandbox) could read the very same file, which is why the
+      # config looked correct. NOT the certs/ subpath (that volume is :ro,
+      # 0500 root-owned) and NOT opensearch-security/ (securityadmin.sh -cd
+      # ingests that directory whole). Plain config root, a new read-only
+      # bind, is granted and inert. The dashboard mount below stays at
+      # /usr/local/share/... — Node reads it via NODE_EXTRA_CA_CERTS with no
+      # SecurityManager in the way.
+      - ../../../certs/caddy-ca.pem:/usr/share/wazuh-indexer/config/caddy-ca.pem:ro
+    networks:
+      default:
+        aliases:
+          # #1259 — this MUST equal nodes.indexer[0].ip in
+          # configs/wazuh_certs_config.yml. The cert generator refuses a SAN
+          # without a dot (`ERROR: Invalid IP or DNS wazuh-indexer`), so the SAN
+          # is the dotted spelling and every TLS client dials THAT name; the
+          # alias is what makes it resolve on the docker bridge.
+          # `wazuh-indexer` keeps resolving too (compose always registers the
+          # service name), so nothing that does not verify a hostname —
+          # `docker exec`, securityadmin's `-nhnv`, Caddy's plaintext hop — had
+          # to move. Same mechanism as openuem-nats/openuem-ocsp.
+          - wazuh.indexer
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # WZ-21: unauthenticated liveness endpoint, cert VERIFIED against the
+      # module's own root CA (no `-k`), no credential interpolated into the
+      # container config. /_plugins/_security/health is whitelisted by the
+      # security plugin and answers before any auth domain runs. The URL uses
+      # the node's SAN name (`wazuh.indexer`, the network alias above) — with no
+      # `-k` this curl verifies the hostname, and the hyphenated spelling is NOT
+      # on the certificate: the generator cannot even emit it (#1259).
+      # `--noproxy '*'`: #273/#1130 — on a proxied docker daemon an unqualified
+      # probe is handed to the corporate proxy, which can neither route back
+      # into the container nor resolve a compose service name.
+      test: ["CMD-SHELL", "curl --noproxy '*' --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem -fsS https://wazuh.indexer:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 120s
+
+  # ─────────────────────────────────────────────
+  # Manager — rule engine, analysisd, agent enrollment/event listener
+  # ─────────────────────────────────────────────
+  wazuh-manager:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
+    profiles: ["wazuh"]
+    container_name: wazuh-manager
+    hostname: wazuh-manager
+    restart: unless-stopped
+    mem_limit: 2g
+    # SECURITY: root inside container required by wazuh/wazuh-manager's
+    # ENTRYPOINT ["/init"] (s6-overlay v2). Its oneshot services copy
+    # /wazuh-config-mount into /var/ossec and re-own the tree to root:wazuh
+    # (999) before dropping each daemon to its own uid. S01.2 §F row 1
+    # ("image expects root for its own setuid/init logic") — `user:` is
+    # OMITTED, which is that row's sanctioned pattern.
+    # Compensating controls: no-new-privileges, cap_drop ALL, and only the
+    # seven capabilities below.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      # SECURITY, each one named to the code path that needs it:
+      #   CHOWN + FOWNER  — s6 oneshot re-owns /var/ossec to root:wazuh(999)
+      #   DAC_OVERRIDE    — reads its own 0400 root-ca-manager.pem, which the
+      #                     certs image chowns to 999:999 while the process
+      #                     tree starts as root
+      #   SETGID + SETUID — s6-setuidgid drops analysisd/remoted/wazuh-db to
+      #                     the `wazuh` account
+      #   KILL            — wazuh-control signals its own child daemons
+      #   SYS_CHROOT      — #1537: EVERY ossec daemon chroots into /var/ossec
+      #                     at startup. Without it analysisd dies with
+      #                     "CRITICAL: (1132): Unable to chroot to directory
+      #                     '/var/ossec' due to [(1)-(Operation not
+      #                     permitted)]" — and so do remoted, syscheckd,
+      #                     logcollector and monitord. `wazuh-control status`
+      #                     then lists all fourteen daemons as "not running",
+      #                     the healthcheck (which greps for
+      #                     `wazuh-analysisd is running`) never passes, and
+      #                     wazuh-dashboard — depends_on: service_healthy —
+      #                     never starts at all. Measured on 0.91 2026-09-05:
+      #                     enabling the module produced exactly that, and the
+      #                     portal blocked on the health gate until the apply
+      #                     was killed.
+      # Measured, not assumed — for the six that predate #1537: Task 24
+      # Step 8 removes each in turn on a real daemon and records which are
+      # actually required. SYS_CHROOT was added afterwards, from the failure
+      # above rather than from that sweep; the sentence used to cover it too
+      # and did not (review of PR #1540).
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+      - KILL
+      - SYS_CHROOT
+    ulimits:
+      nofile: { soft: 655360, hard: 655360 }
+    environment:
+      # #1259: filebeat runs with FILEBEAT_SSL_VERIFICATION_MODE=full below,
+      # so this host has to be the indexer's SAN name (`wazuh.indexer`), not its
+      # compose service name — the certs tool refuses to put a dotless name in a
+      # SAN at all.
+      - "INDEXER_URL=https://wazuh.indexer:9200"
+      - "INDEXER_USERNAME=admin"
+      - "INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-}"
+      - "FILEBEAT_SSL_VERIFICATION_MODE=full"
+      - "SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/wazuh-certs/root-ca-manager.pem"
+      - "SSL_CERTIFICATE=/etc/ssl/wazuh-certs/wazuh-manager.pem"
+      - "SSL_KEY=/etc/ssl/wazuh-certs/wazuh-manager-key.pem"
+      - "API_USERNAME=wazuh-wui"
+      - "API_PASSWORD=${WAZUH_API_PASSWORD:-}"
+    ports:
+      # SECURITY: WAZUH_MANAGER_HOST_BIND env-driven; standalone (single-box,
+      # no remote agents) defaults loopback. A real multi-box fleet operator
+      # pins a specific LAN IP (NEVER 0.0.0.0) so wazuh-agent on other boxes
+      # can enroll and report events. Mirrors GPUStack master-mode (F-RC5-1).
+      # The BIND IS NOT THE AUTHENTICATOR (WZ-4): 1515 requires the generated
+      # WAZUH_AUTHD_PASSWORD and runs TLS, 1514 is TLS with the enrolled
+      # agent key, and both <remote> blocks are <allowed-ips>-narrowed to
+      # ${WAZUH_ALLOWED_IPS} (Task 9). See DECISION-4.
+      - "${WAZUH_MANAGER_HOST_BIND:-127.0.0.1}:${WAZUH_MANAGER_EVENTS_PORT:-1514}:1514/tcp"
+      - "${WAZUH_MANAGER_HOST_BIND:-127.0.0.1}:${WAZUH_MANAGER_ENROLL_PORT:-1515}:1515/tcp"
+      # SECURITY: syslog listener for agentless sources / the #253 seam.
+      # TCP since rev-B (review HIGH 8) — it has to match ossec.conf's
+      # <remote><protocol>tcp</protocol>, which in turn has to match the otel
+      # syslog exporter's hardcoded `network: tcp`. Plain syslog is
+      # UNAUTHENTICATED on either transport; it is fenced by <allowed-ips> in
+      # ossec.conf (Task 9) and defaults to loopback here. Prefer the
+      # TLS-with-per-agent-key path (1514/1515) for anything crossing the LAN.
+      - "${WAZUH_SYSLOG_HOST_BIND:-127.0.0.1}:${WAZUH_MANAGER_SYSLOG_PORT:-514}:514/tcp"
+    # WZ-17: the manager REST API is reachable on the docker network only.
+    expose:
+      - 55000
+    depends_on:
+      # It consumes wazuh-manager-config, which the same one-shot writes
+      # (etc/ossec.conf + the generated etc/authd.pass).
+      wazuh-securityconfig-init:
+        condition: service_completed_successfully
+      wazuh-certs-generator:
+        condition: service_completed_successfully
+    volumes:
+      - wazuh-manager-data:/var/ossec/data
+      # Written by wazuh-securityconfig-init (Task 5): a rendered copy of the
+      # tracked ossec.conf plus the generated etc/authd.pass. Mounted as a
+      # DIRECTORY (WZ-8) — /wazuh-config-mount is exactly what the manager's
+      # entrypoint copies into /var/ossec.
+      - wazuh-manager-config:/wazuh-config-mount:ro
+      # Directory, never a file path (WZ-8) — per-consumer SUBPATH since rev-B
+      # (blocker 3 / MEDIUM 9). The manager is the service that parses hostile
+      # agent and syslog input, so it is precisely the one that must NOT hold
+      # the CA signing key or admin-key.pem: with them it could mint node and
+      # admin certificates and rewrite the security index, destroying the log
+      # integrity the module exists to provide. Group 999 = the `wazuh` account
+      # its daemons drop to.
+      - type: volume
+        source: wazuh-certs-data
+        target: /etc/ssl/wazuh-certs
+        read_only: true
+        volume:
+          subpath: dist/manager
+    networks:
+      default:
+        aliases:
+          # #1259 — equals nodes.server[0].ip in wazuh_certs_config.yml, so the
+          # manager's own SAN resolves. Nothing verifies the manager's node cert
+          # by hostname today (filebeat presents it as a CLIENT certificate and
+          # the API serves its own self-signed cert), but a SAN that resolves to
+          # nothing is a trap for the next consumer.
+          - wazuh.manager
+    labels:
+      # DECISION-10 / WZ-20: the manager keeps running through the backup
+      # window. Stopping it is a scheduled, silent detection gap.
+      - "docker-volume-backup.stop-during-backup=false"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # No credential, no network call: ask the manager's own supervisor.
+      test: ["CMD-SHELL", "/var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running'"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 120s
+
+  # ─────────────────────────────────────────────
+  # Dashboard — OpenSearch-Dashboards fork; the only Caddy-routed surface
+  # ─────────────────────────────────────────────
+  wazuh-dashboard:
+    image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.14.7}
+    profiles: ["wazuh"]
+    container_name: wazuh-dashboard
+    hostname: wazuh-dashboard
+    restart: unless-stopped
+    mem_limit: 1g
+    # SECURITY: upstream's own non-root UID (1000) — same evidence as the
+    # indexer above. S01.2 §F "image defines its own user".
+    user: "1000:1000"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      # #1625: Node does not read the system trust store, and it does not read
+      # /usr/local/share/ca-certificates either — it uses the CA bundle
+      # COMPILED INTO the binary unless this variable names another file. So the
+      # caddy-ca mount below was inert for everything the dashboard fetches over
+      # TLS: on a TLS_MODE=internal box the OIDC token exchange failed with
+      # UNABLE_TO_GET_ISSUER_CERT_LOCALLY and the tile answered
+      # {"statusCode":401,…} while every config setting looked correct.
+      #
+      # MEASURED in the running container with its own bundled node:
+      #   without → FEHLER UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+      #   with    → HTTP 200
+      #
+      # `opensearch_security.openid.root_ca` covers only the security plugin's
+      # OWN discovery call; the code-for-token exchange goes through Node.
+      - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/caddy-ca.crt
+      - "WAZUH_API_URL=https://wazuh-manager"
+      - "API_USERNAME=wazuh-wui"
+      - "API_PASSWORD=${WAZUH_API_PASSWORD:-}"
+      - "DASHBOARD_USERNAME=kibanaserver"
+      - "DASHBOARD_PASSWORD=${WAZUH_DASHBOARD_PASSWORD:-}"
+      - "INDEXER_USERNAME=admin"
+      - "INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-}"
+    ports:
+      # Caddy terminates TLS; the rendered opensearch_dashboards.yml sets
+      # server.ssl.enabled: false so this is plaintext on loopback only.
+      - "127.0.0.1:${WAZUH_DASHBOARD_PORT:-8203}:5601"
+    depends_on:
+      wazuh-indexer:
+        condition: service_healthy
+      wazuh-manager:
+        condition: service_healthy
+      # opensearch_dashboards.yml (with the OIDC client secret) must exist…
+      wazuh-dashboard-config-init:
+        condition: service_completed_successfully
+      # …and the generated credentials must already be IN the security index,
+      # or the dashboard's kibanaserver login fails against a rotated password.
+      wazuh-securityadmin:
+        condition: service_completed_successfully
+      wazuh-certs-generator:
+        condition: service_completed_successfully
+    volumes:
+      - wazuh-dashboard-data:/usr/share/wazuh-dashboard/data
+      # Writable: opensearch_dashboards.yml is GENERATED (it carries the OIDC
+      # client secret) by wazuh-dashboard-config-init (Task 5). Docker
+      # pre-populates the volume from the dashboard image on first use, so
+      # node.options and the rest of the image's config survive.
+      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/config
+      # Per-consumer SUBPATH since rev-B (blocker 3 / MEDIUM 9): root-ca.pem
+      # plus the dashboard's own keypair. server.ssl.enabled is false (Caddy
+      # terminates TLS) so the keypair is currently unused, but it belongs to
+      # this consumer and to no other.
+      - type: volume
+        source: wazuh-certs-data
+        target: /usr/share/wazuh-dashboard/certs
+        read_only: true
+        volume:
+          subpath: dist/dashboard
+      # Same superset bundle; opensearch_security.openid.root_ca in the
+      # rendered opensearch_dashboards.yml names exactly this path.
+      - ../../../certs/caddy-ca.pem:/usr/local/share/ca-certificates/caddy-ca.crt:ro
+    networks:
+      default:
+        aliases:
+          # #1259 — equals nodes.dashboard[0].ip in wazuh_certs_config.yml.
+          # server.ssl.enabled is false (Caddy terminates TLS and reaches this
+          # service as `wazuh-dashboard:5601` in plaintext), so this keypair is
+          # unused today; the alias keeps the SAN honest if it ever is.
+          - wazuh.dashboard
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # /api/status is NOT anonymous on this stack: the dashboard is wired to
+      # Authentik, so every route — /api/status included — answers 401 to an
+      # unauthenticated caller. `curl -f` turns that into a failure, so the old
+      # check could never pass: the container sat in `health: starting` until
+      # its retries ran out and then went unhealthy while the dashboard was
+      # serving perfectly (#1537, measured on 0.91 — "Server running at
+      # http://0.0.0.0:5601" plus a healthcheck log full of `GET /api/status
+      # 401`). Anything gating on that health — a compose dependency, the
+      # portal's module view — waits forever on a working service.
+      #
+      # What this asserts instead: the HTTP server answers AT ALL. 401 is a
+      # valid answer from a live server; a dead one gives curl exit 7 and an
+      # empty code. Credentials are deliberately NOT put in a healthcheck.
+      # `--noproxy '*'`: #273/#1130.
+      test: ["CMD-SHELL", "curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://localhost:5601/api/status | grep -qE '^(200|302|401)$'"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 120s
+
+volumes:
+  wazuh-manager-data:
+  wazuh-manager-config:
+  wazuh-indexer-data:
+  wazuh-indexer-security:
+  wazuh-dashboard-data:
+  wazuh-dashboard-config:
+  wazuh-certs-data:

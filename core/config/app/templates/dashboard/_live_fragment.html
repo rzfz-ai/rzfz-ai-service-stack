@@ -1,0 +1,365 @@
+{# Dashboard live fragment.
+
+   Layout (per operator feedback, 2026-04-27):
+   1. Health banner (full width)
+   2. Container Updates Available summary (full width, only if any)
+   3. Six-card row: CPU | RAM | GPU Util | GPU VRAM | Disk | Containers
+   4. Three-column grid:
+      - 30% Container Memory by Profile
+      - 30% Backup + Image Updates + LLM Models (with VRAM)
+      - 40% Recent Activity (full height)
+   5. Container Status Matrix (full width, sortable)
+   6. Alerts (full width, only if any)
+
+   Polled every 15s via HTMX outerHTML swap on the #dashboard-live wrapper
+   this template emits ITSELF (see below). The same template renders on
+   first page load via {% include %} from index.html. #}
+
+{# CFG-4 — the wrapper lives HERE, not in index.html.
+
+   The poll is `hx-swap="outerHTML"`, which REPLACES the #dashboard-live
+   element — hx-get/hx-trigger and all — with the response body. While the
+   wrapper sat in index.html and this fragment carried no hx-* attributes,
+   the first tick swapped the polling element away and left inert markup
+   behind: the dashboard refreshed exactly once at t=15s and then froze
+   until a manual reload. (Nothing failed loudly, which is why it survived
+   — the data on screen was real, just permanently stale.)
+
+   Re-emitting the wrapper from the fragment re-arms the trigger on every
+   tick, and keeps first-render and polled markup byte-identical, so there
+   is no second place to keep in sync. #}
+<div id="dashboard-live"
+     hx-get="{{ url_for('dashboard.live_fragment') }}"
+     hx-trigger="every 15s"
+     hx-swap="outerHTML">
+
+{# 1. Health banner #}
+<div class="card" style="margin-bottom:0.625rem;border-left:4px solid {% if health_status == 'healthy' %}var(--success){% elif health_status == 'degraded' %}var(--warn){% else %}var(--error){% endif %}">
+    <div class="card-body" style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.875rem">
+        <div>
+            <span class="dot {% if health_status == 'healthy' %}ok{% elif health_status == 'degraded' %}warn{% else %}err{% endif %}" style="width:12px;height:12px"></span>
+            <strong style="margin-left:0.25rem">Stack {{ health_status | capitalize }}</strong>
+            <span style="color:var(--color-text-muted);margin-left:0.75rem">{{ running }} / {{ total }} containers running</span>
+        </div>
+        <div style="font-size:0.75rem;color:var(--color-text-muted)">{{ config.domain }} &middot; refresh 15 s</div>
+    </div>
+</div>
+
+{# 2. Container Updates Summary (full width, only when something to show) #}
+{% if manifest_update_count > 0 or cve_alerts %}
+<div class="card" style="margin-bottom:0.625rem;border-left:4px solid {% if cve_alerts %}var(--error){% else %}var(--info-fg){% endif %}">
+    <div class="card-body" style="padding:0.5rem 0.875rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.8125rem">
+            <div>
+                <strong style="color:{% if cve_alerts %}var(--error-fg){% else %}var(--info-fg){% endif %}">
+                    {% if cve_alerts %}Security Updates Available{% else %}Container Updates Available{% endif %}
+                </strong>
+                <span style="margin-left:0.5rem;color:var(--color-text-muted)">{{ manifest_update_count }} update{{ 's' if manifest_update_count != 1 else '' }}</span>
+                {% if cve_alerts %}
+                <span style="margin-left:0.5rem">
+                    {% for cve in cve_alerts[:3] %}
+                    <span class="badge err" style="font-size:0.6875rem">{{ cve.cve }}</span>
+                    {% endfor %}
+                    {% if cve_alerts | length > 3 %}<span style="color:var(--color-text-muted);font-size:0.6875rem">+{{ cve_alerts | length - 3 }} more</span>{% endif %}
+                </span>
+                {% endif %}
+            </div>
+            <a href="{{ url_for('modules.overview', status='updates') }}" style="font-size:0.75rem;color:var(--color-brand)">View modules &rarr;</a>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# 3. Resource tile row: CPU | RAM | [GPU Util | GPU VRAM]* | Disk | Containers
+   | [GPU — <worker> | VRAM — <worker>]*.
+   No fixed column count: the .cards grid (repeat(auto-fit, minmax(180px,1fr)))
+   wraps gracefully as GPUs / LLM workers add tiles — 4 base tiles, 6 with one
+   worker, 8 with two, … all wrap onto further rows instead of squeezing onto
+   one. Each local GPU adds 2 cards (util + VRAM); each LLM Manager worker adds
+   2 cards (GPU load + VRAM) after Containers. #}
+{% set gpu_count = gpus | length %}
+<div class="cards">
+    {# CPU #}
+    <div class="card stat">
+        <div class="k">CPU</div>
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ cpu_pct }}%;background:{% if cpu_pct > 80 %}var(--error){% elif cpu_pct > 50 %}var(--warn){% else %}var(--info-fg){% endif %}"></div>
+        </div>
+        <div class="v">{{ cpu_pct }}<small>%</small></div>
+        <div class="sub">host load</div>
+    </div>
+    {# RAM #}
+    <div class="card stat">
+        <div class="k">RAM</div>
+        {% set ram_pct = ((system.used_mb / system.total_mb * 100) if system.total_mb else 0) | round(1) %}
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ ram_pct }}%;background:{% if ram_pct > 85 %}var(--error){% elif ram_pct > 70 %}var(--warn){% else %}var(--info-fg){% endif %}"></div>
+        </div>
+        <div class="v">{{ (system.used_mb / 1024) | round(1) }}<small>/ {{ (system.total_mb / 1024) | round(1) }} GB</small></div>
+        <div class="sub">host system</div>
+    </div>
+    {# Per-GPU pair: util card + VRAM card. Header carries host name when the
+       GPU comes from a worker box (gpu.host != 'local'); on single-box
+       installs every GPU is local and the host suffix is omitted. #}
+    {% for gpu in gpus %}
+    {% set host_suffix = '' %}
+    {% if gpu.host and gpu.host != 'local' %}
+        {% set host_suffix = ' · ' ~ gpu.host %}
+    {% endif %}
+    <div class="card stat">
+        <div class="k">GPU{% if gpu_count > 1 %} {{ loop.index0 }}{% endif %} Util{{ host_suffix }}</div>
+        {% set util = gpu.busy_pct if gpu.busy_pct is not none else 0 %}
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ util }}%;background:{% if util > 85 %}var(--error){% elif util > 60 %}var(--warn){% else %}var(--success){% endif %}"></div>
+        </div>
+        <div class="v">{{ util }}<small>%</small></div>
+        <div class="sub">compute load</div>
+    </div>
+    <div class="card stat">
+        <div class="k">GPU{% if gpu_count > 1 %} {{ loop.index0 }}{% endif %} VRAM{{ host_suffix }}</div>
+        {% if gpu.vram_total_mib %}
+            {% set vpct = (gpu.vram_used_mib / gpu.vram_total_mib * 100) | round(1) %}
+            <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+                <div class="memory-bar-fill" style="width:{{ vpct }}%;background:{% if vpct > 90 %}var(--error){% elif vpct > 75 %}var(--warn){% else %}var(--success){% endif %}"></div>
+            </div>
+            <div class="v">{{ (gpu.vram_used_mib / 1024) | round(1) }}<small>/ {{ (gpu.vram_total_mib / 1024) | round(0) }} GB</small></div>
+            <div class="sub">{{ vpct }}% used</div>
+        {% else %}
+            <div class="sub" style="font-size:0.875rem">no VRAM info</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {# Disk #}
+    <div class="card stat">
+        <div class="k">Disk</div>
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ disk.pct }}%;background:{% if disk.pct > 90 %}var(--error){% elif disk.pct > 80 %}var(--warn){% else %}var(--info-fg){% endif %}"></div>
+        </div>
+        <div class="v">{{ disk.used_gb }}<small>/ {{ disk.total_gb }} GB</small></div>
+        <div class="sub">{{ disk.pct }}% used</div>
+    </div>
+    {# Containers #}
+    <div class="card stat">
+        <div class="k">Containers</div>
+        <div class="v">{{ running }}<small>/ {{ total }}</small></div>
+        <div class="sub">running / total</div>
+    </div>
+    {# Per-LLM-worker pair: GPU load card + VRAM card, one pair per worker the
+       LLM Manager reports. Sourced from get_workers() in the dashboard route;
+       empty (0 workers / manager unreachable / non-manager box) renders nothing
+       and the base tiles above stay unchanged. Same .card.stat markup + bar
+       treatment as CPU/RAM/Disk so the tiles look native. gpu_pct / vram_pct
+       None → em-dash, no bar. #}
+    {% for w in llm_workers | default([]) %}
+    <div class="card stat">
+        <div class="k">GPU &mdash; {{ w.name }}</div>
+        {% if w.gpu_pct is not none %}
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ w.gpu_pct }}%;background:{% if w.gpu_pct > 85 %}var(--error){% elif w.gpu_pct > 60 %}var(--warn){% else %}var(--success){% endif %}"></div>
+        </div>
+        <div class="v">{{ w.gpu_pct }}<small>%</small></div>
+        <div class="sub">compute load</div>
+        {% else %}
+        <div class="v">&mdash;</div>
+        <div class="sub">no GPU sample</div>
+        {% endif %}
+    </div>
+    <div class="card stat">
+        <div class="k">VRAM &mdash; {{ w.name }}</div>
+        {% if w.vram_pct is not none %}
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ w.vram_pct }}%;background:{% if w.vram_pct > 90 %}var(--error){% elif w.vram_pct > 75 %}var(--warn){% else %}var(--success){% endif %}"></div>
+        </div>
+        <div class="v">{{ w.vram_used_gb }}<small>/ {{ w.vram_total_gb }} GB</small></div>
+        <div class="sub">{{ w.vram_pct }}% used</div>
+        {% else %}
+        <div class="v">&mdash;</div>
+        <div class="sub">no VRAM info</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+{# 4. Three-column grid: equal thirds. Col 1 = Container Memory by Profile,
+   Col 2 = Backup + Image Updates + LLM Models stacked, Col 3 = Recent Activity. #}
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.625rem;margin-bottom:0.875rem">
+
+    {# Col 1: Container Memory by Profile (30%) — host RAM by docker-compose profile.
+       The "(VRAM is in the GPU card)" label disambiguates from LLM model memory. #}
+    <div class="detail-section" style="margin:0">
+        <div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:baseline">
+            <span>Container Memory by Profile</span>
+            <span style="font-size:0.625rem;color:var(--color-text-muted);text-transform:none;letter-spacing:0;font-weight:400">host RAM only</span>
+        </div>
+        {% for pid, res in profile_resources.items() | sort(attribute='1.total_mb', reverse=true) %}
+        {% if res.total_mb > 10 and pid != '_untracked' %}
+        <div class="detail-row" style="font-size:0.8125rem">
+            <span class="detail-row-label">
+                <a href="{{ url_for('modules.detail', profile_id=pid) }}" style="color:inherit;text-decoration:none">{{ pid }}</a>
+            </span>
+            <span class="detail-row-value">
+                <span style="display:inline-block;width:60px;text-align:right;font-size:0.75rem">{{ (res.total_mb / 1024) | round(2) }} GB</span>
+                <span style="display:inline-block;width:55px;margin-left:0.375rem;vertical-align:middle">
+                    <span class="memory-bar" style="height:6px;display:inline-block;width:100%">
+                        <span class="memory-bar-fill" style="width:{{ (res.total_mb / system.total_mb * 100) | round(1) }}%"></span>
+                    </span>
+                </span>
+            </span>
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+
+    {# Col 2: Backup, Image Updates, LLM Models stacked (30%) #}
+    <div style="display:flex;flex-direction:column;gap:0.625rem">
+        <div class="detail-section" style="margin:0">
+            <div class="detail-section-title">Backup</div>
+            {% if backup %}
+            <div class="detail-row" style="font-size:0.8125rem"><span class="detail-row-label">Last</span><span class="detail-row-value" style="font-size:0.75rem">{{ backup.filename }}</span></div>
+            <div class="detail-row" style="font-size:0.8125rem"><span class="detail-row-label">Size</span><span class="detail-row-value">{{ backup.size_mb }} MB</span></div>
+            <div class="detail-row" style="font-size:0.8125rem"><span class="detail-row-label">Total</span><span class="detail-row-value">{{ backup.count }}</span></div>
+            {% else %}
+            <p style="font-size:0.8125rem;color:var(--color-text-muted)">No backups found.</p>
+            {% endif %}
+            <a href="{{ url_for('backup.index') }}" style="font-size:0.6875rem;color:var(--color-brand)">Manage backups &rarr;</a>
+        </div>
+
+        <div class="detail-section" style="margin:0" id="image-updates">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="detail-section-title" style="margin-bottom:0">Image Updates</div>
+                <button class="btn ghost sm" hx-post="/api/updates/check" hx-target="#update-results" hx-swap="innerHTML" hx-indicator="#update-spinner" style="font-size:0.6875rem;padding:0.125rem 0.375rem">Check</button>
+            </div>
+            {# CFG-17: hx-preserve. This panel and the LLM Models one below sit
+               INSIDE the region the 15s poll replaces (outerHTML on
+               #dashboard-live), so without it every parent tick destroyed and
+               recreated them — re-firing `load` (an extra /api/updates +
+               /api/gpustack/models round-trip per cycle) and resetting the
+               models panel's own `every 30s` timer, which could therefore
+               never elapse. hx-preserve carries the live node across the
+               parent swap, keeping both its content and its timer.
+               (Latent until CFG-4 fixed the parent poll; it would have become
+               steady extra load, including a per-cycle LLM Manager call.) #}
+            <div id="update-results" hx-preserve="true" hx-get="/api/updates" hx-trigger="load" hx-swap="innerHTML" style="margin-top:0.375rem;font-size:0.8125rem">
+                <p style="font-size:0.75rem;color:var(--color-text-muted)">Loading…</p>
+            </div>
+            <span id="update-spinner" class="htmx-indicator" style="font-size:0.6875rem;color:var(--color-text-muted)">Checking…</span>
+        </div>
+
+        <div class="detail-section" style="margin:0" id="gpustack-models">
+            <div class="detail-section-title">LLM Models <span style="font-size:0.625rem;color:var(--color-text-muted);text-transform:none;letter-spacing:0;font-weight:400">— {% if 'llm-manager' in enabled_profiles %}served by the LLM Manager{% else %}loaded into the GPU above{% endif %}</span></div>
+            <div id="llm-models-panel" hx-preserve="true" hx-get="/api/gpustack/models" hx-trigger="load, every 30s" hx-swap="innerHTML">
+                <p style="font-size:0.75rem;color:var(--color-text-muted)">Loading…</p>
+            </div>
+        </div>
+    </div>
+
+    {# Col 3: Recent Activity (40%, full height) #}
+    <div class="detail-section" style="margin:0">
+        <div class="detail-section-title">Recent Activity <a href="{{ url_for('governance.index') }}" style="float:right;font-size:0.625rem;color:var(--color-brand);text-transform:none;letter-spacing:0;font-weight:400">View all &rarr;</a></div>
+        {% for e in recent_entries %}
+        <div class="detail-row" style="align-items:flex-start">
+            <span class="detail-row-label" style="font-size:0.6875rem;color:var(--color-text-muted);min-width:90px">{{ e.timestamp[:16] if e.timestamp else '' }}</span>
+            <span class="detail-row-value" style="font-size:0.75rem">
+                <span class="badge badge-origin" style="font-size:0.625rem">{{ e.event }}</span>
+                {{ e.detail or e.target or '' }}
+            </span>
+        </div>
+        {% endfor %}
+        {% if not recent_entries %}
+        <p style="font-size:0.8125rem;color:var(--color-text-muted)">No recent activity.</p>
+        {% endif %}
+    </div>
+</div>
+
+{# 5. Container Status Matrix — sortable; uptime + image are new columns. #}
+<div class="detail-section full-width" style="margin-bottom:0.625rem">
+    <div class="detail-section-title">Container Status Matrix ({{ container_matrix | length }})</div>
+    <div class="table-wrap">
+    <table class="rz" id="matrix-table" style="font-size:0.8125rem">
+        <thead><tr>
+            <th data-sort-col="0" data-sort-type="text" style="cursor:pointer">Container ⇅</th>
+            <th data-sort-col="1" data-sort-type="text" style="cursor:pointer">Profile ⇅</th>
+            <th data-sort-col="2" data-sort-type="text" style="cursor:pointer">Status ⇅</th>
+            <th data-sort-col="3" data-sort-type="numeric" data-sort-key="uptime" style="cursor:pointer">Uptime ⇅</th>
+            <th data-sort-col="4" data-sort-type="text" style="cursor:pointer">Image ⇅</th>
+            <th data-sort-col="5" data-sort-type="numeric" style="cursor:pointer;text-align:right">Memory ⇅</th>
+            <th data-sort-col="6" data-sort-type="numeric" style="cursor:pointer;text-align:right">CPU ⇅</th>
+        </tr></thead>
+        <tbody>
+            {% for c in container_matrix %}
+            <tr>
+                <td><code style="font-size:0.6875rem">{{ c.name }}</code></td>
+                <td>{% if c.profile != '_untracked' %}<a href="{{ url_for('modules.detail', profile_id=c.profile) }}" style="font-size:0.75rem;color:var(--color-brand);text-decoration:none">{{ c.profile }}</a>{% else %}<span style="color:var(--color-text-muted)">—</span>{% endif %}</td>
+                <td><span class="dot {{ 'ok' if c.state == 'running' else 'err pulse' if c.state == 'restarting' else 'muted' }}"></span> {{ c.state }}</td>
+                {# Uptime: display the human string but stash the numeric value in data-sort for sortable. #}
+                <td data-sort-value="{{ c.uptime_s }}" style="font-size:0.75rem;color:var(--color-text-muted)">
+                    {% if c.uptime_s > 0 %}{{ c.status_text | replace('Up ', '') }}{% else %}—{% endif %}
+                </td>
+                <td style="font-size:0.6875rem;color:var(--color-text-muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ c.image }}">
+                    <code>{{ c.image }}</code>
+                </td>
+                <td style="text-align:right">{{ c.memory_mb }} MB</td>
+                <td style="text-align:right">{{ c.cpu_pct }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+
+{# 6. Alerts — only when something to show #}
+{% if alerts %}
+<div class="detail-section" style="border-left:3px solid var(--warn)">
+    <div class="detail-section-title">Alerts ({{ alerts | length }})</div>
+    {% for alert in alerts %}
+    <div class="detail-row" style="font-size:0.8125rem">
+        <span class="detail-row-label">
+            {% if alert.level == 'error' %}<span class="badge badge-risk-danger">error</span>
+            {% else %}<span class="badge badge-risk-caution">warning</span>{% endif %}
+        </span>
+        <span class="detail-row-value">
+            {{ alert.text }}
+            {% if alert.link %}<a href="{{ alert.link }}" style="font-size:0.6875rem;color:var(--color-brand);margin-left:0.5rem">Fix &rarr;</a>{% endif %}
+        </span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# Sortable matrix: data-sort-value on <td> overrides textContent for numeric
+   sorting (so "Up 12 minutes" sorts by uptime_s, "Memory" sorts by mb).
+   Header click toggles direction; arrow indicator updates. #}
+<script>
+(function() {
+    var table = document.getElementById('matrix-table');
+    if (!table) return;
+    var sortDir = window.__matrixSortDir || (window.__matrixSortDir = {});
+    var headers = table.querySelectorAll('th[data-sort-col]');
+    headers.forEach(function(th) {
+        th.addEventListener('click', function() {
+            var col = parseInt(th.getAttribute('data-sort-col'), 10);
+            var type = th.getAttribute('data-sort-type') || 'text';
+            var dir = sortDir[col] = !(sortDir[col] || false);
+            var tbody = table.querySelector('tbody');
+            var rows = Array.from(tbody.querySelectorAll('tr'));
+            rows.sort(function(a, b) {
+                var ca = a.cells[col], cb = b.cells[col];
+                var va = ca.getAttribute('data-sort-value');
+                var vb = cb.getAttribute('data-sort-value');
+                if (va === null) va = ca.textContent.trim();
+                if (vb === null) vb = cb.textContent.trim();
+                if (type === 'numeric') {
+                    var na = parseFloat(va), nb = parseFloat(vb);
+                    if (isNaN(na)) na = -Infinity;
+                    if (isNaN(nb)) nb = -Infinity;
+                    return dir ? na - nb : nb - na;
+                }
+                return dir ? va.localeCompare(vb) : vb.localeCompare(va);
+            });
+            rows.forEach(function(r) { tbody.appendChild(r); });
+        });
+    });
+})();
+</script>
+
+</div>{# /#dashboard-live (CFG-4) #}
