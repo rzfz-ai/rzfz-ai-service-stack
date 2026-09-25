@@ -1,0 +1,235 @@
+version: 1
+metadata:
+  name: "Base - Groups"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Chat Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Workflow Automation Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai LLM Management Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Docker Management Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Git Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  # Per-module user groups added in 2026.05 (GA blocker fix).
+  # Cognee Users, RAG Users, Paperless Users, and Observability Users
+  # remain inline in their per-module blueprints (10-lightrag.yaml,
+  # 11-cognee.yaml, 19-paperless-ngx.yaml, 27-observability.yaml).
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai AI Agents Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Crawl4AI Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Docling Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Infisical Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Matrix Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Onyx Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai OpenUEM Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai OpenHands Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Paperclip Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Stirling-PDF Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Vaultwarden Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai User Admins"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  # #843 (#842 follow-up) — LLM Manager three-tier RBAC group tiers. Names
+  # MUST match modules/llm/manager/app/config.py's LLM_MANAGER_ADMIN_TIER_GROUPS
+  # / LLM_MANAGER_USER_TIER_GROUPS defaults verbatim — resolve_role() maps on
+  # exact group name, so a typo here silently leaves everyone at the NONE tier
+  # (fail-closed, but also RBAC-inert). Distinct from "razzfazz.ai LLM
+  # Management Users" above, which gates the GPUStack UI (llm.<domain>), not
+  # the LLM Manager console (llm-manager.<domain>).
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai LLM Admins"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai LLM Users"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  # #1635 — the agent quota tiers, the same shape as the LLM tiers above and for
+  # the same reason. `Database.resolve_user_tier` looks the tier up by
+  # `quota_tiers.id IN (<the user's group names>)`, and the ids are
+  # `agent-basic` / `agent-power` / `agent-admin` (catalog.py::SEED_TIERS).
+  # Nothing created groups with those names — no blueprint, no init, no
+  # migration — so on every box the lookup found nothing, every card read
+  # "Restricted — Contact admin for access", and only Super Admins got through
+  # via the `_UNLIMITED_ADMIN_GROUPS` escape hatch. That hatch is exactly what
+  # hid it: whoever sets a box up is an admin and never sees what a user sees.
+  # Names MUST match SEED_TIERS verbatim — the lookup is an exact id match.
+  - model: authentik_core.group
+    identifiers:
+      name: "agent-basic"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "agent-power"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "agent-admin"
+    attrs:
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Super Admins"
+    attrs:
+      is_superuser: true
+      attributes:
+        # #2247 (Jira RZFZAI-1971, operator decision 2026-09-18): API tokens minted by
+        # members may live up to 30 days; without this Authentik clamps every token
+        # to default_token_duration (30 minutes) on every write.
+        goauthentik.io/user/token-maximum-lifetime: "days=30"

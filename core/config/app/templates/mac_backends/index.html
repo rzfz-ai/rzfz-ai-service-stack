@@ -1,0 +1,449 @@
+{% extends "base.html" %}
+
+{% block page_title %}Mac LLM backends{% endblock %}
+
+{% block page_content %}
+{# #1149: one place that formats a sampling-param mapping, so the table cell,
+   the "none pinned" case and the drift tooltip cannot render it three
+   different ways. #}
+{% macro fmt_params(p) %}{% for k, v in (p or {})|dictsort %}{{ k }}={{ v }}{{ ", " if not loop.last }}{% endfor %}{% endmacro %}
+<div class="page">
+    <h1>Mac LLM backends</h1>
+    <p class="lede">
+        Manage the Macs running Ollama that the <code>llm-mac-gateway</code> fronts as a
+        second OpenAI endpoint — GPUStack is untouched (#168).
+    </p>
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{% if not enabled %}
+<div class="card">
+    <div class="card-body">
+    <h2 style="margin-top:0;font-size:1.1rem">Module not enabled</h2>
+    <p style="font-size:0.9rem;color:var(--text-secondary)">
+        The <strong>mac-llm</strong> module is off. Enable it first, then declare your Macs here.
+        Boxes without Macs are unaffected.
+    </p>
+    <a href="{{ url_for('modules.detail', profile_id='mac-llm') }}" class="btn primary sm">
+        Go to the mac-llm module &rarr;
+    </a>
+    </div>
+</div>
+{% else %}
+
+{% if gateway_key_set is not none and not gateway_key_set %}
+<div class="card" style="margin-bottom:1rem;border-left:3px solid var(--warn)">
+    <div class="card-body">
+    <strong>MAC_GATEWAY_MASTER_KEY is empty.</strong>
+    <span style="font-size:0.875rem;color:var(--text-muted)">
+        The gateway needs it to authenticate stack components. Set it in
+        <code>rzfz setup --regenerate-secrets</code> (or the Secrets page) before use.
+    </span>
+    </div>
+</div>
+{% endif %}
+
+<!-- Gateway connection (#241) -----------------------------------------------
+     Consumes the EXISTING GET /mac-backends/connection endpoint (PR #806,
+     mac_backends.py::connection) — never re-derives the connection string or
+     the key client-side. That endpoint only ever returns a MASKED key
+     (`key_masked`); the raw MAC_GATEWAY_MASTER_KEY is read server-side purely
+     to compute the mask and is never placed in ANY response body — so this
+     panel can only ever show/copy the masked form, by design (contrast with
+     settings/gpustack.html, which embeds the complete API key server-side —
+     fine there, but would be WRONG here). -->
+<div class="card" style="margin-bottom:1rem" id="gateway-connection-panel">
+    <div class="card-header">Gateway connection</div>
+    <div class="card-body">
+    <p style="font-size:0.8125rem;color:var(--text-muted);margin-top:0">
+        Point Open WebUI / Dify (or any OpenAI-compatible client) at the Mac gateway.
+        This is LiteLLM's <code>/v1</code> path — <strong>not</strong> GPUStack's
+        <code>/v1-openai</code>. The URL and key below are a 1:1 pair: pasting this
+        URL with a different key's value fails with a DB-lookup error, not a clean
+        auth error.
+    </p>
+    <div class="form-group" style="margin:0 0 0.5rem 0">
+        <label class="form-label">Base URL</label>
+        <span style="font-family:monospace" id="gw-conn-url">loading&hellip;</span>
+        <button type="button" class="btn-icon" title="Copy base URL"
+                style="background:none;border:none;cursor:pointer;padding:0 0.25rem;font-size:1rem;vertical-align:middle"
+                onclick="copyGatewayField('gw-conn-url')">📋</button>
+    </div>
+    <div class="form-group" style="margin:0 0 0.5rem 0">
+        <label class="form-label">Master key (masked)</label>
+        <span style="font-family:monospace" id="gw-conn-key">&bull;&bull;&bull;&bull; hidden</span>
+        <button type="button" class="btn-icon" title="Reveal masked key"
+                style="background:none;border:none;cursor:pointer;padding:0 0.25rem;font-size:1rem;vertical-align:middle"
+                onclick="revealGatewayKey()">👁</button>
+        <button type="button" class="btn-icon" title="Copy masked key"
+                style="background:none;border:none;cursor:pointer;padding:0 0.25rem;font-size:1rem;vertical-align:middle"
+                onclick="copyGatewayField('gw-conn-key')">📋</button>
+        <span style="font-size:0.75rem;color:var(--text-muted)">
+            (only the last 4 characters are ever sent to the browser — get the full
+            value from <code>rzfz setup --secrets-status</code> or the Secrets page)
+        </span>
+    </div>
+    <div>
+        <button type="button" class="btn ghost sm" onclick="copyGatewayOwuiDifyConnection()">
+            Copy OWUI/Dify connection
+        </button>
+        <span id="gateway-connection-copy-status" style="font-size:0.75rem;color:var(--text-muted);margin-left:0.5rem"></span>
+    </div>
+    </div>
+</div>
+
+<!-- Configured Macs ------------------------------------------------------- -->
+{% if macs %}
+{% for row in macs %}
+{% set mac = row.mac %}
+{% set mac_i = loop.index %}
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">
+        <h2 style="margin:0;font-size:1.1rem">
+            <span class="dot {{ 'ok' if row.reachable else 'err' }}"></span>
+            <code>{{ mac.ip }}:{{ mac.port }}</code>
+            {% if row.reachable %}
+            <span class="badge ok">reachable</span>
+            {% if row.version %}<span style="font-size:0.75rem;color:var(--text-muted)">Ollama {{ row.version }}</span>{% endif %}
+            {% else %}
+            <span class="badge err">unreachable</span>
+            {% endif %}
+        </h2>
+        <form method="POST" action="{{ url_for('mac_backends.remove') }}"
+              onsubmit="return confirm('Remove Mac backend {{ mac.ip }} (all its model aliases) and reload the gateway?')">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="ip" value="{{ mac.ip }}">
+            <button type="submit" class="btn ghost sm">Remove Mac</button>
+        </form>
+    </div>
+
+    <!-- model aliases (from config.yaml) -->
+    <div class="table-wrap" style="margin-top:0.75rem">
+    <table class="rz">
+        <thead><tr><th>Alias (shown in Open WebUI)</th><th>Ollama tag</th><th>Sampling profile (effective)</th><th>Model management</th></tr></thead>
+        <tbody>
+        {# #1149: the sampling profile, re-pinnable per model, next to the params
+           config.yaml ACTUALLY carries. The <option>s come from
+           `sampling_profiles`, which the blueprint reads out of gen_config's own
+           table — never a copy kept here, because an option the generator does
+           not know falls back to the DEFAULT profile SILENTLY, i.e. #242's own
+           hazard re-introduced by the UI built to prevent it. #}
+        {% for m in row.models %}
+            {% set s = m.sampling or {} %}
+            <tr>
+                <td><code>{{ m.alias }}</code></td>
+                <td><code>{{ m.ollama_tag }}</code></td>
+                <td>
+                    {% if not s %}
+                    <span style="font-size:0.8125rem;color:var(--text-muted)"
+                          title="The mac-gateway module files are not available, so the sampling profiles cannot be read.">unavailable</span>
+                    {% else %}
+                    <form method="POST" action="{{ url_for('mac_backends.set_profile') }}" style="display:inline">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="ip" value="{{ mac.ip }}">
+                        <input type="hidden" name="alias" value="{{ m.alias }}">
+                        <select name="profile" id="mac{{ mac_i }}-model{{ loop.index }}-profile"
+                                aria-label="Sampling profile for {{ m.alias }}">
+                            {% for p in sampling_profiles %}
+                            <option value="{{ p }}"{% if p == s.profile %} selected{% endif %}>{{ p }}</option>
+                            {% endfor %}
+                        </select>
+                        <button type="submit" class="btn ghost sm"
+                                title="Re-pin this model's sampling profile and reload the gateway">Set</button>
+                    </form>
+                    {% if s.drift %}
+                    <span class="badge err"
+                          title="config.yaml sends {{ fmt_params(s.params) or 'nothing' }}; the {{ s.profile }} profile pins {{ fmt_params(s.expected) }}. Press Set to bring this model back onto a profile.">drift</span>
+                    {% endif %}
+                    <div style="font-size:0.75rem;color:var(--text-muted)">
+                        {% if s.params %}<code>{{ fmt_params(s.params) }}</code>
+                        {% else %}no sampling sent — the Ollama tag's own Modelfile defaults apply{% endif %}
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    <form method="POST" action="{{ url_for('mac_backends.preload_model', mac=mac.ip) }}" style="display:inline">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="model" value="{{ m.ollama_tag }}">
+                        <button type="submit" class="btn ghost sm" title="Load resident (keep_alive:-1) to kill cold-start">Preload</button>
+                    </form>
+                    <form class="pull-model-form" method="POST"
+                          action="{{ url_for('mac_backends.pull_model', mac=mac.ip) }}"
+                          data-mac="{{ mac.ip }}" style="display:inline">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="model" value="{{ m.ollama_tag }}">
+                        <button type="submit" class="btn ghost sm" title="Re-pull / update this tag on the Mac">Pull</button>
+                    </form>
+                    <span class="pull-progress" style="display:none;margin-left:0.35rem;vertical-align:middle">
+                        <progress class="pull-progress-bar" max="100" value="0"
+                                  style="vertical-align:middle;width:6rem"></progress>
+                        <span class="pull-progress-text" style="font-size:0.75rem;color:var(--text-muted)"></span>
+                    </span>
+                    <form method="POST" action="{{ url_for('mac_backends.delete_model', mac=mac.ip) }}" style="display:inline"
+                          onsubmit="return confirm('Delete {{ m.ollama_tag }} from {{ mac.ip }}? This removes it from the Mac disk.')">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="model" value="{{ m.ollama_tag }}">
+                        <button type="submit" class="btn ghost sm">Delete from Mac</button>
+                    </form>
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="4" style="font-size:0.8125rem;color:var(--text-muted)">No models mapped yet — add one below.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+
+    <!-- add a model alias to this Mac + pull an arbitrary tag -->
+    <h2 class="section" style="margin-top:0.75rem">Add a model alias to this Mac</h2>
+    <div>
+        <form method="POST" action="{{ url_for('mac_backends.add') }}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="ip" value="{{ mac.ip }}">
+            <input type="hidden" name="port" value="{{ mac.port }}">
+            {# CFG-19: every label carries `for=` and every input a matching
+               `id`. Without them these are announced as unlabelled edit
+               fields. The ids are loop-scoped because this form is rendered
+               once per configured Mac. #}
+            <div class="field" style="margin:0">
+                <label for="mac{{ loop.index }}-alias">Alias</label>
+                <input type="text" id="mac{{ loop.index }}-alias" name="alias" placeholder="mac-qwen3-coder" required>
+            </div>
+            <div class="field" style="margin:0">
+                <label for="mac{{ loop.index }}-tag">Ollama tag</label>
+                <input type="text" id="mac{{ loop.index }}-tag" name="ollama_tag" placeholder="qwen3-coder:30b" required>
+            </div>
+            {# #1149: pin the use case at provisioning time. Options from the
+               generator's table (see the models column above). #}
+            <div class="field" style="margin:0">
+                <label for="mac{{ loop.index }}-profile">Sampling profile</label>
+                <select id="mac{{ loop.index }}-profile" name="profile">
+                    {% for p in sampling_profiles %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="btn primary sm">Add alias</button>
+        </form>
+        <div style="margin-top:0.5rem;font-size:0.8125rem">
+            <a href="{{ url_for('mac_backends.list_models', mac=mac.ip) }}?format=json" target="_blank">
+                View live models on this Mac (/api/tags + /api/ps) &rarr;
+            </a>
+        </div>
+    </div>
+
+    <!-- Tier-2 SSH host management seam (P3 — designed-for, not built) -->
+    <div style="margin-top:0.5rem;font-size:0.75rem;color:var(--text-muted)">
+        Host management (SSH: upgrade / restart / logs) is not enabled — planned as a per-Mac opt-in (P3).
+    </div>
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+    <p style="font-size:0.9rem;color:var(--text-secondary);margin:0">
+        No Macs configured yet. Add one below — the gateway reloads automatically.
+    </p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Add a Mac ------------------------------------------------------------- -->
+<div class="card">
+    <div class="card-body">
+    <h2 style="margin-top:0;font-size:1.1rem">Add a Mac</h2>
+    <p style="font-size:0.8125rem;color:var(--text-muted);margin-top:0">
+        The Mac must run Ollama on the LAN (<code>OLLAMA_HOST=0.0.0.0</code>). Same alias on two Macs
+        = one load-balance group. Firewall each Mac to accept <code>:11434</code> only from this box.
+    </p>
+    <form method="POST" action="{{ url_for('mac_backends.add') }}"
+          style="display:flex;gap:0.75rem;flex-wrap:wrap;align-items:flex-end">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        {# CFG-19: label/for + input/id pairs — see the alias form above. #}
+        <div class="field" style="margin:0">
+            <label for="add-mac-ip">Mac IP / hostname</label>
+            <input type="text" id="add-mac-ip" name="ip" placeholder="192.0.2.194" required>
+        </div>
+        <div class="field" style="margin:0">
+            <label for="add-mac-port">Port</label>
+            <input type="text" id="add-mac-port" name="port" style="width:6rem" value="11434">
+        </div>
+        <div class="field" style="margin:0">
+            <label for="add-mac-alias">Model alias</label>
+            <input type="text" id="add-mac-alias" name="alias" placeholder="mac-qwen3-coder" required>
+        </div>
+        <div class="field" style="margin:0">
+            <label for="add-mac-tag">Ollama tag</label>
+            <input type="text" id="add-mac-tag" name="ollama_tag" placeholder="qwen3-coder:30b" required>
+        </div>
+        <div class="field" style="margin:0">
+            <label for="add-mac-profile">Sampling profile</label>
+            <select id="add-mac-profile" name="profile">
+                {% for p in sampling_profiles %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="btn primary sm">Add Mac &amp; reload gateway</button>
+    </form>
+    </div>
+</div>
+
+<script>
+// #241: Gateway connection panel — client-fetched from the EXISTING
+// GET /mac-backends/connection endpoint (PR #806, already tested). This is
+// display-only: never re-derive the connection string or the key here.
+let _gwConnection = null;   // {key_masked, connection_string, api_base}
+let _gwKeyRevealed = false;
+const _GW_KEY_HIDDEN_TEXT = '•••• hidden — click 👁 to reveal';
+
+function _gwConnStatus(msg, ms) {
+    const el = document.getElementById('gateway-connection-copy-status');
+    if (!el) return;
+    el.textContent = msg;
+    if (ms) setTimeout(() => { el.textContent = ''; }, ms);
+}
+
+function loadGatewayConnection() {
+    fetch('{{ url_for("mac_backends.connection") }}', { headers: { 'Accept': 'application/json' } })
+        .then(r => r.json())
+        .then(d => {
+            _gwConnection = d;
+            const urlEl = document.getElementById('gw-conn-url');
+            if (urlEl) urlEl.textContent = d.connection_string || d.api_base || '';
+            if (!_gwKeyRevealed) {
+                const keyEl = document.getElementById('gw-conn-key');
+                if (keyEl) keyEl.textContent = _GW_KEY_HIDDEN_TEXT;
+            }
+        })
+        .catch(e => _gwConnStatus('failed to load gateway connection: ' + e.message, 4000));
+}
+
+function revealGatewayKey() {
+    if (!_gwConnection) { _gwConnStatus('still loading…', 2000); return; }
+    _gwKeyRevealed = !_gwKeyRevealed;
+    const keyEl = document.getElementById('gw-conn-key');
+    if (keyEl) keyEl.textContent = _gwKeyRevealed ? _gwConnection.key_masked : _GW_KEY_HIDDEN_TEXT;
+}
+
+function copyGatewayField(elId) {
+    const el = document.getElementById(elId);
+    _gwCopyText(el ? el.textContent : '');
+}
+
+function copyGatewayOwuiDifyConnection() {
+    if (!_gwConnection) { _gwConnStatus('still loading…', 2000); return; }
+    const text = `Base URL: ${_gwConnection.connection_string}\nMaster key (masked): ${_gwConnection.key_masked}`;
+    _gwCopyText(text);
+}
+
+// Same copy-with-execCommand-fallback pattern as settings/gpustack.html
+// (rc6.7 #11) — kept local rather than shared, matching that precedent.
+function _gwCopyText(text) {
+    const showCopied = () => _gwConnStatus('✓ copied', 2000);
+    const showFailed = (msg) => _gwConnStatus('⚠ ' + (msg || 'copy failed'), 4000);
+    if (!text) { showFailed('nothing to copy'); return; }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(showCopied).catch(e => showFailed(e.message));
+        return;
+    }
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        ok ? showCopied() : showFailed('execCommand returned false');
+    } catch (e) {
+        showFailed(e.message);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadGatewayConnection);
+
+// #239: async model pull — the plain form POST already starts the pull in
+// the background and returns immediately (job_id) regardless of whether JS
+// runs, so a non-JS client still gets a working fire-and-forget pull via
+// the normal submit + flash + redirect. This listener is the enhancement:
+// it intercepts the submit, starts the pull via fetch instead, and polls
+// GET /<mac>/pull-status/<job_id> every ~1500ms to render live progress
+// (completed/total -> %, plus the current Ollama status text) until the job
+// reaches a terminal state.
+function _pullStartTick(mac, jobId, progressEl, button) {
+    fetch(`/mac-backends/${encodeURIComponent(mac)}/pull-status/${encodeURIComponent(jobId)}`,
+          { headers: { 'Accept': 'application/json' } })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.ok || !d.job) {
+                if (progressEl) progressEl.querySelector('.pull-progress-text').textContent = '⚠ pull status unavailable';
+                if (button) button.disabled = false;
+                return;
+            }
+            const job = d.job;
+            if (progressEl) {
+                const bar = progressEl.querySelector('.pull-progress-bar');
+                const text = progressEl.querySelector('.pull-progress-text');
+                const pct = job.total ? Math.round((job.completed / job.total) * 100) : 0;
+                if (bar) bar.value = pct;
+                if (text) text.textContent = (job.total ? pct + '% — ' : '') + (job.status || job.state);
+            }
+            if (job.state === 'done') {
+                if (progressEl) progressEl.querySelector('.pull-progress-text').textContent = '✓ pulled';
+                if (button) button.disabled = false;
+                setTimeout(() => window.location.reload(), 800);
+                return;
+            }
+            if (job.state === 'error') {
+                if (progressEl) progressEl.querySelector('.pull-progress-text').textContent = '⚠ ' + (job.error || 'pull failed');
+                if (button) button.disabled = false;
+                return;
+            }
+            setTimeout(() => _pullStartTick(mac, jobId, progressEl, button), 1500);
+        })
+        .catch(e => {
+            if (progressEl) progressEl.querySelector('.pull-progress-text').textContent = '⚠ ' + e.message;
+            if (button) button.disabled = false;
+        });
+}
+
+document.querySelectorAll('form.pull-model-form').forEach(form => {
+    form.addEventListener('submit', ev => {
+        ev.preventDefault();
+        const mac = form.dataset.mac;
+        const model = form.querySelector('input[name="model"]').value;
+        const button = form.querySelector('button[type="submit"]');
+        const progressEl = form.nextElementSibling;
+        button.disabled = true;
+        if (progressEl) {
+            progressEl.style.display = '';
+            progressEl.querySelector('.pull-progress-bar').value = 0;
+            progressEl.querySelector('.pull-progress-text').textContent = 'starting…';
+        }
+        fetch(form.action, {
+            method: 'POST',
+            headers: window.rzfzCsrfHeaders({ 'Accept': 'application/json' }),
+            body: new URLSearchParams({ model: model }),
+        })
+            .then(r => r.json())
+            .then(d => {
+                if (!d.ok || !d.job_id) {
+                    if (progressEl) progressEl.querySelector('.pull-progress-text').textContent = '⚠ ' + (d.summary || 'pull failed to start');
+                    button.disabled = false;
+                    return;
+                }
+                _pullStartTick(mac, d.job_id, progressEl, button);
+            })
+            .catch(e => {
+                if (progressEl) progressEl.querySelector('.pull-progress-text').textContent = '⚠ ' + e.message;
+                button.disabled = false;
+            });
+    });
+});
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,205 @@
+version: 1
+metadata:
+  name: "Module - Wazuh"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # Group: Wazuh Users
+  # ==========================================
+  # Declared inline, exactly like 27-observability.yaml:10-12. NO `parent:` —
+  # no group in this repo has one, and "4 Security & Secrets" is an Application
+  # group LABEL (see the application entry below), not a group object.
+  - model: authentik_core.group
+    identifiers:
+      name: "razzfazz.ai Wazuh Users"
+
+  # ==========================================
+  # Layer 1: Caddy forward-auth ProxyProvider
+  # ==========================================
+  # rev-B, review blocker 4. Caddyfile forward_auths the WHOLE wazuh.<domain>
+  # vhost, and the embedded outpost matches an incoming request by HOST against
+  # a PROXY provider's external_host. An OAuth2Provider does not attach to the
+  # outpost at all, so with only the OIDC provider below the outpost had nothing
+  # to match and answered 404 — for every user, before any login redirect. That
+  # failure class is documented twice in this repo already
+  # (core/init-authentik.sh:159).
+  #
+  # The correct precedent is GITEA, which is the other module that runs BOTH
+  # layers: a forward_single ProxyProvider on the `gitea` app
+  # (03-providers-apps.yaml:258-281) PLUS a native OIDC provider on a hidden
+  # second application `gitea-oidc`. Vaultwarden — the module this blueprint was
+  # copied from — has no domain-wide forward_auth at all, which is why copying
+  # it produced a provider that could never be reached.
+  #
+  # apply-policy-bindings.py attaches every proxy provider to the embedded
+  # outpost in its attach-ALL loop, so nothing further is needed here.
+  # ==========================================
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: "Caddy Forward Auth Provider for Wazuh"
+    attrs:
+      client_id: "wazuh_app_client_id"
+      client_secret: "${WAZUH_CLIENT_SECRET}"
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      external_host: "https://${WAZUH_DOMAIN}"
+      mode: forward_single
+      intercept_header_auth: true
+      access_token_validity: "hours=24"
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: Proxy outpost"]]
+
+  # ==========================================
+  # #1982: the username Wazuh's API sees
+  # ==========================================
+  # The indexer authenticates OIDC users with `subject_key: preferred_username`
+  # (render-security-config.sh), and the dashboard hands that same name to the
+  # Wazuh API as its `run_as` user. The API then looks for an authentication-
+  # context rule that matches it. Wazuh ships exactly two, and both are for
+  # somebody else:
+  #
+  #     rule 1  wui_elastic_admin     {"FIND": {"username":  "elastic"}}
+  #     rule 2  wui_opensearch_admin  {"FIND": {"user_name": "admin"}}
+  #
+  # `akadmin` matches neither, so the token came back with `rbac_roles: []` and
+  # `rbac_mode: white` — permitted to see nothing. Measured on 0.91 2026-09-12:
+  #
+  #     user_name=akadmin  ->  rbac_roles=[]   agents: 0
+  #     user_name=admin    ->  rbac_roles=[1]  agents: 2
+  #
+  # Role 1 is `administrator` and already carries rules [1, 2], so presenting
+  # the name `admin` activates Wazuh's OWN shipped wiring. That is why this is a
+  # rename and not a new RBAC rule: no extra state in the Wazuh database, and
+  # nothing of ours to keep in step with an upstream default.
+  #
+  # Scoped to the Super Admins group on purpose. Everyone else keeps their real
+  # username, so this does not quietly turn every SSO user into an API admin —
+  # a non-admin simply matches no rule, which is the correct outcome for them.
+  #
+  # Dashboard access does NOT ride on this name: roles_mapping.yml grants
+  # `all_access` / `kibana_user` from `backend_roles`, which come from the
+  # `groups` claim. Renaming the subject takes nobody's access away.
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers:
+      name: "razzfazz.ai OAuth Mapping: wazuh profile"
+    attrs:
+      name: "razzfazz.ai OAuth Mapping: wazuh profile"
+      scope_name: "profile"
+      description: "razzfazz.ai (#1982): standard profile claims, but Super Admins present themselves to the Wazuh API as `admin` so its shipped wui_opensearch_admin rule matches"
+      expression: |
+        # Mirrors authentik's default 'profile' mapping, with ONE difference:
+        # preferred_username. Keep the rest in step with upstream if it grows.
+        is_super = request.user.ak_groups.filter(name="razzfazz.ai Super Admins").exists()
+        return {
+            "preferred_username": "admin" if is_super else request.user.username,
+            "name": request.user.name,
+            "given_name": request.user.name,
+            "nickname": request.user.username,
+            "groups": [group.name for group in request.user.ak_groups.all()],
+            "email": request.user.email,
+            "email_verified": True,
+        }
+
+  # ==========================================
+  # Layer 2: native OIDC provider for the dashboard
+  # ==========================================
+  # The Wazuh dashboard (an OpenSearch-Dashboards fork) authenticates natively
+  # through its security plugin's OIDC backend — that is what carries the
+  # `groups` claim the indexer turns into OpenSearch backend roles (DECISION-5).
+  # Redirect URI: https://wazuh.{domain}/auth/openid/login
+  # ==========================================
+  - model: authentik_providers_oauth2.oauth2provider
+    identifiers:
+      name: "Wazuh OIDC Provider"
+    attrs:
+      client_id: "${WAZUH_OIDC_CLIENT_ID}"
+      client_secret: "${WAZUH_OIDC_CLIENT_SECRET}"
+      client_type: confidential
+      # ga.10 (#OIDC-grant-types): Authentik 2026.5.x requires grant_types to be
+      # set explicitly. An empty list rejects EVERY authorize with
+      # "invalid_request / request is otherwise malformed" BEFORE the app policy
+      # check — silently breaking SSO login for this provider. Must be present.
+      grant_types:
+        - authorization_code
+        - refresh_token
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      redirect_uris:
+        - matching_mode: strict
+          url: "https://${WAZUH_DOMAIN}/auth/openid/login"
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      access_code_validity: "minutes=1"
+      access_token_validity: "hours=1"
+      refresh_token_validity: "days=30"
+      sub_mode: user_username
+      include_claims_in_id_token: true
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'openid'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        # #1982: OUR profile mapping REPLACES authentik's default one here — it
+        # must not sit beside it. Both emit `preferred_username`, and Authentik
+        # merges the scope mappings of a provider without a guaranteed order, so
+        # keeping both would make the resulting claim a coin toss.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: wazuh profile"]]
+        # #33 True SSO group->role mapping. This one is LOAD-BEARING here, not
+        # decorative: the indexer's config.yml sets roles_key: groups, and
+        # roles_mapping.yml maps those Authentik group names onto OpenSearch
+        # backend roles (Task 5). Without this mapping every SSO user lands
+        # with no backend role and sees nothing.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: groups"]]
+
+  # ==========================================
+  # Application: Wazuh (SIEM/XDR console) — the GATED one
+  # ==========================================
+  # An Application carries exactly ONE provider, so the two layers need two
+  # applications (the Gitea split). This is the user-facing one: it holds the
+  # PROXY provider, so it is what the outpost matches wazuh.<domain> against,
+  # and it is what apply-policy-bindings.py binds to "razzfazz.ai Wazuh Users"
+  # + Super Admins. Group membership on THIS app is what gates the domain.
+  # ==========================================
+  - model: authentik_core.application
+    identifiers:
+      slug: wazuh
+    attrs:
+      name: Wazuh
+      # rev-B MEDIUM 10: same operator v5 bucket as the start-portal tile, and
+      # as vaultwarden (20-vaultwarden.yaml:66) / infisical
+      # (21-infisical.yaml:35). Keeping the Authentik app-library label in step
+      # with the tile category is the point of the v5 table.
+      group: "4 Security & Secrets"
+      provider: !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Wazuh"]]
+      meta_launch_url: "blank://blank"
+      meta_description: "Security monitoring — SIEM/XDR, host intrusion detection, file-integrity monitoring"
+      meta_publisher: "Wazuh Inc."
+      icon: "https://${AUTHENTIK_DOMAIN}/branding/razzfazz-ai_wazuh_icon.png"
+      open_in_new_tab: true
+      policy_engine_mode: any
+
+  # ==========================================
+  # Application: Wazuh (OIDC) — hidden backend half
+  # ==========================================
+  # Not shown to users and deliberately NOT policy-bound: the gate is the proxy
+  # app above, which the user has already passed by the time the dashboard
+  # starts its own OIDC dance. Same shape as `gitea-oidc`
+  # (core/Authentik/blueprints/gitea-oidc/10-provider.yaml).
+  #
+  # NOTE for the discovery URL: the dashboard's openid_connect_url is built from
+  # the APPLICATION SLUG, not the client_id — render-dashboard-config.sh and
+  # render-security-config.sh both hardcode the literal `wazuh` for that reason
+  # (rev-B LOW 18), and it must stay pointing at the OIDC provider. Authentik
+  # serves /application/o/<slug>/ for the app that owns the OAuth2 provider,
+  # which is THIS one.
+  # ==========================================
+  - model: authentik_core.application
+    identifiers:
+      slug: wazuh-oidc
+    attrs:
+      name: Wazuh (OIDC)
+      group: ""
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, "Wazuh OIDC Provider"]]
+      meta_description: "Wazuh dashboard native OIDC authentication provider (internal)"
+      open_in_new_tab: false
+      policy_engine_mode: any

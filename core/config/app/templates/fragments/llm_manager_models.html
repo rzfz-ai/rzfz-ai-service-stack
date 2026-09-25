@@ -1,0 +1,86 @@
+{# #976 LLM Models panel, sourced from the LLM Manager (not GPUStack).
+   The served-model summary sits on top; the "GPU & workers" block below it
+   restores the inline GPU/VRAM readout a manager-only box lost when GPUStack
+   went away, now fed from the manager's /api/workers fleet sample. #}
+{% if models %}
+<table class="container-table" style="font-size:0.8125rem">
+    <thead><tr><th>Model</th><th style="text-align:right">Served by</th></tr></thead>
+    <tbody>
+        {% for m in models %}
+        <tr>
+            <td><code style="font-size:0.75rem">{{ m.id }}</code></td>
+            <td style="text-align:right;font-size:0.75rem;color:var(--color-text-muted)">LLM Manager</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:0.6875rem;color:var(--color-text-muted);margin-top:0.375rem">
+    {{ models | length }} model{{ 's' if models | length != 1 else '' }} served
+</p>
+{% else %}
+<p style="font-size:0.8125rem;color:var(--color-text-muted)">
+    No models served{% if reason %} ({{ reason }}){% endif %}.
+    {% if main_domain %}<a href="https://llm.{{ main_domain }}/" style="color:var(--color-brand)">Open the LLM Manager &rarr;</a>{% endif %}
+</p>
+{% endif %}
+
+{# GPU & workers — per-worker GPU%/VRAM/RAM/CPU from the LLM Manager fleet.
+   Each numeric slot is a rounded float or None; None renders as an em-dash, so
+   a worker with a null metrics sample still shows its name + hardware + VRAM
+   capacity. When the whole fetch fails we show a single muted "GPU info
+   unavailable" line rather than nothing (and never a 500). #}
+{% if workers %}
+<div class="detail-section-title" style="margin-top:0.625rem">GPU &amp; workers</div>
+<div class="table-wrap">
+<table class="container-table" style="font-size:0.75rem">
+    <thead><tr>
+        <th>Worker</th>
+        <th>HW</th>
+        <th style="text-align:right">GPU</th>
+        <th style="text-align:right">VRAM</th>
+        <th style="text-align:right">RAM</th>
+        <th style="text-align:right">CPU</th>
+    </tr></thead>
+    <tbody>
+    {% for w in workers %}
+        <tr>
+            <td>
+                <code style="font-size:0.6875rem">{{ w.name }}</code>
+                {% if w.status and w.status not in ('ready', 'online', 'running') %}
+                <span style="color:var(--color-text-muted)">&middot; {{ w.status }}</span>
+                {% endif %}
+            </td>
+            <td style="color:var(--color-text-muted)">{{ w.hardware or '—' }}</td>
+            <td style="text-align:right">
+                {% if w.gpu_pct is not none %}{{ w.gpu_pct }}%{% else %}<span style="color:var(--color-text-muted)">—</span>{% endif %}
+            </td>
+            <td style="text-align:right">
+                {% if w.vram_total_gb %}
+                    {{ w.vram_used_gb if w.vram_used_gb is not none else '?' }} / {{ w.vram_total_gb }} GB
+                {% elif w.vram_used_gb is not none %}
+                    {{ w.vram_used_gb }} GB
+                {% else %}
+                    <span style="color:var(--color-text-muted)">—</span>
+                {% endif %}
+            </td>
+            <td style="text-align:right">
+                {% if w.mem_used_gb is not none %}{{ w.mem_used_gb }} GB{% else %}<span style="color:var(--color-text-muted)">—</span>{% endif %}
+            </td>
+            <td style="text-align:right"{% if w.load is not none and w.ncpu %} title="load {{ w.load }} / {{ w.ncpu }} cores"{% endif %}>
+                {% if w.cpu_pct is not none %}{{ w.cpu_pct }}%{% elif w.load is not none %}{{ w.load }}{% else %}<span style="color:var(--color-text-muted)">—</span>{% endif %}
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+<p style="font-size:0.6875rem;color:var(--color-text-muted);margin-top:0.375rem">
+    {{ workers | length }} worker{{ 's' if workers | length != 1 else '' }}
+    {% if main_domain %}&middot; <a href="https://llm.{{ main_domain }}/" style="color:var(--color-brand)">GPU details in the LLM Manager &rarr;</a>{% endif %}
+</p>
+{% elif workers_reason %}
+<p style="font-size:0.6875rem;color:var(--color-text-muted);margin-top:0.625rem">
+    GPU info unavailable ({{ workers_reason }}).
+    {% if main_domain %}<a href="https://llm.{{ main_domain }}/" style="color:var(--color-brand)">Open the LLM Manager &rarr;</a>{% endif %}
+</p>
+{% endif %}

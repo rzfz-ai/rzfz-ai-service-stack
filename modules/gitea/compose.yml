@@ -1,0 +1,149 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# GITEA MODULE (Self-hosted Git Service)
+# ==============================================================================
+# Profile: gitea
+# Description: Lightweight self-hosted Git service with web interface.
+# Config: .env (global)
+# Dependencies: postgres
+# ==============================================================================
+services:
+  # ==========================================
+  # Gitea: Git Repository Server
+  # ==========================================
+  gitea:
+    image: gitea/gitea:${GITEA_VERSION:-1.27.3}
+    profiles: ["gitea"]
+    container_name: gitea
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${GITEA_HTTP_PORT:-3000}:3000"
+      # F-067 (accepted risk): SSH binds to 0.0.0.0 intentionally — Git SSH access
+      # requires external reachability. Gitea handles SSH auth (keys/tokens) internally.
+      - "${GITEA_SSH_PORT:-2222}:22"
+    environment:
+      # General
+      - USER_UID=1000
+      - USER_GID=1000
+      
+      # Database (PostgreSQL)
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=${GITEA_DB:-gitea_db}
+      - GITEA__database__USER=${GITEA_DB_USER:-${POSTGRES_USER:-docker}}
+      - GITEA__database__PASSWD=${GITEA_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      - GITEA__database__SSL_MODE=disable
+      
+      # Server
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-git.${MAIN_DOMAIN:-razzfazz-box}}
+      - GITEA__server__SSH_DOMAIN=${GITEA_DOMAIN:-git.${MAIN_DOMAIN:-razzfazz-box}}
+      - GITEA__server__ROOT_URL=https://${GITEA_DOMAIN:-git.${MAIN_DOMAIN:-razzfazz-box}}/
+      - GITEA__server__SSH_PORT=${GITEA_SSH_PORT:-2222}
+      - GITEA__server__SSH_LISTEN_PORT=22
+      - GITEA__server__LFS_START_SERVER=true
+      
+      # Security
+      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY:-}
+      - GITEA__security__INTERNAL_TOKEN=${GITEA_INTERNAL_TOKEN:-}
+      
+      # Registration settings — Gitea is behind Authentik SSO. Public signup
+      # is never needed; users come through Authentik or pre-provisioned
+      # accounts. Fixes N-1 from the 2026-04-23 security review.
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__service__ALLOW_ONLY_EXTERNAL_REGISTRATION=true
+      - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+      
+      # Google OAuth (configured via init-gitea.sh when ENABLE_GOOGLE_OAUTH=true)
+      - ENABLE_GOOGLE_OAUTH=${ENABLE_GOOGLE_OAUTH:-false}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_OAUTH_DOMAIN=${GOOGLE_OAUTH_DOMAIN:-seqis.com}
+      # Authentik native OIDC (#29): init-gitea.sh runs `gitea admin auth add-oauth
+      # --name Authentik --auto-discover-url .../gitea-oidc/...` when these are set
+      # IN THE CONTAINER. Without the passthrough init-gitea always saw them unset
+      # and logged "skipping Authentik OIDC" → no "Sign in with Authentik" button.
+      - ENABLE_GITEA_AUTHENTIK_OIDC=${ENABLE_GITEA_AUTHENTIK_OIDC:-false}
+      - GITEA_OIDC_CLIENT_ID=${GITEA_OIDC_CLIENT_ID:-}
+      - GITEA_OIDC_CLIENT_SECRET=${GITEA_OIDC_CLIENT_SECRET:-}
+      - AUTHENTIK_DOMAIN=${AUTHENTIK_DOMAIN:-auth.localhost}
+      # Trust Caddy's self-signed CA so the Authentik OIDC discovery URL
+      # (https://${AUTHENTIK_DOMAIN}/application/o/gitea-oidc/...) verifies on
+      # TLS_MODE=internal. Go reads SSL_CERT_FILE. Without it, init-gitea's
+      # add-oauth and Gitea's runtime OIDC discovery fail with x509
+      # "certificate signed by unknown authority". (Mirrors vaultwarden; #29.)
+      # On Let's Encrypt the cert is publicly trusted; the extra CA is harmless.
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/caddy-ca.crt
+      # #29: auto-register OAuth/OIDC users. Gated on the DERIVED
+      # GITEA_OAUTH_AUTO_REGISTER (true if Google OR Authentik OIDC is enabled —
+      # razzfazz-init.sh derives it). Previously this was tied to
+      # ENABLE_GOOGLE_OAUTH only, so enabling JUST Authentik OIDC left
+      # auto-registration off and Authentik users could not self-provision.
+      - GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=${GITEA_OAUTH_AUTO_REGISTER:-${ENABLE_GOOGLE_OAUTH:-false}}
+      - GITEA__oauth2_client__ACCOUNT_LINKING=auto
+      - GITEA__oauth2_client__USERNAME=email
+      - GITEA__oauth2_client__UPDATE_AVATAR=true
+      # True SSO group->role mapping (#33): init-gitea.sh maps this Authentik
+      # group -> Gitea site admin on the OIDC source (--admin-group). Config-
+      # driven, never a hardcoded user. Default = the superuser group.
+      - SSO_ADMIN_GROUP=${SSO_ADMIN_GROUP:-razzfazz.ai Super Admins}
+      
+      # Mailer (uses internal smtp-relay container, no auth needed)
+      - GITEA__mailer__ENABLED=true
+      - GITEA__mailer__PROTOCOL=smtp
+      - GITEA__mailer__SMTP_ADDR=smtp-relay
+      - GITEA__mailer__SMTP_PORT=587
+      - GITEA__mailer__FROM=${SMTP_FROM:-noreply@localhost}
+      
+      # Session & Cache (use Valkey/Redis)
+      - GITEA__cache__ENABLED=true
+      - GITEA__cache__ADAPTER=redis
+      - GITEA__cache__HOST=redis://:${VALKEY_PASSWORD:-}@valkey:6379/2?pool_size=100&idle_timeout=180s
+      - GITEA__session__PROVIDER=redis
+      - GITEA__session__PROVIDER_CONFIG=redis://:${VALKEY_PASSWORD:-}@valkey:6379/3?pool_size=100&idle_timeout=180s
+      - GITEA__queue__TYPE=redis
+      - GITEA__queue__CONN_STR=redis://:${VALKEY_PASSWORD:-}@valkey:6379/4?pool_size=100&idle_timeout=180s
+      
+      # Installation & Admin (auto-install on first run)
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA_ADMIN_USER=${GITEA_ADMIN_USER:-admin}
+      - GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-}
+      - GITEA_ADMIN_EMAIL=${GITEA_ADMIN_EMAIL:-admin@localhost}
+      
+    volumes:
+      - gitea-data:/data
+      # Caddy internal CA for self-signed OIDC discovery trust (#29; see SSL_CERT_FILE).
+      - ../../certs/caddy-ca.pem:/usr/local/share/ca-certificates/caddy-ca.crt:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./init-gitea.sh:/usr/local/bin/init-gitea.sh:ro
+    entrypoint: ["/bin/sh", "-c", "/usr/local/bin/init-gitea.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# Volume for Gitea data (repos, LFS, avatars, etc.)
+volumes:
+  gitea-data:
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge

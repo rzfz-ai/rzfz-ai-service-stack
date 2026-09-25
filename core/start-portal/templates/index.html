@@ -1,0 +1,195 @@
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai - local matters{% endblock %}
+
+{% block favicon %}/static/favicon.png{% endblock %}
+
+{% block extra_head %}
+{# #388 — static/start-portal.js reads the CSRF token from here and sends it as
+   X-CSRF-Token on every state-changing prefs/categories call. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/start-portal-overrides.css">
+{% endblock %}
+
+{% block layout %}
+{# #1054 — dark icon-rail + plain content, the operator-approved layout that
+   gives every rzfz.ai app one identity (Config / Help / Licenses / Agent
+   Manager / LLM Manager already wear it). The former `.portal-bg` wrapper
+   and its `portal-background.png` content watermark are GONE: the brand
+   image now rides the dark rail (`.rail::before`) and the content area is
+   the plain warm `--bg` ground. The rail itself lives in the shared
+   `_rail.html` partial (also included by the App Builder). #}
+<div class="portal-app" id="portal-app">
+    {# Mobile drawer scrim — click to close. Kept `hidden` until the burger
+       opens the rail (start-portal-rail.js). #}
+    <div class="rail-scrim" id="rail-scrim" hidden></div>
+    {% with rail_active = 'home',
+            rail_favorites = favorites,
+            rail_categories = sections,
+            rail_account = true %}
+        {% include "_rail.html" %}
+    {% endwith %}
+
+    <div class="portal-main">
+        {# Content topbar. The rail is the app navigation; what stays here is
+           the burger (mobile drawer opener), the "you are here" crumb, and
+           the workspace-scoped Reset-layout action — deliberately NOT in the
+           rail, because it acts on the content in front of you (#299 split:
+           workspace actions visible, personal actions in the account menu,
+           which moved to the rail foot). #}
+        <header class="portal-header">
+            <div class="portal-header-left">
+                <button class="rail-burger" id="rail-burger" type="button"
+                        aria-controls="rail" aria-expanded="false"
+                        title="Open navigation" aria-label="Open navigation">&#9776;</button>
+                <span class="portal-crumb"><span class="rz">rzfz.ai</span> Start Portal</span>
+            </div>
+            {% if user.username %}
+            <div class="portal-header-right">
+                {% if user.is_admin %}<span class="portal-user-badge">Admin</span>{% endif %}
+                {# S11.6 — reset the user's layout (pins, custom categories,
+                   per-tile category moves) back to the manifest default.
+                   Stays a plain visible control (the #958 fix). #}
+                <button class="portal-reset portal-hdr-btn" type="button"
+                        title="Reset pins, custom categories, and tile order to defaults">
+                    Reset layout
+                </button>
+            </div>
+            {% endif %}
+        </header>
+
+    <div class="portal-shell">
+        {% if user.username %}
+        {# #299 tile-reskin-to-prototype — hero greeting, replaces the bare
+           "My Applications" title (prototype .sp-hero). Reset-layout stays
+           reachable as the visible top-bar button above (unchanged from the
+           #958 fix — admins must be able to find it without opening
+           anything); this hero is presentation-only. #}
+        <div class="portal-hero">
+            <h1 class="portal-hero-greeting">{{ hero_greeting }}</h1>
+            <p class="portal-hero-sub">Everything your team runs — arranged your way.</p>
+        </div>
+        {% endif %}
+
+        {% if not user.username %}
+        <div class="portal-empty">
+            <p>Login required.</p>
+            <p><a href="https://auth.{{ main_domain }}/" class="portal-link">Sign in</a></p>
+        </div>
+        {% elif not favorites and not sections %}
+        <div class="portal-empty">
+            <p>No applications available.</p>
+            <p>Contact your administrator to be added to the right groups, or
+               <a href="https://help.{{ main_domain }}" class="portal-link">visit the Help Center</a>.</p>
+        </div>
+        {% endif %}
+
+        {# Favorites row, only when there are pinned tiles. S11.3 #7 — heart, not star. #}
+        {% if favorites %}
+        {# #1054 — `id` is the rail's "Favorites" jump target (the nav entry
+           is only rendered when this section exists). #}
+        <section class="portal-section portal-section-favorites" id="favorites"
+                 data-section-id="__favorites__">
+            <h2 class="portal-section-title">♥ Favorites</h2>
+            <div class="portal-grid" data-sort-group="favorites">
+                {% for tile in favorites %}
+                    {% include "_tile.html" %}
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+
+        {# S11.5 #10 — categories side-by-side at wide screens via flex container.
+           Wraps to multi-column / single-column at narrower viewports. #}
+        <div class="portal-categories" id="categories">
+            {% for section in sections %}
+            <section class="portal-section" data-section-id="{{ section.name }}">
+                {# S11.3 #13 — strip the leading numeric prefix from the heading
+                   (manifest still uses it as the sort key). #}
+                <h2 class="portal-section-title">{{ section.display_name }}</h2>
+                <div class="portal-grid" data-sort-group="{{ section.name }}">
+                    {% for tile in section.tiles %}
+                        {% include "_tile.html" %}
+                    {% endfor %}
+                </div>
+            </section>
+            {% endfor %}
+        </div>
+    </div>{# /.portal-shell #}
+    </div>{# /.portal-main #}
+
+    {# #54 — change-password modal. Hidden by default; the .portal-change-pw
+       trigger (data-pw-open) reveals it client-side. Backdrop is a light dim
+       overlay; the dialog is dismissible (Esc / click-outside / × button).
+       The form is the shared broker form (_password_form.html), so a no-JS
+       client still has the /password page fallback. #}
+    {% if user.username %}
+    <div id="pw-modal" class="pw-modal" hidden>
+        <div class="pw-modal-backdrop" id="pw-modal-backdrop" data-pw-close></div>
+        <div class="pw-modal-dialog" role="dialog" aria-modal="true"
+             aria-labelledby="pw-modal-title">
+            <button type="button" class="pw-modal-close" data-pw-close
+                    aria-label="Close">&times;</button>
+            <h2 class="pw-modal-title" id="pw-modal-title">Change password</h2>
+            {% include "_password_form.html" %}
+        </div>
+    </div>
+
+    {# #299 — native "My Profile" dialog: portal-local display name + avatar.
+       Reuses the #54 password-modal CHROME classes (.pw-modal/-backdrop/
+       -dialog/-title/-close) for a consistent look; its own data-profile-*
+       hooks keep it independent of start-portal-pw.js's [data-pw-*]
+       selectors. This does NOT write back to Authentik/SSO identity — it
+       only personalizes how THIS portal renders the greeting/avatar chip. #}
+    <div id="profile-modal" class="pw-modal" hidden>
+        <div class="pw-modal-backdrop" id="profile-modal-backdrop" data-profile-close></div>
+        <div class="pw-modal-dialog" role="dialog" aria-modal="true"
+             aria-labelledby="profile-modal-title">
+            <button type="button" class="pw-modal-close" data-profile-close
+                    aria-label="Close">&times;</button>
+            <h2 class="pw-modal-title" id="profile-modal-title">My Profile</h2>
+            <p class="profile-modal-hint">
+                Portal-local — this only changes how your razzfazz.ai start
+                page shows your name and picture. It does not change your
+                Authentik sign-in identity.
+            </p>
+            <div class="pw-field">
+                <label class="pw-label" for="profile-display-name">Display name</label>
+                <input type="text" id="profile-display-name" name="display_name"
+                       maxlength="80" placeholder="{{ user.username }}"
+                       value="{{ saved_display_name }}">
+            </div>
+            <div class="pw-field profile-avatar-field">
+                <label class="pw-label" for="profile-avatar-input">Profile picture</label>
+                <div class="profile-avatar-row">
+                    <img id="profile-avatar-preview" class="profile-avatar-preview"
+                         src="{{ avatar_data_uri }}" alt=""
+                         {% if not avatar_data_uri %}hidden{% endif %}>
+                    <input type="file" id="profile-avatar-input" name="avatar"
+                           accept="image/png,image/jpeg,image/gif,image/webp">
+                </div>
+            </div>
+            <p id="profile-error" class="pb-error" role="alert" hidden></p>
+            <button type="button" id="profile-save" class="portal-reset pw-submit">Save</button>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{# #1054 — rail wide/narrow toggle + mobile drawer. Loaded first (and shared
+   with the App Builder) so the chrome behaves identically on both pages. #}
+<script src="/static/start-portal-rail.js"></script>
+{# SortableJS is vendored under static/vendor/ so we don't depend on a CDN
+   (M028 must work in airgapped deployments — the stack ships offline). #}
+<script src="/static/vendor/Sortable.min.js"></script>
+<script src="/static/start-portal.js"></script>
+{# #54 — password modal behaviour (open/close, live validation, AJAX submit). #}
+<script src="/static/start-portal-pw.js"></script>
+{# #299 — "My Profile" dialog behaviour (open/close, avatar preview, save). #}
+<script src="/static/start-portal-profile.js"></script>
+{% endblock %}

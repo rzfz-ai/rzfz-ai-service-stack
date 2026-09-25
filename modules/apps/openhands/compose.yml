@@ -1,0 +1,164 @@
+# ==============================================================================
+# OPENHANDS MODULE (AI Software Development Agent)
+# ==============================================================================
+# Profile: openhands
+# Description: AI software development agent. Spawns per-task agent-server
+#              containers via the host Docker socket. Gated by Authentik SSO.
+# Status: Experimental
+# Config: .env (OPENHANDS_* variables)
+# Dependencies: Docker socket (required for per-task runtime containers)
+# Upstream: https://github.com/All-Hands-AI/OpenHands (MIT)
+#
+# Security note: Docker socket access means openhands has root-equivalent
+# access to the host. SSO via Authentik is the primary access control.
+# See D016 for rationale.
+# ==============================================================================
+
+services:
+  openhands:
+    image: ghcr.io/openhands/openhands:1.6.0
+    profiles: ["openhands"]
+    container_name: openhands
+    restart: unless-stopped
+    environment:
+      # Sandbox runtime (M033 S14) — OpenHands 1.6.0 replaced the legacy CodeAct
+      # `runtime:1.6.0-nikolaik` image with the `app_server` path that spawns
+      # `ghcr.io/openhands/agent-server:<tag>` per conversation. The following
+      # legacy vars are DEAD in the app_server path (verified against 1.6.0
+      # source: config.py only reads the un-prefixed SANDBOX_* fallback block,
+      # and the runtime/local-url names have no reader there) and were removed:
+      #   SANDBOX_RUNTIME_CONTAINER_IMAGE  (no reader; CodeAct image is unused)
+      #   SANDBOX_LOCAL_RUNTIME_URL        (no reader in the docker path)
+      #   SANDBOX_USER_ID                  (agent-server manages its own uid)
+      # Pin the per-conversation agent-server image for reproducibility (else it
+      # defaults to the upstream-baked tag). Override both repo+tag together.
+      AGENT_SERVER_IMAGE_REPOSITORY: ghcr.io/openhands/agent-server
+      AGENT_SERVER_IMAGE_TAG: 1.15.0-python
+      # rc6.7 #46 v3: revert AGENT_SERVER_USE_HOST_NETWORK. The host-network
+      # path solved openhands→sandbox but broke sandbox→openhands webhook
+      # callbacks (sandbox can't resolve host.docker.internal — extra_hosts
+      # explicitly suppressed in host-network mode by upstream code, no
+      # env override exists). Instead: openhands is now joined to BOTH the
+      # compose `default` bridge (for caddy, gpustack, infisical, etc.) AND
+      # the docker `bridge` network (where openhands' spawned sandbox lives
+      # at 172.17.0.x:host_port). With openhands holding an interface on
+      # both bridges it can reach 172.17.0.1:<sandbox_port> directly without
+      # crossing bridges, and the sandbox callback to host.docker.internal
+      # resolves to the docker0 gateway (172.17.0.1) where openhands is
+      # listening on the same port mapping it always uses (3003 → 3000).
+      # The spawned sandbox calls back via webhook at
+      # f'http://host.docker.internal:{host_port}/api/v1/webhooks' — the
+      # bridge-IP monkey-patch (openhands-monkeypatch.sh) hard-pins this to
+      # openhands' own bridge IP so it lands on openhands and not whatever else
+      # owns :3000 (Gitea on our box). Pairs with a UFW rule allowing
+      # :OPENHANDS_PORT from 172.16.0.0/12 in scripts/harden-host.sh.
+      # M033 S14: the var is SANDBOX_HOST_PORT (un-prefixed). The OH_-prefixed
+      # form set previously was a no-op — config.sandbox is an abstract
+      # DiscriminatedUnionMixin that stays None without an explicit kind, so
+      # only the un-prefixed SANDBOX_* fallback block in 1.6.0 config.py is read.
+      # With the no-op name, host_port silently defaulted to 3000 (where Gitea
+      # lives on our box) for any webhook path the bridge-IP monkey-patch
+      # doesn't already hard-pin. Use the name 1.6.0 actually reads.
+      SANDBOX_HOST_PORT: ${OPENHANDS_PORT:-3003}
+      # rc6.7 #89: advertise sandbox URLs under the openhands.<domain>
+      # `/sandbox/{port}/` path so the browser can WSS-connect via
+      # Caddy on :443 instead of trying `http://localhost:<random>`
+      # (the default, which only works when the browser is on the same
+      # host). The Caddyfile openhands site block has a matching
+      # path_regexp matcher that proxies `/sandbox/<port>/<rest>` to
+      # `host.docker.internal:<port>/<rest>`. Caddy itself is on the
+      # docker default `bridge` (rc6.7 #89 in core/compose.yml) so
+      # the host-gateway routing reaches the sandbox.
+      #
+      # rc6.7 #90: env var is SANDBOX_CONTAINER_URL_PATTERN (no OH_ prefix);
+      # the OH_-prefixed form upstream documents is read by no code path
+      # in 1.6.0 — only the legacy fallback in config.py:248-250 picks the
+      # value up, and that path uses the un-prefixed name.
+      SANDBOX_CONTAINER_URL_PATTERN: https://${OPENHANDS_DOMAIN:-openhands.localhost}/sandbox/{port}
+      # Storage — workspace persisted in named volume
+      WORKSPACE_BASE: /opt/workspace
+      WORKSPACE_MOUNT_PATH: /opt/workspace
+      # Gitea integration
+      GITEA_API_TOKEN: ${GITEA_API_TOKEN:-}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-AI Agent}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-agent@localhost}
+      GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-AI Agent}
+      GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-agent@localhost}
+      # Infisical — for agent secret retrieval at task runtime
+      INFISICAL_API_URL: http://infisical:8080
+      # LLM backend — point at internal GPUStack Ollama-compatible API
+      LLM_API_KEY: ${OPENHANDS_LLM_API_KEY:-}   # #1445: minted by post-install
+      LLM_BASE_URL: ${OPENHANDS_LLM_ENDPOINT:-http://llm:8080/v1}   # #1445
+      LLM_MODEL: openai/qwen3-coder-next
+      LLM_EMBEDDING_API_KEY: ${OPENHANDS_LLM_API_KEY:-}   # #1445
+      LLM_EMBEDDING_BASE_URL: ${OPENHANDS_LLM_ENDPOINT:-http://llm:8080/v1}   # #1445
+      # #1786: the fleet-standard embedding model (standard-models.yaml
+      # `defaults.embedding`). The #1445 sweep replaced the endpoint and key
+      # here but left the model literal on nomic — a model the standard set
+      # does not deploy, and whose 2048-tok cap is exactly why the manifest
+      # moved openhands off it. A guard pins this to the manifest default.
+      LLM_EMBEDDING_MODEL: openai/qwen3-embedding
+      # Telemetry off
+      DISABLE_TELEMETRY: "true"
+    # Wrap upstream /app/entrypoint.sh with a root-side chown so /.openhands
+    # (jwt secret, settings.json) and /opt/workspace are writable by the
+    # enduser uid the upstream entrypoint switches to (SANDBOX_USER_ID=1000).
+    # Upstream entrypoint runs `su enduser …` without `-`, so HOME is not
+    # exported and Path.home()/.openhands resolves to /.openhands — hence the
+    # need to chown that root-owned image directory at runtime.
+    entrypoint: ["/bin/bash", "-c", "chown -R ${OPENHANDS_USER_ID:-1000}:${OPENHANDS_USER_ID:-1000} /.openhands /opt/workspace 2>/dev/null || true; sh /opt/openhands-monkeypatch.sh || true; exec /app/entrypoint.sh \"$$@\"", "--"]
+    # Re-declare upstream image CMD because overriding `entrypoint` clears it.
+    command: ["uvicorn", "openhands.server.listen:app", "--host", "0.0.0.0", "--port", "3000"]
+    volumes:
+      # Docker socket — required for per-task agent-server container spawning
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent workspace shared with coding agents
+      - openhands-workspace:/opt/workspace
+      # rc6.7 #46 v3: monkey-patch substituting openhands' bridge IP into the
+      # two hardcoded host.docker.internal:<port> sites so spawned sandbox
+      # containers can call back without going through the host. Idempotent.
+      # Tracked in docs/upstream-monkey-patches.md — re-validate on each
+      # OpenHands version bump.
+      - ./openhands-monkeypatch.sh:/opt/openhands-monkeypatch.sh:ro
+    # Sandbox containers (oh-agent-server-*) are spawned on the host Docker
+    # daemon and listen on a host-published port. The parent openhands
+    # container reaches them via SANDBOX_CONTAINER_URL_PATTERN (the readiness
+    # /health probe), which the docker_utils.py monkey-patch rewrites to
+    # http://host.docker.internal:<port>/. Without the host-gateway alias the
+    # lookup fails ("[Errno -2] Name or service not known") and the
+    # conversation 500s with "Sandbox entered error state". Map
+    # host.docker.internal → host-gateway so the URL resolves.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${OPENHANDS_PORT:-3003}:3000"
+    mem_limit: 1g
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --noproxy '*' -fs http://localhost:3000/api/options 2>/dev/null | grep -q version || curl --noproxy '*' -fs http://localhost:3000/ > /dev/null"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    # rc6.7 #46 v3: openhands needs to be on docker's default `bridge`
+    # network in addition to the compose default network — that's where
+    # spawned sandbox runtime containers land and openhands has to reach
+    # them by IP without crossing bridges. Compose can't attach a service
+    # to `bridge` (network-scoped aliases aren't supported on the default
+    # bridge), so the connect happens at runtime via:
+    #     docker network connect bridge openhands
+    # razzfazz-init.sh (~L2094) + razzfazz-upgrade.sh (~L2527) re-attach
+    # idempotently after any recreate (inline `docker network connect`; there
+    # is no separate scripts/openhands-attach-bridge.sh — M033 S14 corrected
+    # this stale reference). NB: the monkey-patch only fully applies when
+    # openhands already holds its 172.17.x bridge IP at entrypoint time, so the
+    # attach must precede the (re)start, which is the init/upgrade ordering.
+
+volumes:
+  openhands-workspace:

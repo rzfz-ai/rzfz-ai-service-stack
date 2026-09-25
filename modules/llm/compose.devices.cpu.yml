@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# Hardware overlay: CPU-only inference.
+# Used by the `llm-legacy` profile when HARDWARE=cpu in .env. Activated via
+# COMPOSE_FILE=compose.yml:modules/llm/compose.devices.cpu.yml.
+#
+# #1447 part b (cutover C7): `llm-cpu` was a SEPARATE profile with its own
+# service (`gpustack-cpu`) that duplicated the whole 0.7.1 control plane —
+# ports, healthcheck, volumes, the #278 guard, the worker watchdog — and
+# differed in five lines. It is folded into `gpustack-legacy` like `llm-cuda`
+# was in #1448, and this overlay carries what actually differs on a CPU box.
+#
+# The differences are not cosmetic; each one breaks the box if it is missing:
+#
+#   * the IMAGE is upstream and PULLED, not one of ours. The base service sets
+#     `pull_policy: never` (#184 WS2a: no runtime builds, no silent fetches on
+#     an installed box) — correct for `razzfazz-gpustack:*`, which only ever
+#     comes from a local build or a `docker load`. On a pulled image that same
+#     line means it can never arrive at all, so the overlay resets it.
+#   * `user:` goes back to ROOT. See the block on the service below — this is
+#     the #1513 precondition and the reason this fold needed its own PR.
+#   * the null-content patch is MOUNTED. Dockerfile.vulkan bakes it into our
+#     image; the upstream image has no such layer.
+#   * `platform` follows DOCKER_PLATFORM: the CPU line is the one that runs on
+#     a non-amd64 host (an arm64 VM), where the GPU lines cannot go.
+#
+# A CPU box without this overlay would start the AMD Vulkan build with no GPU —
+# it would answer, slowly, and nothing would say why. The service's HARDWARE
+# guard therefore checks for the mount below and refuses without it.
+
+services:
+  gpustack-legacy:
+    labels:
+      razzfazz.hardware: "cpu"
+    # Upstream slim CPU build of GPUStack 0.7.1. `!reset null` on pull_policy:
+    # the base pins `never` for our locally-built images, and this one has to
+    # be fetched.
+    image: gpustack/gpustack:${GPUSTACK_CPU_VERSION:-v0.7.1-cpu}
+    pull_policy: !reset null
+    build: !reset null
+    # The CPU line is the one that can run off amd64 (an arm64 test VM); the
+    # GPU lines cannot, so only this overlay makes the platform a knob.
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    # #536 / #1513 — CPU STAYS ROOT, deliberately, and this is the whole reason
+    # part b is its own PR.
+    #
+    # The base `gpustack-legacy` carries
+    # `user: ${GPUSTACK_UID:-1000}:${GPUSTACK_GID:-1000}` since the 2026.09
+    # fleet flip. That de-root was verified on AMD/Vulkan hardware, and it works
+    # there because Dockerfile.vulkan chowns the gpustack tree AND
+    # /var/lib/gpustack to GPUSTACK_UID at BUILD time (steps 9-10) and stamps
+    # the label ai.razzfazz.gpustack.nonroot-uid.
+    #
+    # This image is upstream and pulled. Nothing chowns its runner tree, so at
+    # worker startup gpustack's tools_manager._link_llama_box_rpc_server()
+    # cannot create its symlink inside third_party/bin/llama-box/<ver>/ and
+    # hits PermissionError (#858) — which is NOT a crash: the container stays
+    # up, healthz stays green, and every model sits at ready_replicas:0
+    # forever. Folding llm-cpu in without this line would have handed that
+    # failure mode to every CPU box, and "same image without a GPU" is not an
+    # argument here because it is a DIFFERENT image.
+    #
+    # The de-root is available at operator risk via
+    # modules/llm/compose.nonroot.yml, which names this service and documents
+    # the two chowns it needs first.
+    user: "0:0"
+    cap_add:
+      - LINUX_IMMUTABLE
+    group_add:
+      - video
+    # NOTE: no `security_opt` here. The retired `gpustack-cpu` carried
+    # `seccomp:unconfined` (GPUStack probes for GPU devices at startup whatever
+    # the mode — accepted technical debt F-015), and so does the BASE service.
+    # Compose MERGES list keys, so repeating it renders two identical entries
+    # and `docker compose config` refuses the whole project:
+    # "services.gpustack-legacy.security_opt items at 0 and 1 are equal".
+    # Measured while writing this file, not reasoned about.
+    volumes:
+      # Baked into our images at build time; the upstream image needs the mount.
+      #
+      # The path is PROJECT-ROOT relative, not overlay-relative. compose.yml
+      # pulls the module in with `include:`, so ITS `./gpustack/...` resolves
+      # against modules/llm/ — but an overlay named in COMPOSE_FILE resolves
+      # against the project root. Writing `./gpustack/...` here silently bound
+      # $STACK/gpustack/patch_null_content.py (a path that does not exist;
+      # compose creates it as an empty DIRECTORY), and the HARDWARE guard would
+      # then have found its evidence and started anyway.
+      # Measured with `docker compose config`, which prints the resolved source.
+      - ./modules/llm/gpustack/patch_null_content.py:/opt/patches/patch_null_content.py:ro

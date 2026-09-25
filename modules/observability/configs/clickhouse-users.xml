@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse USERS overrides for the razzfazz observability profile.
+  Mounted as /etc/clickhouse-server/users.d/zz-razzfazz-network.xml at boot.
+  Named `zz-...` so it sorts LAST in users.d and wins the merge over the
+  image-generated default-user.xml.
+
+  Why this file exists (#193, point 3):
+  The `otel-collector` container connects to ClickHouse over the native
+  protocol (clickhouse:9000) as the `default` user to create the otel_*
+  schema and write spans. #193 found the `default` user effectively locked
+  to localhost, so a SEPARATE container got 401/refused over the docker
+  network and OpenLIT's dashboard stayed empty. This override explicitly
+  allows the default user to authenticate from the docker bridge network.
+
+  Security posture: ClickHouse's 8123/9000 are expose-only (compose), never
+  host-published, so they are reachable ONLY from other containers on the
+  internal docker network, exactly like postgres/valkey. So `::/0` here means
+  "any container on the internal network", not "the internet". A password
+  (CLICKHOUSE_PASSWORD, minted by razzfazz-init.sh) is still required.
+-->
+<clickhouse>
+    <users>
+        <default>
+            <!-- Allow auth from the docker bridge network (container to
+                 container), not just localhost. Mirrors the upstream default
+                 users.xml networks stanza; re-asserted here so an
+                 image-generated default-user.xml cannot narrow it to
+                 localhost and lock out the collector. -->
+            <networks replace="replace">
+                <ip>::/0</ip>
+            </networks>
+        </default>
+    </users>
+    <profiles>
+        <default>
+            <!-- Per-query cap (belongs in users.d per the note in
+                 clickhouse-config.xml): stop one runaway query OOM-killing
+                 the 6g container. 2 GiB leaves headroom for merges + OS cache. -->
+            <max_memory_usage>2000000000</max_memory_usage>
+            <!-- 2026.08 system-log runaway fix. The query PROFILER samples
+                 stack traces of every query into system.trace_log, which had NO
+                 retention and grew to 1.4 BILLION rows / 22 GiB on a staging box
+                 that wasn't even being queried — the server then burned CPU
+                 perpetually MERGING it ("load without use", recurring). Turn the
+                 profiler OFF: 0 disables sampling entirely, so trace_log stops
+                 growing. This is ClickHouse-internal diagnostics, unrelated to
+                 the OpenLIT observability data. -->
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+            <!-- #868: the query-profiler off above was NOT enough. Measured on a
+                 staging box (2026-08-28), trace_log was refilling from the MEMORY
+                 profiler (trace_type Memory/MemoryPeak, ~5500 rows/s under
+                 continuous OTEL ingest): it samples a stack on every allocation,
+                 burning CPU (libunwind) and re-growing trace_log even with the
+                 query profiler off. Disable it too. total_memory_profiler_step
+                 lives in clickhouse-config.xml (server-level). -->
+            <memory_profiler_step>0</memory_profiler_step>
+            <memory_profiler_sample_probability>0</memory_profiler_sample_probability>
+            <!-- #868: the OpenLIT / otel-collector ClickHouse client re-enables
+                 these profiler settings EXPLICITLY per connection, overriding the
+                 profile default above (observed live: profile=0 yet the client
+                 kept sampling until the setting was made unchangeable). Pin all
+                 four read-only so a client value cannot turn the profiler back
+                 on. -->
+            <constraints>
+                <query_profiler_real_time_period_ns><readonly/></query_profiler_real_time_period_ns>
+                <query_profiler_cpu_time_period_ns><readonly/></query_profiler_cpu_time_period_ns>
+                <memory_profiler_step><readonly/></memory_profiler_step>
+                <memory_profiler_sample_probability><readonly/></memory_profiler_sample_probability>
+            </constraints>
+        </default>
+    </profiles>
+</clickhouse>

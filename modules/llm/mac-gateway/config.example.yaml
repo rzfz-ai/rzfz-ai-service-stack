@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# Mac LLM gateway config (LiteLLM). TEMPLATE — copy to config.yaml on first
+# `mac-llm` enable, then declare your Macs. The Config Portal panel (P2) edits
+# config.yaml for you; in P1 you hand-edit it. This file is the canonical shape
+# emitted by gen_config.build_config() — keep the two in sync.
+#
+# Each Mac × model is ONE model_list entry. Giving the SAME model_name to the
+# same model on two Macs forms ONE load-balance group (LiteLLM routes across the
+# healthy members). `model:` is the Ollama tag with an `openai/` prefix so
+# LiteLLM speaks Ollama's OpenAI-compatible /v1 endpoint. `api_key` is a
+# throwaway — Ollama ignores it, but LiteLLM requires a non-empty value.
+# ==============================================================================
+model_list: []
+  # - model_name: mac-qwen3-coder          # alias shown in Open WebUI
+  #   litellm_params:
+  #     model: openai/qwen3-coder           # the Ollama tag, openai/ prefix
+  #     api_base: http://192.0.2.194:11434/v1
+  #     api_key: "ollama"                   # Ollama ignores it; LiteLLM needs a value
+  #     # profile: chat                       # #242 sampling profile: chat (default,
+  #                                           #   box-matched temp 0.7/presence_penalty 0.0)
+  #                                           #   or extraction (deterministic; PSA/structured).
+  #                                           #   Omit → chat. Gen_config pins explicit sampling
+  #                                           #   so the Mac tag Modelfile defaults never leak in.
+  #   model_info:
+  #     mode: chat                          # #813 the model's TASK: chat | embedding | rerank.
+  #                                         #   Omit → chat. This is what decides which models
+  #                                         #   post-install registers with Dify as the 2nd
+  #                                         #   endpoint: ONLY mode=chat. Declare it on an
+  #                                         #   `ollama pull nomic-embed-text` — registering an
+  #                                         #   embedding model as a chat model leaves a broken
+  #                                         #   Dify provider entry (review #666). An unknown
+  #                                         #   value is kept verbatim and simply not
+  #                                         #   registered, so a typo stays visible.
+  # - model_name: mac-qwen3-coder          # SAME alias on a 2nd Mac = LB group
+  #   litellm_params:
+  #     model: openai/qwen3-coder
+  #     api_base: http://192.0.2.230:11434/v1
+  #     api_key: "ollama"
+
+router_settings:
+  routing_strategy: least-busy
+
+litellm_settings:
+  num_retries: 2
+  request_timeout: 600
+  # #1948: strip anything outside the OpenAI schema instead of raising — the
+  # manager's router config carries the same line for the measured reason in
+  # manager/app/proxy.py (UnsupportedParamsError on `dimensions`), and the
+  # gateway was the half without it. Measured: it does NOT strip the sampling
+  # pin from an embeddings call, so it is not what makes that pin safe.
+  drop_params: true
+
+general_settings:
+  # Components authenticate to the gateway with this master key (a stack
+  # secret). Resolved from the container env at startup — never inlined.
+  master_key: os.environ/MAC_GATEWAY_MASTER_KEY
+  background_health_checks: true
+  health_check_interval: 60

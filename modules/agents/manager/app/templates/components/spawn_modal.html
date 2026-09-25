@@ -1,0 +1,85 @@
+{# #959 Task C1 — redesigned spawn modal (replaces the OLD inline
+   `#launch-modal` presentation from `openLaunchDialog`). Per the Global
+   Constraint, this REPLACES the presentation only — the tier gate, memory
+   picker, and server contract are untouched:
+     * Type grid is bound to the SAME `cards` data the old per-card Launch
+       button used (`card.can_launch` / `card.type.id` / `card.type.display_name`
+       / `card.type.icon_url` — straight from the catalog via dashboard.py's
+       `_build_dashboard_context()`).
+     * Memory picker keeps the SAME `can_set_memory` tier gate + the SAME
+       `mem_presets` / `mem_default_gb` values (#36 / PR #84). The SERVER
+       enforces the gate regardless of what this UI renders.
+     * Confirm fires the SAME `/api/launch/<agent_type>` POST (via the
+       existing `agentAction('launch', ...)` helper in index.html) with the
+       SAME optional `{mem_gb}` body.
+   See static/dashboard.js for the open/close/select/submit wiring. #}
+<div id="spawn-modal" class="scrim" style="display:none;">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="spawn-modal-title">
+    <div class="mh">
+      <h3 id="spawn-modal-title">Launch an agent</h3>
+      <button type="button" class="x" onclick="closeSpawnModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="mb">
+      {# #1865: the whole block, label included, is hidden for a SCOPED launch
+         (opened from one agent's own Launch button) — the type is already
+         chosen, and showing a chooser of OTHER agents under the title "Launch
+         Coding agent" contradicts it. dashboard.js toggles `hidden` here. #}
+      <div id="spawn-type-block">
+        <div class="lbl">Agent type</div>
+        {# AGU-20(a): this was role="listbox" filled with <button> children. A
+           button is not a valid `option`, nothing set aria-selected, and the
+           listbox keyboard pattern (arrows + aria-activedescendant) was never
+           implemented. Native buttons in a labelled group with aria-pressed is
+           the shape that actually matches the markup — see dashboard.js. #}
+        <div class="type-grid" id="spawn-type-grid" role="group" aria-label="Agent type">
+          {% for card in cards %}
+            {% if card.can_launch %}
+            <button type="button" class="type-opt" data-launch-type="{{ card.type.id }}"
+                    data-display-name="{{ card.type.display_name }}" aria-pressed="false"
+                    onclick="selectSpawnType(this.dataset.launchType, this.dataset.displayName)">
+              {% if card.type.icon_url %}
+              <img class="ic" src="{{ card.type.icon_url }}" alt="" width="24" height="24" loading="lazy">
+              {% endif %}
+              {{ card.type.display_name }}
+            </button>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      {# #36 / PR #84 — memory governance surface, SAME tier gate as the old
+         dialog: power/admin (can_set_memory) get the picker, everyone else
+         sees the default-only note. The SERVER enforces this either way. #}
+      {% if can_set_memory %}
+      <div>
+        <div class="lbl">Memory</div>
+        <select id="launch-mem-gb">
+          {% for gb in mem_presets %}
+          <option value="{{ gb }}" {% if gb == mem_default_gb %}selected{% endif %}>{{ gb }} GB{% if gb == mem_default_gb %} (default){% endif %}</option>
+          {% endfor %}
+        </select>
+        <p class="field-note">
+          Higher limits let the agent handle bigger workloads but count against the shared budget.
+        </p>
+      </div>
+      {% else %}
+      <p class="field-note">This agent launches with the default {{ mem_default_gb }} GB memory limit.</p>
+      {% endif %}
+    </div>
+    <div class="mf">
+      {# AGU-10: opened unscoped ("+ New agent…") no type is selected and
+         confirmSpawn() returns immediately — so the button must START
+         disabled and be enabled by selectSpawnType(). #}
+      <span class="field-note" id="spawn-type-hint">Pick an agent type first.</span>
+      <button type="button" class="btn btn-secondary" onclick="closeSpawnModal()">Cancel</button>
+      <button type="button" class="btn btn-primary" id="launch-confirm-btn" onclick="confirmSpawn()" disabled>Launch agent</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Introspectable by the browser acceptance test (test_memory_governance_browser.py)
+// the same way the old dialog's flag was — the tier gate itself is SERVER-side;
+// this only controls whether the memory <select> renders.
+window._canSetMemory = {{ can_set_memory | tojson }};
+</script>

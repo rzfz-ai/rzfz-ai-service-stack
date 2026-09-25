@@ -1,0 +1,24 @@
+# ==============================================================================
+# DOCUMENT CONVERSION MODULE (Gotenberg)
+# ==============================================================================
+# Profile: gotenberg
+# API for converting documents (PDF, HTML, etc).
+# ==============================================================================
+# 8.32.0 reverted the strict-by-default SSRF guard that 8.31.0 introduced
+# (private-IP fetches by Chromium during HTML→PDF). We explicitly opt back
+# IN to the strict default by passing --chromium-deny-private-ips so a
+# malicious URL embedded in a Dify-pipeline doc can't hit our internal
+# subnets via Gotenberg's Chromium. Routed-through-SSRF-proxy traffic
+# (Dify → ssrf_proxy → gotenberg → external) keeps working; only
+# Gotenberg's own outbound private-IP fetches are blocked.
+services:
+  gotenberg:
+    image: gotenberg/gotenberg:${GOTENBERG_VERSION:-8.37.0}
+    profiles: ["gotenberg"]
+    container_name: gotenberg
+    restart: unless-stopped
+    command:
+      - "gotenberg"
+      - "--chromium-deny-private-ips"
+    ports:
+      - "127.0.0.1:${GOTENBERG_PORT:-3005}:3000"

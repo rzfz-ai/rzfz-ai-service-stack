@@ -1,0 +1,15 @@
+version: 1
+metadata:
+  name: "Google - Policies"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "Is Corporate Domain"
+    attrs:
+      execution_logging: true
+      expression: |
+        email = context.get("oauth_userinfo", {}).get("email", "")
+        print(f"DEBUG POLICY EMAIL: {email!r}")
+        return email.lower().endswith("@seqis.com")

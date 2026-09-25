@@ -1,0 +1,255 @@
+{# rzfz.ai shared standalone-login partial.
+
+   Standalone (does NOT extend razz_base.html) — used by Flask UIs that
+   serve a local-auth gate before any other content. Renders a centered
+   card on the razzfazz brand cover: a dark #296 rail head carrying the
+   red spark mark, and a white body with a single password field + submit
+   button. The container's app.py controls the form action and any error
+   message via context.
+
+   Variables:
+     title        — <title> tag (default: "rzfz.ai")
+     heading      — h1 inside the card (default: "Sign in")
+     subtitle     — short prompt under the heading (default: "Enter the admin password to continue.")
+     submit_label — button text (default: "Sign in")
+     form_action  — form action attribute (default: empty = post-to-self)
+     error        — optional error string rendered above the form
+
+   Containers using this:
+     - core/config/app/templates/auth/login.html      (extends via {% extends %})
+     - (template-ready for backup + setup if/when they add local-auth)
+
+   Originally extracted 2026-05-08 from core/config/app/templates/auth/login.html
+   (M026/S09 #5 deferred slice; GA-bug-list cleanup).
+
+   ---------------------------------------------------------------------------
+   #884 — reskinned onto the #296 design language (descoped from the #300
+   Phase 1 build, which reskinned the Config Portal shell but not this file).
+
+   TWO CONSTRAINTS SHAPE WHAT THIS LOOKS LIKE, and both are load-bearing:
+
+   1. #526's branding guard (tests/unit/branding/test_background_asset.py::
+      test_all_eight_surfaces_are_covered) names THIS FILE as one of the eight
+      surfaces that must keep referencing `razzfazz.webp`. #296's recipe for
+      the portal ground is a flat `--bg` fill — adopting it here would have
+      meant editing that surface list, which needs a branding sign-off.
+      #884 offers that as option B; this is **option A**: keep the full-bleed
+      cover as the login ground, bring the CARD onto #296. The flat `--bg`
+      token is still here — as the colour painted UNDER the cover, which is
+      what shows while the WebP is in flight.
+
+   2. The partial is STANDALONE — it links no stylesheet, because it renders
+      before auth on a page that must not depend on any other request
+      succeeding. So the #296 tokens are declared inline on `:root` rather
+      than inherited from razzfazz-base.css. They are the same values as
+      core/config/app/static/styles.css and modules/llm/manager-ui/src/
+      styles.css; keep the three in step.
+
+   The dark head strip is where #296's rail shows up on a page that has no
+   nav: same #201D22 ground, same red spark + `rzfz.ai` wordmark lockup the
+   operator meets in the app chrome one redirect later. The pre-#296 look
+   (translucent blurred panel, 12px radius, dark-on-transparent logo PNG) is
+   deliberately gone — the PNG is the same asset #300 pulled off the config
+   rail after the "logo looks crap" operator feedback.
+
+   Guards: tests/unit/common/test_884_razz_login_reskin.py (source) and
+   tests/api/razzfazz-config/test_884_login_render.py (render + parity).
+#}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ title|default('rzfz.ai') }}{% endblock %}</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='media/razzfazz-ai-favicon.png') }}">
+    <style>
+        /* #296 design tokens — same values as the shipped LLM-Manager console
+           and the Config Portal stylesheet. Declared locally because this
+           partial links no stylesheet (see the note at the top of the file). */
+        :root {
+            --razz-red: #CD1719;
+            --razz-red-hover: #b01416;
+            --razz-red-soft: rgba(205, 23, 25, 0.10);
+
+            --bg: #F1EDE9;
+            --bg-card: #FFFFFF;
+
+            --rail: #201D22;
+            --rail-ink: #ECEAE8;
+            --rail-muted: #9A9298;
+
+            --text: #1A1A1A;
+            --text-secondary: #4A4F57;
+            --text-muted: #5C636E;
+
+            --border: rgba(0, 0, 0, 0.10);
+            --border-strong: rgba(0, 0, 0, 0.14);
+
+            --error-bg: #fbe4e2;
+            --error-fg: #8f1d17;
+            --error-line: rgba(192, 39, 31, 0.28);
+
+            --radius: 10px;
+            --radius-sm: 7px;
+            --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* #526: the razzfazz.webp cover stays the login ground. `--bg` is the
+           warm #296 ground painted underneath it — visible while the WebP is
+           still loading, and the graceful floor if /branding ever 404s. */
+        body {
+            font-family: var(--font);
+            background-color: var(--bg);
+            background-image: url('{{ url_for('static', filename='media/razzfazz.webp') }}');
+            background-repeat: no-repeat;
+            background-position: center center;
+            background-attachment: fixed;
+            background-size: cover;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1.5rem;
+        }
+
+        /* Flat opaque #296 surface — no translucency, no blur. The elevation
+           is heavier than the in-app `.card` because this one floats on a
+           photograph rather than on the flat ground. */
+        .login-card {
+            width: 100%;
+            max-width: 400px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.30);
+        }
+
+        /* The dark rail, as a head strip (this page has no nav to put it in). */
+        .login-head {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 0.875rem 1.25rem;
+            background: var(--rail);
+        }
+        .login-head .brand-spark {
+            width: 22px;
+            height: 22px;
+            fill: var(--razz-red);
+            flex-shrink: 0;
+        }
+        .login-head .brand-name {
+            font-weight: 700;
+            color: var(--rail-ink);
+            letter-spacing: -0.01em;
+        }
+
+        .login-body { padding: 1.5rem 1.5rem 1.625rem; }
+
+        .login-card h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            margin-bottom: 0.25rem;
+            color: var(--text);
+        }
+        .login-card .subtitle {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+        }
+        .login-card label {
+            display: block;
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.375rem;
+            font-weight: 500;
+        }
+        .login-card input[type="password"] {
+            width: 100%;
+            padding: 0.625rem 0.75rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font: inherit;
+            font-size: 0.9375rem;
+            outline: none;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .login-card input[type="password"]:focus {
+            border-color: var(--razz-red);
+            box-shadow: 0 0 0 3px var(--razz-red-soft);
+        }
+        .login-card button {
+            width: 100%;
+            padding: 0.625rem;
+            margin-top: 1rem;
+            background: var(--razz-red);
+            color: #fff;
+            border: 1px solid var(--razz-red);
+            border-radius: var(--radius-sm);
+            font: inherit;
+            font-size: 0.9375rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .login-card button:hover {
+            background: var(--razz-red-hover);
+            border-color: var(--razz-red-hover);
+        }
+        .login-card button:focus-visible {
+            outline: 2px solid var(--razz-red);
+            outline-offset: 2px;
+        }
+        .error {
+            background: var(--error-bg);
+            border: 1px solid var(--error-line);
+            color: var(--error-fg);
+            padding: 0.5rem 0.75rem;
+            border-radius: var(--radius-sm);
+            font-size: 0.8125rem;
+            margin-bottom: 1rem;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .login-card input[type="password"],
+            .login-card button { transition: none; }
+        }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <div class="login-card">
+        <div class="login-head">
+            {# The #296 spark — byte-identical to the mark on the Config,
+               Agent-Manager and LLM-Manager rails. #}
+            <svg class="brand-spark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z"/></svg>
+            <span class="brand-name">rzfz.ai</span>
+        </div>
+        <div class="login-body">
+            <h1>{% block heading %}{{ heading|default('Sign in') }}{% endblock %}</h1>
+            <p class="subtitle">{% block subtitle %}{{ subtitle|default('Enter the admin password to continue.') }}{% endblock %}</p>
+            {% if error %}
+            <div class="error" role="alert">{{ error }}</div>
+            {% endif %}
+            <form method="POST"{% if form_action %} action="{{ form_action }}"{% endif %}>
+                {# Extension point for containers that need extra hidden inputs
+                   INSIDE the form — e.g. a `_csrf_token` field once the container
+                   has turned on razzfazz_common.csrf.enable_csrf (core/config,
+                   CFG-1/#1018). Empty by default, so containers that haven't are
+                   completely unaffected. #}
+                {% block form_fields %}{% endblock %}
+                <label for="password">Admin password</label>
+                <input type="password" id="password" name="password" autofocus required>
+                <button type="submit">{{ submit_label|default('Sign in') }}</button>
+            </form>
+            {% block extra_card %}{% endblock %}
+        </div>
+    </div>
+</body>
+</html>

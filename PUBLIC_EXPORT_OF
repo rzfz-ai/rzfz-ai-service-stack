@@ -1,0 +1,8 @@
+# This tree is a curated export of the rzfz.ai stack's development repository,
+# written by its publisher. The commit ids of this public repository exist only
+# here; the lines below name the development commit the export was cut from.
+# rzfz init / rzfz upgrade record source_commit in .env as RAZZFAZZ_SOURCE_COMMIT
+# beside RAZZFAZZ_COMMIT (this checkout's own commit). Quote both to support.
+source_commit=ff3557eb76834ddf4700c2114f5e434a9460d7a6
+source_describe=2026.09-ga.3
+source_worktree=clean

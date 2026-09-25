@@ -1,0 +1,430 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# LLM BACKEND MODULE (GPUStack)
+# ==============================================================================
+# Profiles (M018, post-consolidation):
+# - llm: Standard path. Upstream gpustack/gpustack:v2.1.x with custom backends
+#        registered by llm/gpustack/init-backends.py. Hardware (AMD Strix Halo,
+#        NVIDIA, CPU) selected via HARDWARE env var + a device overlay file
+#        (llm/compose.devices.{amd,nvidia,cpu}.yml). One service definition
+#        covers all hardware variants.
+# - llm-legacy: THE optional GPUStack 0.7.1 backend module (#1448 / cutover C8,
+#               operator decision D4). ONE profile, one service, the hardware
+#               chosen by HARDWARE + the device overlay
+#               modules/llm/compose.devices.<HARDWARE>.yml:
+#                 amd    → custom AMD-Vulkan build (Dockerfile.vulkan)
+#                 nvidia → custom CUDA llama.cpp b9851/sm_120 (Dockerfile.cuda)
+#               Before C8 these were two profiles (`llm-legacy` / `llm-cuda`)
+#               with two near-identical service definitions; they differed only
+#               in image, device wiring and healthcheck retries — everything the
+#               overlay mechanism already models. `llm-cuda` is gone; an
+#               existing box is rewritten to llm-legacy + HARDWARE=nvidia by
+#               cli/upgrade.sh. Same container_name as the other GPUStack
+#               services, so the profiles stay mutually exclusive.
+# - llm-cpu: DEPRECATED — kept for one release for in-place upgrade
+#            compatibility. New installs should use `llm` + HARDWARE=cpu.
+#            Existing `llm-cpu` operators are auto-migrated by
+#            razzfazz-upgrade.sh.
+#
+# LLM backend services using GPUStack to serve local models compatible with
+# the OpenAI API.
+#
+# GPUStack Mode (GPUSTACK_MODE in .env):
+# - standalone: GPUSTACK_HOST_BIND=127.0.0.1 (default, no external workers).
+# - master:     GPUSTACK_HOST_BIND=<specific LAN IP> — workers connect here.
+#               Do NOT use 0.0.0.0 — pin to one interface so external scanners
+#               don't see gpustack admin UI. Add ufw rules permitting 9090 +
+#               10150-10151 from worker IPs only.
+# - worker:     GPUSTACK_HOST_BIND=127.0.0.1 (no inbound from peers; outbound
+#               only to GPUSTACK_MASTER_SERVER_URL).
+#
+# F-RC5-1 (rc5.1): renamed from GPUSTACK_BIND to GPUSTACK_HOST_BIND because the
+# old name was overloaded — set during M018 to 0.0.0.0 to make the embedded
+# worker work, but the env var was ALSO used by compose `ports:` as the
+# host-side bind, accidentally exposing the admin UI to the LAN. The two roles
+# are now decoupled: GPUSTACK_HOST_BIND controls the host-side port mapping
+# (this file); the in-container gpustack server does not read GPUSTACK_BIND
+# (uses its own default 0.0.0.0 inside the container, required for docker
+# port forwarding to work). The legacy GPUSTACK_BIND key remains in .env for
+# backward compat but has no effect on the deployment.
+# ==============================================================================
+services:
+  # ----------------------------------------------------------------------------
+  # gpustack-legacy: THE GPUStack 0.7.1 backend (#1448 / cutover C8, decision
+  # D4). One service for every hardware line; the DEVICE OVERLAY
+  # modules/llm/compose.devices.<HARDWARE>.yml supplies what actually differs:
+  #
+  #   amd     image gpustack:vulkan (Dockerfile.vulkan) + /dev/kfd,/dev/dri,
+  #           render gid, Vulkan ICD mounts, healthcheck retries 10 (the
+  #           gfx1151 kworker storm needs the long window)
+  #   nvidia  image gpustack:cuda  (Dockerfile.cuda)  + runtime: nvidia,
+  #           NVIDIA_* env, healthcheck retries 5 (discrete GPU, no storm)
+  #
+  # WHY AN OVERLAY AND NOT TWO SERVICES: the pre-C8 `gpustack-legacy` and
+  # `gpustack-cuda` were byte-identical apart from those lines — same 0.7.1
+  # control plane, same ports, same #278 guards, same command. Two profiles for
+  # one module cost a line in every mutual_exclusion list, every profile-token
+  # tuple, every expectation table and every wizard. The overlay mechanism that
+  # already carries HARDWARE for the `llm` profile carries this one too.
+  #
+  # The defaults below are the AMD ones ON PURPOSE: a box whose COMPOSE_FILE
+  # has not been repaired yet (upgrade not run) then still gets the image it
+  # had before, and the startup guard in `command:` refuses loudly instead of
+  # silently serving on the CPU. Do not "simplify" them away.
+  #
+  # #270 SOVEREIGNTY: `image:` is a BARE LOCAL NAME with no registry host, the
+  # same house convention every other locally built image uses
+  # (razzfazz-llm-manager, razzfazz-coding-tools, razzfazz-stack-moltis, …) and
+  # the one config/manifests/versions.json already records under
+  # custom_built.razzfazz-gpustack. Until 2026-09-04 `image:` named
+  # the private SEQIS GitLab Container Registry; the operator retired that
+  # registry ("komplett outdated … seit Monaten nicht im Einsatz, wir liefern
+  # immer alle images mit, auch schon immer"), so a customer-visible artefact
+  # must not carry its name any more. `pull_policy: never` below stays
+  # load-bearing: it is what makes this image OFFLINE-BUNDLE-ONLY on every box
+  # — never fetched by `docker compose pull` or `up`/`--force-recreate`, only
+  # ever produced by the local `build:` below (bases are public Docker Hub
+  # images) or loaded from an offline `--include-images` package. With a bare
+  # name it is doubly load-bearing: without it, a pull would resolve
+  # `razzfazz-gpustack` to Docker Hub's `library/razzfazz-gpustack`. Do NOT
+  # relax it to `missing`/`always` — see
+  # tests/unit/consistency/test_270_no_private_registry.py, which guards both
+  # the name and the pull policy. Existing boxes are retagged from the old name
+  # by cli/upgrade.sh::migrate_gpustack_image_rename (Step 5b.2).
+  # ----------------------------------------------------------------------------
+  gpustack-legacy:
+    # #1448: AMD default; modules/llm/compose.devices.nvidia.yml overrides it
+    # with the CUDA image + Dockerfile.cuda when HARDWARE=nvidia.
+    image: razzfazz-gpustack:vulkan
+    build:
+      context: ./gpustack
+      dockerfile: Dockerfile.vulkan
+    pull_policy: never
+    profiles: ["llm-legacy"]
+    container_name: gpustack
+    platform: linux/amd64
+    restart: unless-stopped
+    # ==========================================================================
+    # #536 FLEET FLIP (2026.09): this variant runs NON-ROOT by default.
+    # ==========================================================================
+    # #536 VERIFIED-LIVE 2026-08-27 on 0.91 (AMD Strix Halo gfx1151, this exact
+    # image — gpustack v0.7.1 + custom Vulkan build), twice:
+    #   1. runtime `chown -R 1000:1000 <gpustack tree>` + restart
+    #      -> ready_replicas:1, rerank HTTP 200 ON GPU;
+    #   2. image rebuilt with the baked chown, `--force-recreate` (runtime chown
+    #      discarded) -> worker READY after ~185 s with NO manual step.
+    # The expected RENDER_GID/GPU break (rc6.7 #63, ACCEL_WORKING -13) did NOT
+    # occur: supplementary groups from `group_add` apply regardless of `user:`,
+    # so /dev/kfd + /dev/dri stay reachable via the render gid below. The real
+    # blocker was IMAGE-side and is fixed in Dockerfile.vulkan (runner tree +
+    # /var/lib/gpustack owned by GPUSTACK_UID at build time).
+    #
+    # THREE prerequisites, all handled — do not de-root a box that misses one:
+    #   1. RENDER_GID correct for the host  -> group_add below; cli/init.sh
+    #      detects it, cli/upgrade.sh (Step 5b.1) re-detects on every upgrade.
+    #   2. gpustack-data owned by GPUSTACK_UID -> fresh boxes inherit it from
+    #      the image's /var/lib/gpustack; EXISTING boxes are re-owned once by
+    #      cli/upgrade.sh Step 7c (gpustack_nonroot_ownership_migration).
+    #   3. in-image gpustack tree owned by GPUSTACK_UID -> Dockerfile.vulkan;
+    #      Step 7c refuses to flip an image without the nonroot-uid label and
+    #      keeps that box on root rather than hanging it at ready_replicas:0.
+    #
+    # OPT-OUT (one line, no COMPOSE_FILE surgery): set GPUSTACK_UID=0 and
+    # GPUSTACK_GID=0 in .env and recreate — the container is root again.
+    # The other gpustack variants are NOT flipped; see their headers and
+    # modules/llm/compose.nonroot.yml (the opt-IN overlay for those).
+    user: "${GPUSTACK_UID:-1000}:${GPUSTACK_GID:-1000}"
+    # autoheal label REMOVED 2026-05-10. On Strix Halo (gfx1151) under
+    # sustained inference the amdgpu kworker storm pegs healthz for
+    # >5 min during big-model concurrent load (gemma4 + qwen3.6 caught
+    # autoheal even with retries=10 / start_period=300s). autoheal kills
+    # gpustack mid-storm → all 5 spawned llama-server children get
+    # SIGTERM'd → models reload → another storm. Net: autoheal turns a
+    # transient soft-hang into a cascading outage. `restart: unless-stopped`
+    # already catches real crashes; rely on that. If gpustack genuinely
+    # hangs (stack trace stuck, not storm-driven), operator can
+    # `docker restart gpustack` manually.
+    # labels:
+    #   autoheal: "true"
+    healthcheck:
+      # On Strix Halo (gfx1151) + 6.17 in-tree amdgpu, loading 5+ large GGUFs
+      # at startup triggers a transient amdgpu/TTM kworker burst that pegs
+      # the box for 60–180 s while gpustack's healthz endpoint stalls. With
+      # the previous timing (start_period 60 s, timeout 10 s, retries 3) the
+      # autoheal sidecar would kill gpustack at ~150 s — right when models
+      # were finishing first load — restarting the storm in a loop. Bump
+      # start_period to 300 s and timeout to 30 s; retries stay at 3 so a
+      # genuinely hung gpustack is still caught within ~90 s after the
+      # grace window. See memory project_strix_halo_kworker_storm.md.
+      # Worker mode listens on :10150 (worker API); master/standalone on
+       # :${GPUSTACK_PORT} (admin). Probe the right one per mode.
+      test: ["CMD-SHELL", "if [ \"$$GPUSTACK_MODE\" = worker ]; then curl --noproxy '*' -sf http://127.0.0.1:10150/healthz || exit 1; else curl --noproxy '*' -sf http://127.0.0.1:$$GPUSTACK_PORT/healthz || exit 1; fi"]
+      interval: 30s
+      timeout: 30s
+      # retries 10 (was 3): on Strix Halo (gfx1151) under sustained inference,
+      # the amdgpu kworker storm can pin sshd/healthz for 60-180 s while
+      # llama-server allocates GPU buffers. With retries=3, autoheal kills
+      # gpustack at ~90 s of unhealthy — which kills all 5 model children
+      # via SIGTERM (restart_count stays 0 because autoheal != gpustack
+      # controller restart) → models get re-loaded → another storm.
+      # Caught on worker-box-1 during concurrent gemma4+qwen3.6 inference.
+      # 10 retries = 5 min of consistent unhealth required; gives storms
+      # enough time to complete. start_period still protects fresh boots.
+      retries: 10
+      start_period: 300s
+    ports:
+      # Main API port - exposed for external worker connections
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:${GPUSTACK_PORT:-9090}:${GPUSTACK_PORT:-9090}"
+      # Worker ports - exposed for external worker connections
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10150:10150"      # Worker port
+      - "${GPUSTACK_WORKER_HOST_BIND:-0.0.0.0}:10151:10151"      # Worker metrics
+      # Inference service ports - exposed for worker communication
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40000-40063:40000-40063"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40064-40095:40064-40095"
+      # Ray ports for distributed inference
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:8265:8265"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:40096-40103:40096-40103"
+      - "${GPUSTACK_HOST_BIND:-127.0.0.1}:52365:52365"
+    # #1448: cap_add / devices / group_add and the Vulkan ICD mounts are AMD's
+    # and live in modules/llm/compose.devices.amd.yml. Listing /dev/kfd here
+    # would make the service unstartable on an NVIDIA box (the device does not
+    # exist), which is exactly why the two profiles could not be merged before.
+    # SECURITY: seccomp:unconfined is required for GPU access (Vulkan/ROCm syscalls).
+    # GPU inference engines (llama-server, llama-box) need low-level GPU memory management
+    # syscalls that are blocked by the default seccomp profile. A custom seccomp profile
+    # allowing only GPU-specific syscalls would be ideal but is not yet available.
+    # Accepted technical debt — tracked as F-015.
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      # #1448: the Vulkan ICD + host libdir mounts are AMD's — overlay.
+      - gpustack-data:/var/lib/gpustack
+      # #278 ask 1 — read-only DB-major guard, run before start.
+      - ./gpustack/db_major_guard.py:/opt/rzfz/db_major_guard.py:ro
+      # F-A3: no raw socket — talk to docker-socket-proxy via DOCKER_HOST below
+      - ./jinja:/opt/jinja:ro
+    env_file:
+      - ../../.env
+    environment:
+      # F-A3: talk to docker-socket-proxy instead of raw /var/run/docker.sock
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      # #278: the startup guard needs to see which profile the box actually runs.
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      # #1448: the hardware guard below compares this against what is actually
+      # mounted, so a missing device overlay is a loud refusal, not a silent
+      # CPU fallback.
+      HARDWARE: ${HARDWARE:-amd}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # #278 — three services share `container_name: gpustack`, so
+        # `docker compose up -d <name>` starts THIS one even when the box's
+        # active profile is a different GPUStack variant: Compose v2 starts an
+        # explicitly named service regardless of its profile. On the Care
+        # Solutions box that pointed 2.x at a 0.7.1 gpustack_db, alembic
+        # migrated it, and the 0.7.1 hard-hold was violated on production data.
+        #
+        # Refuse on a CONFLICT, never on absence: `docker compose --profile X
+        # up -d` leaves COMPOSE_PROFILES empty and has to keep working. Only an
+        # ACTIVE competing profile is evidence of a mistake.
+        case ",$${COMPOSE_PROFILES:-}," in
+          *,llm,*|*,llm-cpu,*)
+            # RETIRED tokens. #1447 removed `llm` (GPUStack 2.x) and folded
+            # `llm-cpu` into THIS service; a box carrying either has not been
+            # migrated. Before the fold the arm meant "another VARIANT is
+            # selected" and refused so two services could not fight over
+            # gpustack_db (#278). There is one GPUStack service now, so the
+            # reason changed: an un-migrated box carries a COMPOSE_FILE and a
+            # HARDWARE value written for a different shape, and starting anyway
+            # is how it gets the wrong image on the wrong hardware.
+            echo "REFUSING to start (profile llm-legacy): COMPOSE_PROFILES still names a RETIRED profile ('llm' or 'llm-cpu') — this box has not been migrated (#1447)." >&2
+            echo "Run 'rzfz upgrade' — it rewrites the token, sets HARDWARE and repairs COMPOSE_FILE." >&2
+            exit 1 ;;
+          *,llm-cuda,*)   # RETIRED token — see #1448
+            # #1448: llm-cuda was merged into llm-legacy (decision D4). A box
+            # still carrying the retired token has not been migrated — starting
+            # here would run the AMD image on an NVIDIA box.
+            echo "REFUSING to start (profile llm-legacy): COMPOSE_PROFILES still names the RETIRED profile 'llm-cuda' (#1448)." >&2
+            echo "Run 'rzfz upgrade' — it rewrites llm-cuda to llm-legacy, sets HARDWARE=nvidia and repairs COMPOSE_FILE." >&2
+            exit 1 ;;
+        esac
+        # #1448 — the hardware guard. This service is hardware-neutral; the
+        # device overlay modules/llm/compose.devices.$${HARDWARE}.yml supplies
+        # the image and the device wiring. If COMPOSE_FILE does not carry the
+        # overlay, the container still starts — on the wrong image, without a
+        # GPU — and answers requests slowly instead of failing. That silence is
+        # what the merge could otherwise buy us, so: check the evidence the
+        # overlay leaves behind and refuse without it.
+        case "$${HARDWARE:-amd}" in
+          amd)
+            if [ ! -e /dev/kfd ]; then
+              echo "FATAL(#1448): HARDWARE=amd but /dev/kfd is not mounted — the device overlay is missing from COMPOSE_FILE." >&2
+              echo "Set COMPOSE_FILE=compose.yml:modules/llm/compose.devices.amd.yml in .env (or run 'rzfz upgrade', which repairs it) and start again." >&2
+              exit 1
+            fi ;;
+          nvidia)
+            if ! command -v nvidia-smi >/dev/null 2>&1; then
+              echo "FATAL(#1448): HARDWARE=nvidia but the nvidia runtime is not active (no nvidia-smi in the container) — the device overlay is missing from COMPOSE_FILE." >&2
+              echo "Set COMPOSE_FILE=compose.yml:modules/llm/compose.devices.nvidia.yml in .env (or run 'rzfz upgrade', which repairs it) and start again." >&2
+              exit 1
+            fi ;;
+          cpu)
+            # #1447 part b: the CPU line is served by THIS service now. Its
+            # overlay supplies the upstream v0.7.1-cpu image (a PULLED image,
+            # so it also undoes the base `pull_policy: never`) and mounts the
+            # null-content patch that the local builds bake in. That mount is
+            # the evidence the overlay leaves behind, and without it this
+            # container would run the AMD Vulkan build on a box with no GPU —
+            # slowly, and without saying so.
+            if [ ! -e /opt/patches/patch_null_content.py ]; then
+              echo "FATAL(#1447): HARDWARE=cpu but the CPU overlay is missing from COMPOSE_FILE — the GPU image would start on a CPU box." >&2
+              echo "Set COMPOSE_FILE=compose.yml:modules/llm/compose.devices.cpu.yml in .env (or run 'rzfz upgrade', which repairs it) and start again." >&2
+              exit 1
+            fi
+            python3 /opt/patches/patch_null_content.py || true ;;
+        esac
+        # #278 ask 1 — the layer BELOW the profile assertion above. That one
+        # refuses the known bad invocation; this one asks the question that
+        # actually decides whether damage happens — does this database belong
+        # to my major? — so it holds however the container was launched
+        # (`docker run`, an unset COMPOSE_PROFILES, a hand-written unit).
+        # Fail-open by design: it refuses only on a positive, unambiguous
+        # mismatch. See the script header.
+        python3 /opt/rzfz/db_major_guard.py || exit 1
+        if [ "$${GPUSTACK_MODE}" = "worker" ] && [ -n "$${GPUSTACK_MASTER_SERVER_URL}" ]; then
+          # Startup cleanup: ensure no leftover processes from a crashed run
+          pkill -9 -f llama-server 2>/dev/null || true
+          pkill -9 -f rpc-server 2>/dev/null || true
+
+          # Background watchdog: if master goes down (e.g. restarted), kill all local
+          # model instances to prevent OOM when master comes back and schedules them again.
+          (
+            MASTER_HEALTH_URL="$${GPUSTACK_MASTER_SERVER_URL%%/v1*}/healthz"
+            while true; do
+              if ! curl -sf "$$MASTER_HEALTH_URL" > /dev/null; then
+                echo "[watchdog] Master is unreachable! Killing all llama-server instances to prevent OOM..."
+                pkill -9 -f llama-server 2>/dev/null || true
+                pkill -9 -f rpc-server 2>/dev/null || true
+              fi
+              sleep 10
+            done
+          ) &
+
+          exec gpustack start \
+            --port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --server-url "$${GPUSTACK_MASTER_SERVER_URL}" \
+            --token "$${GPUSTACK_MASTER_SERVER_TOKEN}" \
+            --worker-ip "$${GPUSTACK_WORKER_IP}" \
+            --worker-name "$${GPUSTACK_WORKER_NAME:-$$(hostname)}"
+        else
+          unset GPUSTACK_WORKER_IP
+          unset GPUSTACK_WORKER_NAME
+          # #278 schema-line guard: refuse to start if the shared gpustack_db was
+          # initialized by a different GPUStack schema line (0.7.x vs 2.x). A
+          # mismatched binary runs alembic on startup and CORRUPTS the DB — see
+          # reference_gpustack_legacy_service_name / project_gpustack_container_layer_corrupt_alembic.
+          # This makes the `docker compose up -d gpustack` footgun fail safe.
+          GUARD_FILE=/var/lib/gpustack/.razzfazz-schema-line
+          GUARD_PREV="$$(cat "$$GUARD_FILE" 2>/dev/null || true)"
+          if [ -n "$$GUARD_PREV" ] && [ "$$GUARD_PREV" != "v0.7" ]; then
+            echo "FATAL(#278): gpustack_db was initialized by GPUStack schema line '$$GUARD_PREV' but this container is 'v0.7'. Refusing to start to avoid DB corruption. On an llm-legacy box start with 'docker compose up -d' (NOT 'up -d gpustack', which selects the v2.x service). To switch lines intentionally: DROP+CREATE gpustack_db and 'rm $$GUARD_FILE'." >&2
+            exit 1
+          fi
+          echo "v0.7" > "$$GUARD_FILE" 2>/dev/null || true
+          # #276: advertise loopback so the embedded worker's registration +
+          # self-healthcheck stay on 127.0.0.1 (exact-host NO_PROXY match). Behind
+          # a corporate proxy, an auto-detected bridge IP (172.16/12) is a CIDR
+          # that httpx does NOT bypass → worker stuck Pending. 0.7.x runs the
+          # worker in-container, so loopback is correct (unlike v2.x host-net runners).
+          exec gpustack start \
+            --port $${GPUSTACK_PORT} \
+            --database-url "$${GPUSTACK_DATABASE_URL}" \
+            --bootstrap-password "$${GPUSTACK_ADMIN_PASSWORD}" \
+            --worker-ip 127.0.0.1
+        fi
+    # #36 security-review — also join coding-agents so sandboxed agents reach gpustack.
+    networks:
+      - default
+      - coding-agents
+      # W4a (#256) — assistant fence net (hermes reaches gpustack by name).
+      - agent-assistants
+      # #1016: reach the isolated docker-socket-proxy (embedded-worker
+      # self-healthcheck + model-sync register via DOCKER_HOST).
+      - docker-ctl
+
+  model-sync-legacy:
+    build:
+      context: ./sync_models
+      dockerfile: Dockerfile.sync_models
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["llm-legacy"]
+    container_name: model-sync
+    restart: unless-stopped
+    environment:
+      - GPUSTACK_URL=http://gpustack:${GPUSTACK_PORT:-9090}/v1-openai/models
+      - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
+      - DB_HOST=postgres
+      - DB_NAME=${OPENWEBUI_DB:-openwebui_db}
+      - DB_USER=${POSTGRES_USER:-docker}
+      - DB_PASS=${POSTGRES_PASSWORD:-}
+    env_file:
+      - ../../.env
+    depends_on:
+      gpustack-legacy:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+
+  ollama-proxy:
+    image: eyalrot2/ollama-openai-proxy:0.7.0
+    # #1445 / D5: the Ollama-protocol access on :11434 belongs to the LLM Manager
+    # (the only front, #979); the proxy runs with the manager, not with GPUStack.
+    profiles: ["llm-manager"]
+    container_name: ollama-proxy
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_BASE_URL=http://llm:8080/v1   # #1445: straight to the manager; the Caddy :8989 GPUStack adapter is gone
+      # rc6.7 #61/#62 unified Open WebUI ↔ GPUStack auth on a single
+      # GPUSTACK_API_KEY. The legacy GPUSTACK_OPENAI_API_KEY var was
+      # dropped from .env.example; pre-rc6.9 ollama-proxy still read
+      # the legacy var here, so a fresh install (no GPUSTACK_OPENAI_API_KEY
+      # in .env) hit "OPENAI_API_KEY cannot be empty" on first boot.
+      # rc6.9 finishes the rename: ollama-proxy now reads the same
+      # canonical key everything else uses.
+      # #2036: the real key is minted by post-install (wire_llm_manager_rag_consumers),
+      # which runs AFTER init has started this container. The image refuses an
+      # empty OPENAI_API_KEY (pydantic: "cannot be empty") and restart:
+      # unless-stopped turns that into a crash loop for the whole init->post-install
+      # gap - measured 14 and 17 restarts on 0.175 and 0.79. rc6.9 fixed the same
+      # loop once by renaming the variable; the gap is the cause, not the name. So
+      # the container starts on a value that can never authenticate (the manager's
+      # keys start with rzfz-sk-) and answers 401 until post-install mints the key
+      # into .env and recreates it. .env itself stays empty, which is what tells
+      # post-install the key is not minted yet.
+      - OPENAI_API_KEY=${OLLAMA_PROXY_LLM_API_KEY:-unminted-post-install-mints-this-key}   # #1445 / #2036
+    env_file:
+      - ../../.env
+    ports:
+      - "127.0.0.1:11434:11434"
+
+networks:
+  # #36 security-review — shared egress-controlled net (declared in
+  # core/compose.yml). Compose merges the identical `name:`-keyed declaration.
+  coding-agents:
+    name: coding-agents
+    driver: bridge
+  agent-assistants:
+    name: agent-assistants
+    driver: bridge
+  # #1016 — isolated control-plane net for the socket proxy (declared in
+  # core/compose.yml). Compose merges this identical name-keyed declaration.
+  docker-ctl:
+    name: docker-ctl
+    driver: bridge
+    internal: true

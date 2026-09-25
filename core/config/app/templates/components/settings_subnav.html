@@ -1,0 +1,49 @@
+{# #300-followup (double-highlight fix, operator feedback): secondary
+   master-detail sub-pane for the Settings group. The dark rail now carries
+   a SINGLE "Settings" item (components/nav.html) active for the whole
+   /settings/* (+ /mac-backends) group; this pane lists the individual
+   settings sub-pages and highlights the EXACT current one — so
+   /settings/domain activates "Domain & TLS" here and "Settings" on the
+   rail, never two rail entries at once (the old bug: two separate rail
+   entries both pointed at settings.domain at once).
+
+   Included from base.html ONLY when request.path is a settings route
+   (starts with /settings or /mac-backends) — see the conditional around
+   the include tag in base.html. Every link + gate below is the exact
+   route/profile-gate the old flat rail entries carried; only the
+   presentation (flat rail item -> sub-pane item) changed.
+
+   Jinja comment (not an HTML comment) deliberately: this is documentation
+   for template maintainers, not markup meant to reach the rendered page. #}
+<div class="subnav-label">Settings</div>
+<a href="{{ url_for('settings.domain') }}" class="subnav-link {% if request.path == '/settings/domain' %}active{% endif %}">Domain &amp; TLS</a>
+<a href="{{ url_for('settings.auth') }}" class="subnav-link {% if request.path == '/settings/auth' %}active{% endif %}">Authentication</a>
+<a href="{{ url_for('settings.smtp') }}" class="subnav-link {% if request.path == '/settings/smtp' %}active{% endif %}">Email (SMTP)</a>
+{# #976: on a manager-only box GPUStack isn't running — surface the LLM Manager
+   (its console owns models/GPU/workers) instead of a dead-end GPUStack settings
+   page. Keep GPUStack when a gpustack profile is active. Relocated from the flat
+   rail (components/nav.html) into this sub-pane after the #981 Settings refactor. #}
+{# CFG-16 (inverted by #1444, cutover C4): llm.<domain> IS the LLM Manager now
+   (LLM_DOMAIN); llm-manager.<domain> 301s there for one cycle, and GPUStack's
+   UI moved to gpustack.<domain>. Matches fragments/llm_manager_models.html. #}
+{% if 'llm-manager' in enabled_profiles %}
+<a href="{% if main_domain %}https://llm.{{ main_domain }}/{% else %}#{% endif %}" class="subnav-link"{% if main_domain %} target="_blank" rel="noopener"{% endif %}>LLM Manager</a>
+{% else %}
+<a href="{{ url_for('settings.gpustack') }}" class="subnav-link {% if request.path == '/settings/gpustack' %}active{% endif %}">GPUStack</a>
+{% endif %}
+<a href="{{ url_for('settings.secrets_page') }}" class="subnav-link {% if request.path == '/settings/secrets' %}active{% endif %}">Secrets</a>
+{% if 'cognee' in enabled_profiles or 'lightrag' in enabled_profiles %}
+<a href="{{ url_for('settings.rag_models') }}" class="subnav-link {% if request.path == '/settings/rag-models' %}active{% endif %}">RAG Models</a>
+{% endif %}
+{% if 'llm' in enabled_profiles or 'llm-legacy' in enabled_profiles or 'llm-cpu' in enabled_profiles %}
+<a href="{{ url_for('settings.sideload_model') }}" class="subnav-link {% if request.path == '/settings/sideload-model' %}active{% endif %}">Sideload Model</a>
+{% endif %}
+{% if 'agents' in enabled_profiles %}
+<a href="{{ url_for('settings.agents') }}" class="subnav-link {% if request.path == '/settings/agents' %}active{% endif %}">Personal Agents</a>
+{% endif %}
+{% if 'mcp' in enabled_profiles %}
+<a href="{{ url_for('settings.mcp_integrations') }}" class="subnav-link {% if request.path == '/settings/mcp-integrations' %}active{% endif %}">MCP Integrations</a>
+{% endif %}
+{% if 'mac-llm' in enabled_profiles %}
+<a href="{{ url_for('mac_backends.index') }}" class="subnav-link {% if request.path.startswith('/mac-backends') %}active{% endif %}">Mac LLM</a>
+{% endif %}

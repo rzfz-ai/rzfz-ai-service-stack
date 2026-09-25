@@ -1,0 +1,66 @@
+{# AGU-12 (#1040), partial — DELIBERATELY still standalone.
+
+   The review asked for this page to extend base_shell.html like every other
+   surface. It does not, and that is a considered decision: `error.html` is the
+   generic failure surface (rendered from the 403/404 paths in
+   blueprints/dashboard.py and blueprints/admin.py), and base_shell inherits
+   `razz_base.html`, which reaches this app only because app/__init__.py splices
+   razzfazz_common's template dir onto the Jinja loader and registers its
+   context processor. Making the ERROR page depend on that chain means a failure
+   in exactly that chain turns a clean 403 into a 500 — which is precisely what
+   happened when it was converted (tests/unit/agent-manager/
+   test_admin_terminal_dashboard_anchor.py and test_portal_tree.py build bare
+   Flask apps and assert 403 at the ingress anchor; they got 500s from
+   `TemplateNotFound: razz_base.html`). The failure surface has to be the most
+   robust page in the app, not the most coupled one.
+
+   What IS fixed here, which is the substance of the finding:
+     * `<meta name="viewport">` — the page was unusable on a phone (razz_base
+       supplies this for every shell page; a standalone page must set it).
+     * the shared brand chrome (spark + wordmark) and the `.card` / `.btn`
+       visual language, so it no longer reads as a different application.
+   admin/audit.html — the other half of AGU-12, and the worse one, because it is
+   reached from INSIDE the reskinned Admin shell — is fully converted.
+#}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - razzfazz.ai Agents</title>
+    <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v={{ stack_version|default('0') }}">
+    <style>
+        /* Self-contained: this page must render even when the shared shell
+           stylesheet or template loader is unavailable. */
+        body { margin: 0; background: #F1EDE9; color: #1A1A1A;
+               font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+        .err-wrap { max-width: 640px; margin: 0 auto; padding: 48px 20px; }
+        .err-brand { display: flex; align-items: center; gap: 9px; margin-bottom: 22px;
+                     font-weight: 700; letter-spacing: -.01em; }
+        .err-brand svg { fill: #CD1719; }
+        .err-card { background: #FFFFFF; border: 1px solid rgba(0,0,0,.10);
+                    border-radius: 12px; padding: 22px 24px; }
+        .err-card h1 { margin: 0 0 8px; font-size: 1.2rem; }
+        .err-card p { margin: 0 0 18px; color: #4A4F57; }
+        .err-back { display: inline-block; text-decoration: none; font-weight: 600;
+                    font-size: .88rem; padding: 7px 14px; border-radius: 8px;
+                    border: 1px solid rgba(0,0,0,.14); color: #1A1A1A; background: #FFFFFF; }
+        .err-back:hover { border-color: #CD1719; color: #CD1719; }
+    </style>
+</head>
+<body>
+<div class="err-wrap">
+    <div class="err-brand">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z"/>
+        </svg>
+        <span>rzfz.ai Agent Manager</span>
+    </div>
+    <div class="err-card">
+        <h1>Something went wrong</h1>
+        <p>{{ message }}</p>
+        <a class="err-back" href="{{ url_for('dashboard.index') }}">Back to Dashboard</a>
+    </div>
+</div>
+</body>
+</html>

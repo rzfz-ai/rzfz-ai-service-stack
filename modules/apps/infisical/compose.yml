@@ -1,0 +1,62 @@
+# ==============================================================================
+# INFISICAL MODULE (Secrets Management)
+# ==============================================================================
+# Profile: infisical
+# Description: Self-hosted secrets management for developers and AI agents.
+#              Coding agents (gsd-2, paperclip, openhands) access secrets via
+#              http://infisical:8080 using machine identity tokens.
+# Status: Experimental — validate machine identity token workflow before use
+# Config: .env (INFISICAL_* variables)
+# Dependencies: postgres (infisical_db), valkey (DB 6)
+# Upstream: https://github.com/Infisical/infisical (MIT)
+# ==============================================================================
+services:
+  infisical:
+    # Note: -postgres image variant was discontinued by upstream after v0.146.0
+    # (last -postgres tag pushed 2025-08-08). The default (non-suffixed) image
+    # accepts the same DB_CONNECTION_URI env var, so this is a drop-in swap to
+    # rejoin the actively-maintained release line.
+    image: infisical/infisical:v0.162.10
+    profiles: ["infisical"]
+    container_name: infisical
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${INFISICAL_PORT:-8888}:8080"
+    environment:
+      NODE_ENV: production
+      # Database
+      DB_CONNECTION_URI: postgres://${INFISICAL_DB_USER:-${POSTGRES_USER:-docker}}:${INFISICAL_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}@postgres:5432/${INFISICAL_DB:-infisical_db}
+      # Redis/Valkey (DB 6)
+      REDIS_URL: redis://:${VALKEY_PASSWORD:-}@valkey:6379/6
+      # Application secrets
+      ENCRYPTION_KEY: ${INFISICAL_ENCRYPTION_KEY:-}
+      AUTH_SECRET: ${INFISICAL_AUTH_SECRET:-}
+      # Public URL
+      SITE_URL: https://${INFISICAL_DOMAIN:-infisical.${MAIN_DOMAIN:-razzfazz-box}}
+      # SMTP — use internal relay
+      SMTP_HOST: smtp-relay
+      SMTP_PORT: 587
+      SMTP_FROM_ADDRESS: infisical@${MAIN_DOMAIN:-razzfazz-box}
+      SMTP_FROM_NAME: "razzfazz.ai Secrets"
+      SMTP_SECURE: "false"
+      # Accept self-signed certs on internal SMTP relay (STARTTLS)
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      # Telemetry — disable phone-home
+      TELEMETRY_ENABLED: "false"
+      POSTHOG_HOST: ""
+      POSTHOG_PROJECT_API_KEY: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --noproxy '*' -fs http://localhost:8080/api/status || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
