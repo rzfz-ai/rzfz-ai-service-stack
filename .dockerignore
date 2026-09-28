@@ -1,0 +1,40 @@
+# Repo-root build context — used ONLY by the razzfazz-help image build
+# (core/compose.yml razzfazz-help: build.context=.., dockerfile=core/help/Dockerfile).
+# The help Dockerfile copies just `core/common/`, `core/help/**` and the BASE docs
+# `docs/community/**`; everything else here is excluded so the build context sent to
+# the Docker daemon stays small and stable. 2026.07 docs rework / #125 P1: the gated
+# `docs/enterprise/**` is NO LONGER baked in (it is runtime-mounted as a box-local
+# overlay — see core/compose.yml), so it is excluded from the context below.
+#
+# No other service builds from the repo root, so these rules affect only help.
+
+# VCS + churn
+.git/
+.gitignore
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Heavy / irrelevant trees (never copied by core/help/Dockerfile)
+backups/
+volumes/
+tests/
+.gsd/
+.claude/
+.venv/
+node_modules/
+security-run/
+*.tar.gz
+*.bundle
+*.iso
+# #125 P1: gated Enterprise docs + the box-local overlay are runtime-mounted, not
+# baked — keep both out of the help build context.
+docs/enterprise/
+overlay/
+
+# Generated / local state
+.env
+.env.*
+!.env.example
+!.env.dify.example

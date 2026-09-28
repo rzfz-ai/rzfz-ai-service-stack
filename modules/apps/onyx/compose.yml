@@ -1,0 +1,291 @@
+# ==============================================================================
+# ONYX MODULE (AI Enterprise Search)
+# ==============================================================================
+# Profile: onyx
+# Description: AI-powered enterprise search across Gitea repos and
+#              paperless-ngx documents. GitHub-compatible connector points at
+#              Gitea API. File connector reads paperless-media volume.
+# Status: Experimental — first-run downloads ~1GB of embedding models
+# Config: .env (ONYX_* variables)
+# Dependencies: postgres (onyx_db), valkey (DB 7), paperless-media volume (S01)
+# Upstream: https://github.com/onyx-dot-app/onyx (MIT)
+#
+# Memory budget (tuned for 32GB box):
+#   onyx-vespa:         8GB limit (JVM autosizes; 4g OOM'd at ~91% on prod, #154)
+#   onyx-opensearch:    1.5GB limit (JVM=512MB, OS overhead)
+#   onyx-api:           1GB limit
+#   onyx-background:    2GB limit (connector sync + supervisord workers)
+#   onyx-web:           512MB limit
+#   onyx-model-server:  1.5GB limit (inference + indexing models ~600MB each)
+#   onyx-model-indexer: 1.5GB limit
+#   Total:              ~11GB worst case, ~7GB typical
+# ==============================================================================
+
+x-onyx-env: &onyx-env
+  # Database — shared postgres
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_USER: ${ONYX_DB_USER:-${POSTGRES_USER:-docker}}
+  POSTGRES_PASSWORD: ${ONYX_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+  POSTGRES_DB: ${ONYX_DB:-onyx_db}
+  # #136: bound onyx's postgres connection pools. Onyx's per-process defaults
+  # (POSTGRES_API_SERVER_POOL_SIZE=40 + overflow 10, plus a SEPARATE read-only
+  # pool 40+10) mean each onyx process can hold ~100 connections; across
+  # onyx-api + onyx-background (× workers) onyx becomes a connection hog that
+  # exhausts shared postgres during any reconnect-herd (prod 2026-06-11: a
+  # postgres restart let onyx help drive ~800/800 connections → SCRAM handshakes
+  # failed → postgres reported "password authentication failed for user docker"
+  # → onyx-api crash-looped). The creds were always valid; this was exhaustion,
+  # not auth. Cap the pools so onyx stays a polite shared-DB citizen.
+  # NOTE: don't go below ~15 on the rw pool — onyx-api's own startup opens >10
+  # concurrent connections (migrations + async init) and will TimeoutError out
+  # of a too-small QueuePool ("Application startup failed. Exiting." loop).
+  # 20+10 caps onyx at ~30 rw + ~10 ro per process (vs the upstream 40+10+40+10
+  # ≈ 100) — bounded enough to never exhaust shared postgres, ample to start.
+  POSTGRES_API_SERVER_POOL_SIZE: ${ONYX_DB_POOL_SIZE:-20}
+  POSTGRES_API_SERVER_POOL_OVERFLOW: ${ONYX_DB_POOL_OVERFLOW:-10}
+  POSTGRES_API_SERVER_READ_ONLY_POOL_SIZE: ${ONYX_DB_RO_POOL_SIZE:-5}
+  POSTGRES_API_SERVER_READ_ONLY_POOL_OVERFLOW: ${ONYX_DB_RO_POOL_OVERFLOW:-5}
+  POSTGRES_POOL_PRE_PING: "true"
+  POSTGRES_POOL_RECYCLE: "300"
+  # File store — use postgres large objects, no minio needed
+  FILE_STORE_BACKEND: postgres
+  # Redis/Valkey (DB 7)
+  REDIS_HOST: valkey
+  REDIS_PORT: 6379
+  REDIS_PASSWORD: ${VALKEY_PASSWORD:-}
+  REDIS_DB: 7
+  # Vespa index
+  VESPA_HOST: onyx-vespa
+  VESPA_SKIP_UPGRADE_CHECK: "true"
+  # Model servers (internal)
+  MODEL_SERVER_HOST: onyx-model-server
+  INDEXING_MODEL_SERVER_HOST: onyx-model-indexer
+  # Auth — Caddy forward-auth handles SSO, onyx itself uses basic (single-tenant)
+  AUTH_TYPE: basic
+  USER_AUTH_SECRET: ${ONYX_SECRET:-}
+  # Web domain
+  WEB_DOMAIN: https://${ONYX_DOMAIN:-onyx.${MAIN_DOMAIN:-razzfazz-box}}
+  INTERNAL_URL: http://onyx-api:8080
+  # Gitea as GitHub connector source
+  GITHUB_CONNECTOR_BASE_URL: http://gitea:3000/api/v1
+  # Disable OpenSearch (use Vespa only — saves ~2GB RAM)
+  OPENSEARCH_FOR_ONYX_ENABLED: "false"
+  ENABLE_OPENSEARCH_INDEXING_FOR_ONYX: "false"
+  # v4 flipped the upstream default to OpenSearch-first (app_configs.py sets
+  # ONYX_DISABLE_VESPA default "true"). We run Vespa, so keep it enabled —
+  # otherwise onyx-api's factory.py guard aborts on startup: "ONYX_DISABLE_VESPA
+  # is set but ENABLE_OPENSEARCH_INDEXING_FOR_ONYX is not set".
+  ONYX_DISABLE_VESPA: "false"
+  # #170 — qwen3.6 thinking-mode leaves Onyx answers empty. SCOPED TO ONYX ONLY.
+  # The stack's Onyx points at the GPUStack qwen3.6 model, which runs on the
+  # llama-box runner. Qwen3 defaults to "thinking" mode: the first assistant turn
+  # emits reasoning and an EMPTY `content`, so Onyx's agentic tool-calling sees an
+  # empty answer and returns nothing. The llama-box runner IGNORES the vLLM
+  # `enable_thinking` flag; the knob it honours is
+  # `chat_template_kwargs.enable_thinking=false`. Onyx runs LiteLLM, which reads
+  # LITELLM_EXTRA_BODY (JSON) and forwards it as top-level request-body params →
+  # `chat_template_kwargs` reaches llama-box. This env is on the onyx-api /
+  # onyx-background containers ONLY, so it disables thinking for Onyx's own LLM
+  # calls WITHOUT touching the shared GPUStack qwen3.6 model — OWUI, Dify, cognee
+  # and the TARIC workflows keep thinking ON. Empty default = feature off; the
+  # thinking-disable JSON ships as the default in config/.env.example.
+  LITELLM_EXTRA_BODY: ${ONYX_LITELLM_EXTRA_BODY:-}
+  # Telemetry off
+  DISABLE_TELEMETRY: "true"
+  LOG_LEVEL: warning
+  # Email via central SMTP relay
+  SMTP_SERVER: smtp-relay
+  SMTP_PORT: "587"
+  SMTP_USER: ""
+  SMTP_PASS: ""
+  EMAIL_FROM: onyx@${MAIN_DOMAIN:-razzfazz-box}
+
+services:
+  # ─────────────────────────────────────────────
+  # Vespa — vector + keyword index
+  # Container name must not have underscore (Vespa URL requirement)
+  # ─────────────────────────────────────────────
+  onyx-vespa:
+    image: vespaengine/vespa:8.725.12
+    profiles: ["onyx"]
+    container_name: onyx-vespa
+    restart: unless-stopped
+    environment:
+      - VESPA_SKIP_UPGRADE_CHECK=true
+    volumes:
+      - onyx-vespa-data:/opt/vespa/var
+    # #154: 4g runs the JVM + content node at ~91% on a populated index (prod
+    # 8.246, 2026-07) → OOM-kill risk under indexing/query load. 8g gives Vespa's
+    # JVM + proton headroom; reconciled from the live `docker update` hotfix.
+    mem_limit: 8g
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --noproxy '*' -fs http://localhost:19071/state/v1/health || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 120s
+
+  # ─────────────────────────────────────────────
+  # Model server — inference (retrieval embeddings)
+  # ─────────────────────────────────────────────
+  onyx-model-server:
+    image: onyxdotapp/onyx-model-server:v4.3.9
+    profiles: ["onyx"]
+    container_name: onyx-model-server
+    restart: unless-stopped
+    command: >
+      /bin/sh -c "uvicorn model_server.main:app --host 0.0.0.0 --port 9000"
+    volumes:
+      - onyx-model-cache:/app/.cache/huggingface/
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://localhost:9000/api/health')"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ─────────────────────────────────────────────
+  # Model server — indexer (document embeddings)
+  # ─────────────────────────────────────────────
+  onyx-model-indexer:
+    image: onyxdotapp/onyx-model-server:v4.3.9
+    profiles: ["onyx"]
+    container_name: onyx-model-indexer
+    restart: unless-stopped
+    command: >
+      /bin/sh -c "uvicorn model_server.main:app --host 0.0.0.0 --port 9000"
+    environment:
+      - INDEXING_ONLY=True
+    volumes:
+      - onyx-indexer-model-cache:/app/.cache/huggingface/
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://localhost:9000/api/health')"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ─────────────────────────────────────────────
+  # API server
+  # ─────────────────────────────────────────────
+  onyx-api:
+    image: onyxdotapp/onyx-backend:v4.3.9
+    profiles: ["onyx"]
+    container_name: onyx-api
+    restart: unless-stopped
+    command: >
+      /bin/sh -c "alembic upgrade head &&
+      echo 'Starting Onyx API Server' &&
+      uvicorn onyx.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      <<: *onyx-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      onyx-vespa:
+        condition: service_healthy
+      onyx-model-server:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 1g
+    labels:
+      - "docker-volume-backup.stop-during-backup=false"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "6"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 120s
+
+  # ─────────────────────────────────────────────
+  # Background worker (indexing, connector sync)
+  # ─────────────────────────────────────────────
+  onyx-background:
+    image: onyxdotapp/onyx-backend:v4.3.9
+    profiles: ["onyx"]
+    container_name: onyx-background
+    restart: unless-stopped
+    command: >
+      /bin/sh -c "/app/scripts/supervisord_entrypoint.sh"
+    environment:
+      <<: *onyx-env
+      INDEXING_MODEL_SERVER_HOST: onyx-model-indexer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      onyx-vespa:
+        condition: service_healthy
+      onyx-model-server:
+        condition: service_started
+      onyx-model-indexer:
+        condition: service_started
+    volumes:
+      # paperless-ngx document media — read-only for Onyx file connector
+      - paperless-media:/mnt/paperless-media:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "6"
+
+  # ─────────────────────────────────────────────
+  # Web frontend (Next.js)
+  # ─────────────────────────────────────────────
+  onyx-web:
+    image: onyxdotapp/onyx-web-server:v4.3.9
+    profiles: ["onyx"]
+    container_name: onyx-web
+    restart: unless-stopped
+    environment:
+      INTERNAL_URL: http://onyx-api:8080
+      WEB_DOMAIN: https://${ONYX_DOMAIN:-onyx.${MAIN_DOMAIN:-razzfazz-box}}
+    depends_on:
+      - onyx-api
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  onyx-vespa-data:
+  onyx-model-cache:
+  onyx-indexer-model-cache:

@@ -1,0 +1,67 @@
+version: 1
+metadata:
+  name: "Entra - Flows"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # Enrollment flow for new Entra users
+  - model: authentik_flows.flow
+    id: enrollment-flow
+    identifiers:
+      slug: entra-domain-enrollment
+    attrs:
+      name: "Entra Domain Enrollment"
+      title: "Herzlich willkommen bei razzfazz.ai"
+      designation: enrollment
+      authentication: none
+      denied_action: message_continue
+      policy_engine_mode: any
+      layout: sidebar_left
+
+  # Stage: auto-create user and add to Chat Users group
+  - model: authentik_stages_user_write.userwritestage
+    identifiers:
+      name: "Auto Create Entra User"
+    attrs:
+      user_creation_mode: create_when_required
+      create_users_group: !Find [authentik_core.group, [name, "razzfazz.ai Chat Users"]]
+      user_path_template: "goauthentik.io/sources/%(source_name)s/%(username)s"
+      user_type: internal
+
+  # Bind user-write stage to enrollment flow
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, entra-domain-enrollment]]
+      stage: !Find [authentik_stages_user_write.userwritestage, [name, "Auto Create Entra User"]]
+    attrs:
+      order: 0
+      policy_engine_mode: any
+
+  # Bind domain restriction policy to enrollment flow
+  # #2501: identified by the model's unique key at Authentik 2026.5.7 —
+  # PolicyBinding.Meta.unique_together = ("policy", "target", "order") — with
+  # `target` as the flow's POLICY-BINDING-MODEL pk. A binding's target FK points
+  # at PolicyBindingModel.pbm_uuid; a Flow has its own pk (flow_uuid), and
+  # `!Find [authentik_flows.flow, …]` returns THAT. The lookup by flow_uuid never
+  # matched the stored binding, the importer tried to create a second one and
+  # hit the unique set ("The fields policy, target, order must make a unique
+  # set."), rolling the whole blueprint back on every apply since 2026-08.
+  # `!KeyOf` special-cases exactly this: for a policybinding entry it returns
+  # the referenced instance's pbm_uuid (authentik/blueprints/v1/common.py KeyOf).
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf enrollment-flow
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, "Entra - Domain Restriction"]]
+      order: 0
+    attrs:
+      enabled: true
+      timeout: 30
+
+  # Bind login stage (order 100 — after user write)
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, entra-domain-enrollment]]
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, "default-source-authentication-login"]]
+    attrs:
+      order: 100
+      policy_engine_mode: any

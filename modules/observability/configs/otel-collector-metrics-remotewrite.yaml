@@ -1,0 +1,51 @@
+# ==============================================================================
+# OTel Collector METRICS overlay — Prometheus remote_write export (#253 X5)
+# ==============================================================================
+# Pushes every metric the collector already receives over OTLP (OpenLIT SDK
+# spans' companions, module SDK auto-instrumentation) to the CUSTOMER-OWNED
+# Prometheus/Mimir/VictoriaMetrics remote_write endpoint — the metrics half of
+# "we ship the feed; the store is customer-side". Independent of the logs
+# overlays: this file rides the SAME third --config slot, selected via
+#   OTEL_COLLECTOR_METRICS_OVERLAY=otel-collector-metrics-remotewrite.yaml
+# (default: otel-collector-metrics-disabled.yaml — a no-op, boot-safe).
+#
+# The internal metrics→ClickHouse pipeline stays untouched: this ADDS a
+# metrics/external pipeline; it never replaces the OpenLIT store.
+#
+# SECURITY / egress: dialing OTEL_PROM_RW_ENDPOINT is a DELIBERATE outbound —
+# allow-list the host in the box egress model (#114). The auth header is a
+# credential; the collector's self-telemetry stays level:none (base config),
+# so the header is never echoed.
+# ==============================================================================
+
+exporters:
+  prometheusremotewrite:
+    endpoint: ${env:OTEL_PROM_RW_ENDPOINT:-}
+    headers:
+      # e.g. "Bearer <token>" or Basic auth; empty = no auth header
+      Authorization: "${env:OTEL_PROM_RW_HEADERS:-}"
+    tls:
+      # false (default) = TLS on, system CA roots. true = plaintext (trusted
+      # network only). Private CA: mount + uncomment ca_file.
+      insecure: ${env:OTEL_PROM_RW_TLS_INSECURE:-false}
+      # ca_file: /etc/otelcol/ca/custom-ca.pem
+    resource_to_telemetry_conversion:
+      # carry service.name etc. as labels — without it every module's series
+      # collapse into one indistinguishable stream on the customer side
+      enabled: true
+    remote_write_queue:
+      enabled: true
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    metrics/external:
+      receivers: [otlp]
+      # memory_limiter + batch are defined in the base config; reused here.
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]

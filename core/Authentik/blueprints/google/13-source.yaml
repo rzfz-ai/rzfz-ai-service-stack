@@ -1,0 +1,35 @@
+version: 1
+metadata:
+  name: "Google - SSO Source"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_sources_oauth.oauthsource
+    identifiers:
+      slug: google
+    attrs:
+      name: Google
+      provider_type: google
+      consumer_key: "${GOOGLE_CLIENT_ID}"
+      consumer_secret: "${GOOGLE_CLIENT_SECRET}"
+      authorization_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      access_token_url: "https://oauth2.googleapis.com/token"
+      profile_url: "https://openidconnect.googleapis.com/v1/userinfo"
+      oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
+      icon: "google_icon.svg"
+      
+      # Flow Links
+      authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
+      enrollment_flow: !Find [authentik_flows.flow, [slug, google-domain-enrollment]]
+      
+      # Configuration
+      user_matching_mode: email_link
+      group_matching_mode: identifier
+      user_path_template: "goauthentik.io/sources/%(slug)s"
+      enabled: true
+      
+      # Link Mappings created in File 10
+      user_property_mappings:
+        - !Find [authentik_sources_oauth.oauthsourcepropertymapping, [name, "Google OAuth - Username"]]
+        - !Find [authentik_sources_oauth.oauthsourcepropertymapping, [name, "Google OAuth - Name"]]
+        - !Find [authentik_sources_oauth.oauthsourcepropertymapping, [name, "Google OAuth - Avatar"]]

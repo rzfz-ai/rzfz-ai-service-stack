@@ -1,0 +1,14 @@
+razzfazz-stack-hermes-agent — build-recipe NOTICE (third-party upstream)
+======================================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: NousResearch Hermes (pinned)  —  Apache-2.0 (verify upstream)
+              https://github.com/NousResearch
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

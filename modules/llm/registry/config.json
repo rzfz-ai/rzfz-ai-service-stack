@@ -1,0 +1,27 @@
+{
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "dedupe": true,
+    "gc": true
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "compat": [
+      "docker2s2"
+    ],
+    "readTimeout": "0s",
+    "writeTimeout": "0s"
+  },
+  "log": {
+    "level": "info"
+  },
+  "extensions": {
+    "search": {
+      "enable": true
+    },
+    "ui": {
+      "enable": true
+    }
+  }
+}

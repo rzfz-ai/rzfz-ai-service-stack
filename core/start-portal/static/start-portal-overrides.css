@@ -1,0 +1,1259 @@
+/* M028 — Start Portal styles. Mirrors the Authentik App library look-and-feel
+ * (same dark background image, white tile cards with red icons + labels) but
+ * with a real responsive grid + favorites row + drag-rearrange affordances.
+ * S11 (2026-05-07) refinements applied.
+ */
+
+:root {
+    /* #299 — #296 console tokens, copied verbatim from
+       modules/llm/manager-ui/src/styles.css. */
+    --razz-red: #CD1719;
+    --razz-red-hover: #b01416;
+    --razz-red-soft: rgba(205, 23, 25, 0.10);
+    --razz-red-tint: rgba(205, 23, 25, 0.05);
+    --bg: #F1EDE9;
+    --bg-card: #FFFFFF;
+    --bg-soft: #F6F4F2;
+    --bg-muted: #F0EDEA;
+    --rail: #201D22;
+    --rail-ink: #ECEAE8;
+    --rail-muted: #9A9298;
+    --text: #1A1A1A;
+    --text-secondary: #4A4F57;
+    --text-muted: #6B7280;
+    --border: rgba(0, 0, 0, 0.10);
+    --border-strong: rgba(0, 0, 0, 0.14);
+    --border-soft: #ECE8E4;
+    --radius: 10px;
+    --radius-sm: 7px;
+    --radius-pill: 999px;
+    --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+            Helvetica, Arial, sans-serif;
+    /* keep every existing rule + guard test working */
+    --accent: var(--razz-red);
+
+    /* tiles are now solid cards (Phase 2), sections are ink (dark-on-light) */
+    --portal-tile-bg: var(--bg-card);
+    --portal-tile-bg-hover: var(--bg-card);
+    --portal-tile-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --portal-tile-shadow-hover: 0 4px 14px rgba(205, 23, 25, 0.16);
+    --portal-pin-empty: #cbc7c3;
+    --portal-pin-active: var(--razz-red);
+    --portal-section-title: var(--text);
+    --portal-section-title-shadow: none;
+
+    /* #299 Phase 7 — #296 semantic status tokens, copied verbatim from
+       modules/llm/manager-ui/src/styles.css, for the password broker's
+       success/error notices (was hardcoded green/white). */
+    --success: #1F9D57;
+    --success-bg: #e5f5ec;
+    --success-fg: #14603a;
+    --error: #C0271F;
+    --error-bg: #fbe4e2;
+    --error-fg: #8f1d17;
+}
+
+/* S11.1 #1 — non-serif system font stack matching Authentik's choice.
+ * #299 — flat warm-neutral ground, #296 system-font stack. */
+body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #1054 — dark icon-rail + PLAIN content.
+ *
+ * The operator-approved treatment, now shared by every rzfz.ai app (Config,
+ * Help Center, Licenses, Agent Manager, LLM Manager): the razzfazz brand
+ * image rides the DARK rail, where a light image reads with contrast, and
+ * the content area is the plain warm --bg ground with NO watermark. This
+ * SUPERSEDES the #299 `.portal-bg` content texture, whose PNG asset is
+ * deleted — a light image on the light content was nearly invisible. See
+ * tests/unit/consistency/test_1054_rail_background.py, which pins the
+ * treatment for all six apps.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+    --rail-w: 216px;
+    --rail-w-collapsed: 60px;
+}
+
+.portal-app {
+    display: flex;
+    min-height: 100vh;
+    width: 100%;
+    background: var(--bg);
+}
+
+.rail {
+    width: var(--rail-w);
+    flex-shrink: 0;
+    background: var(--rail);
+    color: var(--rail-ink);
+    display: flex;
+    flex-direction: column;
+    padding: 12px 8px;
+    /* NOT `overflow: hidden/auto`: the account menu at the rail foot is an
+       absolutely-positioned dropdown that has to escape the rail (it is
+       wider than the 60px narrow rail). The brand `::before` below is
+       `inset: 0`, so it needs no clipping. */
+    overflow: visible;
+    transition: width 0.18s ease;
+    /* #1054: anchor + clip for the brand-image ::before below */
+    position: relative;
+}
+.rail.collapsed { width: var(--rail-w-collapsed); }
+/* #1054: razzfazz brand image on the DARK rail. `left center / cover` shows
+   the left crop; the asset is the same /branding/media/razzfazz.webp the
+   other apps paint — served here from the portal's own /static/media/, the
+   Authentik-media bind mount (core/compose.yml), because start.<domain>
+   has no /branding/* route (licenses does exactly this). */
+.rail::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: url('/static/media/razzfazz.webp') no-repeat left center / cover;
+    opacity: 0.14;
+    pointer-events: none;
+    z-index: 0;
+}
+.rail > * { position: relative; z-index: 1; }
+
+/* ── rail head: spark + wordmark + wide/narrow toggle ── */
+.brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 2px; }
+.brand .spark { display: inline-flex; flex-shrink: 0; border-radius: 6px; }
+.brand svg { width: 22px; height: 22px; fill: var(--razz-red); flex-shrink: 0; }
+.brand .bn { font-weight: 700; color: #fff; white-space: nowrap; }
+.brand .railtog {
+    margin-left: auto;
+    background: none;
+    border: 0;
+    color: var(--rail-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 4px;
+    border-radius: 6px;
+    font-family: inherit;
+}
+.brand .railtog:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.rail.collapsed .bn,
+.rail.collapsed .brand-sub,
+.rail.collapsed .rail-who { display: none; }
+.rail.collapsed .brand { justify-content: center; padding: 4px 0 2px; }
+.rail.collapsed .brand .railtog { margin: 0; }
+.rail.collapsed .brand .spark { display: none; }
+
+.brand-sub {
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--rail-muted);
+    padding: 6px 10px 10px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+/* ── rail nav entries ──
+ * Scoped under `.rail` so the shared button classes a control keeps when it
+ * moves into the rail (e.g. `.portal-manage-shortcuts`, whose ink-on-light
+ * base state would vanish here) are overridden by specificity, not by file
+ * order. */
+.rnav { display: flex; flex-direction: column; }
+.rail .rl {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    width: auto;
+    color: var(--rail-muted);
+    background: transparent;
+    text-decoration: none;
+    padding: 9px 11px;
+    border-radius: 8px;
+    font-size: 0.86rem;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    margin-bottom: 1px;
+}
+.rail .rl .ic {
+    width: 20px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    line-height: 1;
+}
+.rail .rl:hover { background: rgba(255, 255, 255, 0.06); color: var(--rail-ink); }
+.rail .rl.on {
+    background: rgba(205, 23, 25, 0.18);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--razz-red);
+}
+.rail.collapsed .rl { justify-content: center; padding: 9px 0; }
+.rail.collapsed .rl .lb { display: none; }
+
+/* ── rail foot: the personal account menu (#299/#54/CFG-29) ── */
+.rail-foot {
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.10);
+}
+.rail-foot .portal-acct-menu > summary { padding: 6px 8px; }
+.rail-foot .portal-acct-menu > summary:hover,
+.rail-foot .portal-acct-menu[open] > summary { background: rgba(255, 255, 255, 0.08); }
+.rail-foot .portal-acct-name { color: var(--rail-ink); white-space: nowrap; }
+/* The dropdown floats UP out of the rail foot (there is no room below it)
+   and must clear the rail's own width when it is narrow. */
+.rail-foot .portal-acct-dropdown {
+    top: auto;
+    bottom: calc(100% + 6px);
+    right: auto;
+    left: 0;
+}
+.rail.collapsed .rail-foot .portal-acct-name { display: none; }
+.rail-avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-pill);
+    background: var(--razz-red);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+.rail-who { color: var(--rail-ink); font-size: 0.85rem; margin-left: 8px; }
+
+/* ── keyboard focus (the rail is a real nav: every entry is tabbable) ── */
+.rail a:focus-visible,
+.rail button:focus-visible,
+.rail summary:focus-visible,
+.rail-burger:focus-visible {
+    outline: 2px solid var(--razz-red);
+    outline-offset: -2px;
+}
+
+/* ── mobile drawer ──
+ * Under 900px the rail slides in over the content, opened by the ☰ burger in
+ * the content topbar (start-portal-rail.js). Keep DRAWER_MAX_WIDTH there in
+ * sync with this breakpoint. */
+.rail-burger {
+    display: none;
+    background: transparent;
+    border: 0;
+    color: var(--text-secondary);
+    font-size: 1.15rem;
+    line-height: 1;
+    padding: 6px 8px;
+    margin-right: 4px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+}
+.rail-burger:hover { background: var(--razz-red-soft); color: var(--razz-red); }
+.rail-scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 70;
+}
+.rail-scrim[hidden] { display: none; }
+
+@media (max-width: 900px) {
+    .rail-burger { display: inline-flex; align-items: center; }
+    .rail {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 80;
+        width: var(--rail-w);
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+    }
+    /* The drawer is always the WIDE rail — the narrow mode is a
+       desktop-only affordance. */
+    .rail.collapsed { width: var(--rail-w); }
+    .rail.collapsed .bn,
+    .rail.collapsed .brand-sub,
+    .rail.collapsed .rl .lb,
+    .rail.collapsed .rail-who,
+    .rail.collapsed .rail-foot .portal-acct-name { display: revert; }
+    .rail.collapsed .rl { justify-content: flex-start; padding: 9px 11px; }
+    .rail.collapsed .brand .spark { display: inline-flex; }
+    .brand .railtog { display: none; }
+    .portal-app.rail-open .rail { transform: none; }
+}
+
+.portal-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.portal-shell {
+    position: relative;
+    z-index: 1;
+    max-width: 1800px;
+    margin: 0 auto;
+    padding: 24px 32px 48px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+/* #299 — topbar: card surface, dark-on-light, sticky border-bottom rule
+ * (mirrors the #296 console `.topbar`).
+ * #1054 — it is no longer the app's navigation (that is the rail): what is
+ * left is the mobile burger, the "you are here" crumb, and the
+ * workspace-scoped Reset-layout action. Full-bleed inside `.portal-main`,
+ * so the border-bottom reads as one rule across the content. */
+.portal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0;
+    padding: 0 22px;
+    height: 54px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    flex-shrink: 0;
+}
+
+.portal-header-left {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* #1054 — the crumb replaces the old upper-left logo image (the mark now
+ * sits at the rail head; the shipped PNG is dark-on-transparent and would
+ * disappear on the dark rail). */
+.portal-crumb {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.portal-crumb .rz { color: var(--text); font-weight: 700; }
+
+/* S11.1 #2 — razzfazz.ai logo. Still used by the /password no-JS fallback
+ * page, whose light header renders the dark-on-transparent PNG correctly. */
+.portal-logo {
+    height: 40px;
+    width: auto;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+/* #1054 — plain full-height ground for the standalone /password fallback
+ * page (it carries no rail; it is the no-JS escape hatch, not an app shell).
+ * Replaces the retired `.portal-bg`, minus the watermark. */
+.portal-page {
+    min-height: 100vh;
+    width: 100%;
+    background: var(--bg);
+}
+
+.portal-title {
+    color: var(--text);
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin: 0;
+    text-shadow: none;
+}
+
+.portal-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-shadow: none;
+}
+
+.portal-user-badge {
+    background: var(--accent, #CD1719);
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    text-shadow: none;
+}
+
+/* #299 operator design feedback (2026-08-30) — controls are split by WHO
+ * they act on, and #1054 keeps that split while moving each half to its new
+ * home: workspace/admin controls stay plainly VISIBLE (Manage shortcuts is
+ * now a rail nav entry, Reset layout a content-top action — the #958 fix
+ * holds: an admin finds them without opening anything), while personal
+ * account controls (My Profile, Change password, Account settings, Logout)
+ * live inside `.portal-acct-menu`, the same no-JS `<details>` dropdown that
+ * opens on clicking the avatar — now at the rail foot. `.portal-acct` stays
+ * the identifying class on that container, a stable hook regardless of what
+ * moves in/out of the dropdown. */
+.portal-acct { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.portal-acct-menu { position: relative; }
+.portal-acct-menu > summary {
+    list-style: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px 4px 4px;
+    border-radius: var(--radius-pill);
+    transition: background .12s ease;
+}
+.portal-acct-menu > summary::-webkit-details-marker { display: none; }
+.portal-acct-menu > summary::marker { content: ""; }
+.portal-acct-menu > summary:hover,
+.portal-acct-menu[open] > summary {
+    background: var(--razz-red-soft);
+}
+.portal-acct-avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-pill);
+    background: var(--razz-red);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+/* #299 — a saved profile picture fills the avatar chip; falls back to the
+ * brand-red initial circle (above) when none is set. */
+.portal-acct-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+}
+.portal-acct-name { font-size: 0.85rem; color: var(--text-secondary); }
+
+/* The dropdown panel — floats under the avatar, doesn't push layout. */
+.portal-acct-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 60;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+}
+.portal-acct-dropdown .portal-hdr-btn {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+}
+
+/* S11.2 #5 — logout. #54 — change-password. #299 — My Profile. S11.6 —
+ * reset layout. #185 — manage shortcuts. All render as buttons/links sharing
+ * the same base look (transparent/ink base state, auto width via
+ * `.portal-hdr-btn` below — overrides the pre-#299-fix full-width menu-item
+ * sizing when a control sits inside the avatar dropdown), with the
+ * brand-red hover preserved below (guarded by
+ * tests/ui/razzfazz-start-portal/test_render.py::test_change_pw_button_hovers_red
+ * et al). */
+.portal-change-pw, .portal-manage-shortcuts, .portal-reset, .portal-logout,
+.portal-my-profile, .portal-acct-settings {
+    background: transparent;
+    color: var(--text);
+    border: none;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    text-decoration: none;
+    text-shadow: none;
+    cursor: pointer;
+    font-family: inherit;
+    width: 100%;
+    transition: background .12s ease, color .12s ease;
+}
+.portal-change-pw:hover, .portal-manage-shortcuts:hover,
+.portal-reset:hover, .portal-logout:hover, .portal-my-profile:hover,
+.portal-acct-settings:hover {
+    background: var(--razz-red-soft);
+    color: var(--accent, #CD1719);
+}
+/* Topbar sizing override — these buttons now sit inline in the header
+ * (`.portal-header-right`), not stacked full-width in a dropdown menu. Same
+ * selectors/specificity as the block above; wins on `width`/`display` by
+ * appearing later in the cascade. */
+.portal-hdr-btn {
+    width: auto;
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+}
+
+/* ── Hero ───────────────────────────────────────────────────────────── */
+
+/* #299 tile-reskin-to-prototype — greeting hero (prototype .sp-hero),
+ * replaces the bare "My Applications" title. */
+.portal-hero {
+    padding: 28px 4px 4px;
+}
+.portal-hero-greeting {
+    margin: 0 0 4px;
+    font-size: 1.9rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--text);
+}
+.portal-hero-sub {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 1rem;
+}
+
+/* ── Sections ───────────────────────────────────────────────────────── */
+
+/* #299 tile-reskin-to-prototype — full-width stacked category sections,
+ * matching the approved prototype (.sp-fav/.sp-sec). This RETIRES the
+ * #958 CSS multi-column masonry (`columns:`) entirely: each category is a
+ * plain full-width block, one after another, in `.portal-categories`
+ * (still the JS drag-to-reorder-categories root — see start-portal.js).
+ * With no multicol container left, the indefinite-height-column ambiguity
+ * that caused the header/tile overlap bug (`grid-auto-rows` comment below)
+ * cannot recur — there is nothing left to create it. */
+.portal-categories {
+    display: block;
+}
+.portal-section {
+    margin-bottom: 24px;
+}
+.portal-section-favorites {
+    margin-bottom: 28px;
+}
+
+.portal-section-title {
+    color: var(--portal-section-title);
+    font-size: 14px;
+    font-weight: 500;
+    margin: 0 0 10px 4px;
+    text-shadow: var(--portal-section-title-shadow);
+    /* S11.3 #13 — numeric prefix removed by app.py via display_name. */
+    /* #299 Phase 4 — ink heading with the #296 border-bottom rule
+     * (cheat-sheet: h2.section { border-bottom:1px solid var(--border); }). */
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.portal-section-favorites .portal-section-title {
+    color: var(--portal-pin-active);
+}
+
+/* ── Grid ───────────────────────────────────────────────────────────── */
+
+.portal-grid {
+    display: grid;
+    /* #299 tile-reskin-to-prototype — widened from 140px to 255px (prototype
+       .sp-grid): the rich card now carries a description + footer, which
+       needs real width to read well, not just an icon + a one-word name. */
+    grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+    /* #299 fix — was `grid-auto-rows: 1fr`, ambiguous inside the (now
+       retired) multi-column `.portal-categories` ancestor — see the
+       "Sections" comment above. Kept as `minmax(0, auto)` even though the
+       multicol container is gone: CSS Grid's default stretch alignment
+       still stretches every item in a row to the row's own auto-sized
+       (tallest-item) height (no explicit height on the tile — that stretch
+       fills it; a tile height of 100% here actually broke it, see the tile
+       rule below), and this form has an unambiguous, content-derived height
+       regardless of ancestor layout — no reason to reintroduce the bare
+       `1fr` this fixed. */
+    grid-auto-rows: minmax(0, auto);
+    gap: 16px;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+@media (max-width: 1280px) {
+    .portal-shell { padding: 20px 20px 36px; }
+    .portal-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+}
+@media (max-width: 768px) {
+    .portal-shell { padding: 14px 14px 32px; }
+    /* #1054 — the topbar carries only burger + crumb + Reset layout now, so
+       it stays a single row here (it used to stack because the whole nav
+       lived in it; that nav is the rail). */
+    .portal-header { padding: 0 12px; gap: 10px; }
+    .portal-hero { padding: 20px 2px 2px; }
+    .portal-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+}
+@media (max-width: 480px) {
+    /* #299 tile-reskin-to-prototype — a rich card with a real description
+       needs the full viewport width on a phone; two cramped 2-up columns
+       (the pre-reskin compact-tile behaviour) is not legible at this size. */
+    .portal-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Tile ───────────────────────────────────────────────────────────── */
+
+/* #299 tile-reskin-to-prototype — rich card matching the approved prototype
+ * (.tile): a small icon + name at top, a description, and a footer row (chip
+ * left, "Open →"/"Run →" right).
+ * Equal-height cards come from the .portal-grid row: `grid-auto-rows` sizes
+ * each row track to its tallest tile and the grid's DEFAULT `align-items:
+ * stretch` stretches every tile in that row up to that track height.
+ * #991-followup (exo 2026-08-30) — do NOT reintroduce `height: 100%` here.
+ * Combined with `grid-auto-rows: minmax(0, auto)` and this tile's own inner
+ * grid, an explicit `height: 100%` made the card render ~30px TALLER than its
+ * content-sized row track, so the card overflowed downward, ate the 16px
+ * row-gap and OVERLAPPED the tile below by ~14px — the vertical gap between
+ * stacked tiles read as smaller/zero than the horizontal (column) gap. Stretch
+ * alone equalizes the row and needs no explicit item height. */
+.portal-tile {
+    position: relative;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--portal-tile-shadow);
+    color: var(--text);
+    text-decoration: none;
+    text-align: left;
+    padding: 18px;
+    /* icon | name on ONE header row (title right of the icon), then desc + foot
+       full-width beneath. align-content:start packs the rows so the desc→footer
+       gap is just the row-gap (no flex:1 blow-out); leftover height sits below
+       the footer. Operator feedback, exo 2026-08-30. */
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas: "icon name" "desc desc" "foot foot";
+    column-gap: 12px;
+    row-gap: 6px;
+    align-content: start;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+    cursor: pointer;
+}
+
+.portal-tile:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--portal-tile-shadow-hover);
+    border-color: var(--razz-red);
+    text-decoration: none;
+}
+
+.portal-tile-icon {
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+.portal-tile-icon-svg {
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    color: var(--accent, #CD1719);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.portal-tile-icon-svg svg {
+    width: 100%;
+    height: 100%;
+}
+/* #185 — razzfazz-shortcuts emoji glyph. Matches the 46×46 icon box so an
+   emoji shortcut tile lines up with the PNG/SVG icon tiles. */
+.portal-tile-icon-emoji {
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    line-height: 1;
+}
+
+.portal-tile-name {
+    font-size: 1rem;
+    font-weight: 700;
+    text-align: left;
+    line-height: 1.25;
+    /* #299 — headings are ink on the #296 ground; red is the accent only. */
+    color: var(--text);
+}
+
+/* #299 tile-reskin-to-prototype — the tile's description (prototype
+ * .tdesc). flex: 1 pushes .portal-tile-foot to the bottom of the card
+ * regardless of how long the description runs, so every card in a row
+ * still lines up its footer. */
+.portal-tile-desc {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    flex: 1;
+}
+
+/* #299 tile-reskin-to-prototype — the tile's footer row (prototype
+ * .tfoot): the tool/native chip on the left, "Open →"/"Run →" on the
+ * right. .portal-tile-chip-spacer keeps the Open/Run label pinned to the
+ * right even when a tile carries no chip at all (space-between needs a
+ * left-hand box to push against). */
+.portal-tile-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    margin-top: 2px;
+}
+.portal-tile-chip-spacer {
+    flex: 0 0 auto;
+}
+.portal-tile-open {
+    color: var(--razz-red);
+    font-weight: 700;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.portal-tile-pending .portal-tile-open {
+    color: var(--text-muted);
+}
+
+/* #299 Phase 2 — tool/rzfz.ai disambiguation chip (P16). Grey for
+ * third-party tools; red-tinted `-native` variant for razzfazz-built apps. */
+.portal-tile-chip {
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-muted);
+    color: var(--text-secondary);
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.portal-tile-chip-native {
+    background: var(--razz-red-soft);
+    color: var(--razz-red);
+}
+
+/* #991-followup (title-right-of-icon): map the tile's flat children onto the
+   3-area grid declared on .portal-tile. Placed AFTER the per-element rules
+   above so each element's own rule stays the FIRST match (the CSS-guard tests
+   anchor on the first exact-selector block); these later rules only ADD the
+   grid placement. Icon + name share the header row, vertically centred. The
+   `flex:*` on desc/foot/chip above is inert on a grid item — harmless. */
+.portal-tile-icon,
+.portal-tile-icon-svg,
+.portal-tile-icon-emoji { grid-area: icon; align-self: center; }
+.portal-tile-name { grid-area: name; align-self: center; }
+.portal-tile-desc { grid-area: desc; }
+.portal-tile-foot { grid-area: foot; }
+
+/* Heart / favorites pin — S11.3 #7. */
+.portal-tile-pin {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 26px;
+    height: 26px;
+    background: transparent;
+    border: none;
+    color: var(--portal-pin-empty);
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: color 0.12s ease, background 0.12s ease, transform 0.12s ease;
+    z-index: 2;
+}
+
+.portal-tile-pin:hover {
+    background: rgba(0, 0, 0, 0.04);
+    color: var(--portal-pin-active);
+    transform: scale(1.1);
+}
+
+.portal-tile-pin.portal-tile-pinned {
+    color: var(--portal-pin-active);
+}
+
+/* Drag affordance — SortableJS adds .sortable-ghost on the placeholder. */
+.sortable-ghost {
+    opacity: 0.35;
+    background: rgba(205, 23, 25, 0.08);
+    border: 2px dashed var(--accent, #CD1719);
+}
+.sortable-drag {
+    cursor: grabbing;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* ── Live agent: pending-Open spinner pattern (reused from rc6.7 #91) ── */
+
+.portal-tile-pending {
+    pointer-events: none;
+    opacity: 0.85;
+}
+
+.portal-tile-pending::after {
+    content: '';
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--accent, #CD1719);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: portal-spin 0.8s linear infinite;
+    z-index: 2;
+}
+
+@keyframes portal-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* #299 tile-reskin-to-prototype — the live-agent status dot moves inline
+ * after the tile name (prototype `.tile.live .tname::after`), replacing the
+ * previous absolutely-positioned top-left dot. */
+.portal-tile-live .portal-tile-name::after {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--success);
+    margin-left: 7px;
+    vertical-align: middle;
+}
+
+/* #299 Phase 5 — #296 disables its spinners/pulses under reduced-motion
+   (design-language cheat-sheet); match that for the "Starting…" spinner. */
+@media (prefers-reduced-motion: reduce) {
+    .portal-tile-pending::after {
+        animation: none;
+    }
+    /* #1054 — same rule for the rail's width/slide transitions. */
+    .rail {
+        transition: none;
+    }
+}
+
+/* ── Empty / login states ───────────────────────────────────────────── */
+
+/* #299 Phase 8 — was a translucent rgba(255,255,255,0.94)/#1a1a1a-literal
+ * card left over from the dark-ground skin; reskin to the #296 card
+ * surface (cheat-sheet: "Cards are the surfaces" — solid bg-card, 1px
+ * border, radius, subtle shadow). */
+.portal-empty {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    padding: 28px;
+    color: var(--text);
+    max-width: 600px;
+    margin: 32px auto;
+    text-align: center;
+}
+
+.portal-link {
+    color: var(--accent, #CD1719);
+    font-weight: 600;
+    text-decoration: none;
+}
+.portal-link:hover { text-decoration: underline; }
+
+/* ── S11.6 — category management ──────────────────────────────────── */
+
+/* Section titles: hint that they're double-clickable to rename. */
+.portal-section[data-section-id] .portal-section-title {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+}
+/* #299 Phase 4 — the drag-handle glyph's colour was a near-white
+ * dark-ground relic, all but invisible against the #296 light ground;
+ * now a muted-ink glyph. */
+.portal-section[data-section-id] .portal-section-title::before {
+    content: '⋮⋮';
+    color: var(--text-muted);
+    margin-right: 6px;
+    cursor: grab;
+    font-size: 11px;
+    letter-spacing: -2px;
+    text-shadow: none;
+}
+.portal-section-favorites .portal-section-title { cursor: default; }
+.portal-section-favorites .portal-section-title::before { display: none; }
+
+/* Rename input: replaces the h2 in-place.
+ * #299 Phase 4 — was a translucent rgba(255,255,255,0.92)/#1a1a1a pairing
+ * from the dark-ground skin; now a solid #296 surface. */
+.portal-cat-rename-input {
+    background: #fff;
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: 14px;
+    font-weight: 500;
+    margin: 0 0 10px 4px;
+    min-width: 180px;
+    font-family: inherit;
+}
+
+/* Delete-empty-category button (× appended to title).
+ * #299 Phase 4 — was rgba(255,255,255,0.6)/rgba(255,255,255,0.12), a
+ * near-invisible white-on-white relic from the dark-ground skin. */
+.portal-cat-delete {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    margin-left: 8px;
+    cursor: pointer;
+    padding: 0 4px;
+    border-radius: 3px;
+    text-shadow: none;
+}
+.portal-cat-delete:hover {
+    background: var(--razz-red-soft);
+    color: var(--razz-red);
+}
+
+/* Add-new-category button at the bottom of the categories list.
+ * #299 Phase 4 — was rgba(255,255,255,…)/white, invisible against the
+ * #296 light ground; now the #296 dashed "soft surface" control. */
+.portal-cat-add {
+    display: block;
+    margin: 16px auto 0;
+    padding: 8px 18px;
+    background: var(--bg-soft);
+    color: var(--text-secondary);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    text-shadow: none;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.portal-cat-add:hover {
+    border-color: var(--razz-red);
+    color: var(--razz-red);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #54 — Change-password modal + live-validation UX.
+ * The modal overlays the start portal (no page switch); backdrop is a light
+ * dim. The form fields, match indicator, rules checklist, and the inline AJAX
+ * result all live inside .pw-modal-dialog (and on the /password fallback page).
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+.pw-modal[hidden] { display: none; }
+.pw-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+.pw-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);   /* light dimmed overlay */
+}
+body.pw-modal-open { overflow: hidden; }
+
+.pw-modal-dialog {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 460px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    background: var(--bg-card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    padding: 24px 26px 22px;
+}
+.pw-modal-title {
+    margin: 0 0 14px;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text);
+}
+.pw-modal-close {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    background: transparent;
+    border: none;
+    font-size: 26px;
+    line-height: 1;
+    color: #888;
+    cursor: pointer;
+}
+.pw-modal-close:hover { color: var(--accent, #CD1719); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #299 — native "My Profile" dialog. Reuses the .pw-modal* chrome classes
+ * above (backdrop/dialog/title/close) for a consistent look; only the
+ * profile-specific bits below are new.
+ * ══════════════════════════════════════════════════════════════════════════ */
+.profile-modal-hint {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin: 0 0 16px;
+    line-height: 1.4;
+}
+.profile-avatar-row { display: flex; align-items: center; gap: 12px; }
+.profile-avatar-preview {
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-pill);
+    object-fit: cover;
+    border: 1px solid var(--border);
+    background: var(--bg-soft);
+}
+
+/* ── Form fields ─────────────────────────────────────────────────────── */
+.pw-field { display: block; margin: 10px 0; }
+.pw-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.pw-hint-inline { font-weight: 400; opacity: 0.65; font-size: 0.85em; }
+.pw-form input[type="password"],
+.pw-form input[type="email"] {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    color: var(--text);
+    background: #fff;
+    font-family: inherit;
+}
+.pw-form input:focus {
+    outline: none;
+    border-color: var(--razz-red);
+    box-shadow: 0 0 0 3px var(--razz-red-soft);
+}
+/* ── Show/hide (eye) toggle (Fix 1, #54) ─────────────────────────────────
+ * The password input is wrapped in .pw-input-wrap (position: relative); the JS
+ * mounts a .pw-reveal <button> pinned to the right edge. We reserve right-pad on
+ * the input so the masked/visible text never runs under the button. The wrapper
+ * is display:block so the full-width input keeps its layout. */
+.pw-input-wrap { position: relative; display: block; }
+.pw-input-wrap input[type="password"],
+.pw-input-wrap input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 40px 8px 10px;   /* room for the eye button on the right */
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    color: var(--text);
+    background: #fff;
+    font-family: inherit;
+}
+.pw-input-wrap input:focus {
+    outline: none;
+    border-color: var(--razz-red);
+    box-shadow: 0 0 0 3px var(--razz-red-soft);
+}
+.pw-reveal {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    opacity: 0.7;
+}
+.pw-reveal:hover { opacity: 1; }
+.pw-reveal:focus-visible {
+    outline: 2px solid var(--accent, #CD1719);
+    outline-offset: 1px;
+    opacity: 1;
+}
+.pw-reveal[aria-pressed="true"] { opacity: 1; }
+
+.pw-target-note { font-size: 13px; opacity: 0.85; margin: 8px 0; }
+.pw-covers { background: rgba(0, 0, 0, 0.04); padding: 8px 10px; border-radius: 6px; }
+.pw-optin { font-size: 13px; }
+
+/* ── Live match indicator ────────────────────────────────────────────── */
+.pw-match { margin: 6px 0; font-size: 13px; font-weight: 600; }
+.pw-match[data-state="match"] { color: var(--success, #1F9D57); }
+.pw-match[data-state="mismatch"] { color: var(--accent, #CD1719); }
+
+/* ── Live rules checklist ────────────────────────────────────────────── */
+.pw-rules { list-style: none; padding: 0; margin: 8px 0; font-size: 13px; }
+.pw-rules li { color: #777; margin: 3px 0; }
+.pw-rules li.pw-rule-ok { color: var(--success, #1F9D57); }
+.pw-rule-mark { display: inline-block; width: 1.2em; font-weight: 700; }
+
+/* ── Actions / spinner ───────────────────────────────────────────────── */
+.pw-actions { margin-top: 14px; }
+.pw-submit { background: var(--razz-red); border-color: var(--razz-red); color: #fff; }
+/* #54 follow-on — keep the submit button brand-red on hover too (it carries
+ * the .portal-reset class for sizing; an explicit accent hover here ensures it
+ * matches the unified header-button hover regardless of class order).
+ * #299 Phase 7 — darken on hover (--razz-red-hover) while keeping the
+ * `var(--accent` substring existing guard tests read for the shared
+ * unified-red-hover contract across every portal button. */
+.pw-submit:hover { background: var(--razz-red-hover); border-color: var(--accent, #CD1719); }
+.pw-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.pw-spinner {
+    display: inline-block;
+    width: 13px;
+    height: 13px;
+    margin-left: 8px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    vertical-align: -2px;
+    animation: pw-spin 0.7s linear infinite;
+}
+.pw-spinner[hidden] { display: none; }
+@keyframes pw-spin { to { transform: rotate(360deg); } }
+
+/* ── Inline AJAX result ──────────────────────────────────────────────── */
+.pw-result { margin-top: 14px; font-size: 13px; }
+.pw-result[hidden] { display: none; }
+.pw-result-notice { margin: 0 0 8px; font-weight: 600; }
+.pw-result-list { list-style: none; padding: 0; margin: 6px 0; }
+.pw-result-list li { margin: 3px 0; }
+.pw-ok { color: #1a7f37; }
+.pw-warn { color: var(--accent, #CD1719); }
+.pw-help { margin-top: 14px; font-size: 12px; opacity: 0.7; }
+
+/* ── /password fallback page: re-skin the broker notices for the #299
+ * light ground (was white text on a dark full-bleed skin). ────────────── */
+.pw-fallback-section { max-width: 480px; }
+.pw-fallback-section .pw-form { background: var(--bg-card); color: var(--text);
+    border: 1px solid var(--border);
+    padding: 18px 20px; border-radius: var(--radius); }
+.pb-notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin: 0.75rem 0;
+    background: var(--success-bg, #e5f5ec); color: var(--success-fg, #14603a);
+    border: 1px solid var(--success, #1F9D57); }
+.pb-error { padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin: 0.75rem 0;
+    background: var(--error-bg, #fbe4e2); color: var(--error-fg, #8f1d17);
+    border: 1px solid var(--error, #C0271F); }
+.pb-results { list-style: none; padding: 0; margin: 0.5rem 0; color: var(--text); }
+
+/* ── #991 wide-screen density: compact tiles + two categories per row ────────
+ * Operator feedback (exo, 2026-08-30): on a wide screen each category was a
+ * full-width block with only a few tiles (empty right gutter), tall cards left
+ * ragged bottoms, and the next category's heading crowded the tiles above.
+ * Fix: denser cards + a 2-line description clamp (bounds row height) + a real
+ * two-column CSS grid for the categories (NOT the retired `columns:` masonry
+ * that caused the #958 overlap). */
+
+/* Compact cards. Keep the tile's grid gaps (column 12 / row 6) — a bare
+   `gap` here would collapse both axes to one value and squash the icon↔name
+   column gap. */
+.portal-tile { padding: 14px; column-gap: 12px; row-gap: 6px; }
+.portal-tile-icon,
+.portal-tile-icon-svg,
+.portal-tile-icon-emoji { width: 40px; height: 40px; }
+.portal-tile-name { font-size: 0.94rem; }
+/* Clamp the description to 2 lines so one long card can't make its whole row
+ * tall (the ragged bottom that crowded the next heading). flex still pins the
+ * footer to the bottom, so cards in a row stay equal height. */
+.portal-tile-desc {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    flex: 1 1 auto;
+}
+
+/* Two categories per row on wide screens. `align-items: start` stops a short
+ * category stretching to its taller neighbour; the row-gap gives each heading
+ * clear air. Favorites is a sibling of .portal-categories, so it stays
+ * full-width. Drag-to-reorder still works (Sortable reorders the grid's DOM
+ * children). */
+@media (min-width: 1400px) {
+    .portal-categories {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        /* #991 fix (heading/tile clearance) — the row-gap is the SINGLE
+           mechanism that vertically separates stacked category blocks: each
+           .portal-section is a grid item and `align-items: start` means a
+           short block does NOT stretch to its row's track height, so the next
+           block in that column starts right after this row. 8px was too tight
+           — a heading landed almost against the tiles of the block above it.
+           24px still read as crowded to the operator (exo, 2026-08-30); 40px
+           gives every stacked heading unambiguous clear air. Column-gap 32px. */
+        gap: 40px 32px;
+        align-items: start;
+    }
+    /* Category sections let the grid row-gap own their vertical separation;
+       a margin-bottom here would double-count against that row-gap (and add
+       nothing between the two columns). Scoped to `.portal-categories` so it
+       does NOT touch the full-width Favorites section (a sibling), which keeps
+       its own bottom margin below to stand clear of the first category row. */
+    .portal-categories .portal-section { margin-bottom: 0; }
+    /* Category grids fill each half-column (no empty right gutter) — the #991
+       intent. auto-fit is correct HERE: each category grid lives in a bounded
+       1fr half-column track, so collapsed empty tracks just widen the tiles
+       within that half. */
+    .portal-categories .portal-grid {
+        grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+    }
+    /* #991 fix (favorites full-width stretch) — Favorites is a FULL-WIDTH
+       sibling of .portal-categories, not a bounded half-column, yet it reuses
+       .portal-grid. With auto-fit the empty tracks collapse and a lone
+       favorite expands to the ENTIRE row (measured: a 1536px favorite tile vs
+       a 240px category tile), and its full-width bottom edge then crowds the
+       first category headings. auto-fill keeps the empty tracks, so every
+       favorite stays a normal tile width and a lone favorite left-aligns with
+       the rest of the row left empty — the same track size the category tiles
+       use. */
+    .portal-section-favorites .portal-grid {
+        grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+    }
+}
+/* Very wide screens: three categories per row. */
+@media (min-width: 2200px) {
+    .portal-categories { grid-template-columns: 1fr 1fr 1fr; }
+}

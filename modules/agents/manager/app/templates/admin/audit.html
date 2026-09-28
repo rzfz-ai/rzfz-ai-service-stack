@@ -1,0 +1,42 @@
+{# AGU-12/AGU-24 (#1040): the audit log was still a standalone legacy page — a
+   bare 1200px `.container` with no dark icon rail, no topbar/breadcrumb, no user
+   chip and no `<meta name="viewport">`. It is reached by a "View Audit Log"
+   button INSIDE the reskinned Admin shell (admin/index.html), so an admin
+   watched the whole chrome disappear on a same-app click and had only a bare
+   "← Admin" text link to get back. Converted onto base_shell.html like
+   admin/index.html; the `.admin-table` markup is preserved verbatim and gains
+   the same `overflow-x:auto` wrapper its two sibling admin tables already have
+   (this is the widest of the three — it carries a <code> details column).
+   An `{% else %}` empty state replaces headers-over-nothing. #}
+{% extends "base_shell.html" %}
+
+{% block page_title %}Audit Log — Agent Manager{% endblock %}
+{% block crumb %} · <span class="sub">Admin · Audit Log</span>{% endblock %}
+
+{% block am_content %}
+    <a href="{{ url_for('admin.index') }}" style="color: var(--text-dim); text-decoration: none; font-size: 0.85rem;">&larr; Admin</a>
+
+    <section class="card" style="margin-top: 12px;">
+        <h3>Audit Log</h3>
+        <div style="overflow-x: auto;">
+        <table class="admin-table">
+            <thead>
+                <tr><th>Time</th><th>User</th><th>Action</th><th>Agent Type</th><th>Details</th></tr>
+            </thead>
+            <tbody>
+                {% for e in entries %}
+                <tr>
+                    <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') if e.timestamp else '-' }}</td>
+                    <td>{{ e.user_id }}</td>
+                    <td>{{ e.action }}</td>
+                    <td>{{ e.agent_type or '-' }}</td>
+                    <td><code>{{ e.details }}</code></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" style="color: var(--text-dim);">No audit entries yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </section>
+{% endblock %}

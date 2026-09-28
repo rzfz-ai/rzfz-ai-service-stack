@@ -1,0 +1,89 @@
+# ==============================================================================
+# OTel Collector METRICS overlay — remote_write + NATIVE /metrics SCRAPE (#253 X5 S2)
+# ==============================================================================
+# Variant of otel-collector-metrics-remotewrite.yaml that ADDITIONALLY scrapes
+# the stack's native Prometheus endpoints — docker-network only, never a new
+# exposure point — and pushes them through the SAME remote_write pipeline:
+#   OTEL_COLLECTOR_METRICS_OVERLAY=otel-collector-metrics-remotewrite-scrape.yaml
+#
+# Scraped sources (all container-internal DNS; nothing is published to the host,
+# and /metrics stays 404 at the Caddy edge):
+#   caddy:2019/metrics            Caddy admin-API metrics. Caddy only emits them
+#                                 when the `metrics` server option is on — the
+#                                 Caddy entrypoint derives that directive from
+#                                 THIS overlay being selected, so a disabled
+#                                 scrape costs Caddy nothing.
+#   authentik-server:9300/metrics Authentik's built-in Prometheus listener.
+#   llm-manager:8080/metrics      LLM-Manager business metrics (internal-only by
+#                                 design — see app/authz.py).
+#   postgres-exporter:9187        postgres via the official exporter (S3).
+#   valkey-exporter:9121          valkey via redis_exporter (RESP-compatible).
+# A target whose profile is not enabled (e.g. no llm-manager) simply scrapes
+# as `up=0`; the collector does not fail on it.
+#
+# NOT here: postgres/valkey/cAdvisor exporter SIDECARS — new images, so they
+# ride their own slice with manifest + offline-bundling (#253 X5 S3).
+#
+# SECURITY / egress: dialing OTEL_PROM_RW_ENDPOINT is a DELIBERATE outbound —
+# allow-list the host in the box egress model (#114). Scrape traffic itself
+# never leaves the docker network. The remote_write auth header is a
+# credential; collector self-telemetry stays level:none (base config).
+# ==============================================================================
+
+receivers:
+  prometheus/native:
+    config:
+      scrape_configs:
+        - job_name: caddy
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["caddy:2019"]
+        - job_name: authentik
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["authentik-server:9300"]
+        - job_name: llm-manager
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["llm-manager:8080"]
+        # #253 X5 S3: exporter sidecars (observability profile — same profile
+        # as this collector, so they exist whenever this overlay can run)
+        - job_name: postgres
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["postgres-exporter:9187"]
+        - job_name: valkey
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["valkey-exporter:9121"]
+
+exporters:
+  prometheusremotewrite:
+    endpoint: ${env:OTEL_PROM_RW_ENDPOINT:-}
+    headers:
+      # e.g. "Bearer <token>" or Basic auth. Empty = header sent EMPTY (see the
+      # .env.example note) — strict receivers may reject that; set a value or
+      # front the target with a network-trusted ingress.
+      Authorization: "${env:OTEL_PROM_RW_HEADERS:-}"
+    tls:
+      insecure: ${env:OTEL_PROM_RW_TLS_INSECURE:-false}
+      # ca_file: /etc/otelcol/ca/custom-ca.pem
+    resource_to_telemetry_conversion:
+      enabled: true
+    remote_write_queue:
+      enabled: true
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    metrics/external:
+      # OTLP (SDK/OpenLIT metrics) + the native scrapes, one push.
+      receivers: [otlp, prometheus/native]
+      # memory_limiter + batch are defined in the base config; reused here.
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]

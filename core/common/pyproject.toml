@@ -1,0 +1,22 @@
+[project]
+name = "razzfazz-common"
+version = "0.1.0"
+description = "Shared Flask helpers for razzfazz.ai UI containers"
+requires-python = ">=3.10"
+dependencies = ["flask>=2.3,<4"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["razzfazz_common*"]
+
+# M026 S06: ship static/razzfazz-base.css with the wheel so the Flask
+# blueprint registered by `create_base_app` can serve it via
+# /static/razzfazz-common/razzfazz-base.css inside every UI container.
+# M026 S08: ship templates/razz_base.html so the Jinja ChoiceLoader wired
+# in `create_base_app` can resolve `{% extends "razz_base.html" %}`.
+[tool.setuptools.package-data]
+razzfazz_common = ["static/*.css", "templates/*.html"]

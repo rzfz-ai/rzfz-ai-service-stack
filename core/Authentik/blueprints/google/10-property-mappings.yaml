@@ -1,0 +1,41 @@
+version: 1
+metadata:
+  name: "Google - Property Mappings"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Google OAuth - Username"
+    attrs:
+      expression: |
+        email = info.get("email")
+        if not email:
+            return {"username": ""}
+        return {"username": email.split("@")[0].replace(".", "_")}
+
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Google OAuth - Name"
+    attrs:
+      expression: |
+        name = info.get("name")
+        if not name:
+            return {"name": ""}
+        return {"name": name}
+
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Google OAuth - Avatar"
+    attrs:
+      expression: |
+        # Extract the picture URL from the Google 'info' object
+        picture = info.get("picture")
+        # If a picture exists, update the user's avatar attribute
+        if picture:
+            return {
+                "attributes": {
+                    "avatar": picture
+                }
+            }
+        return {}

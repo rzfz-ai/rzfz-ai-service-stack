@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# SPEECH MODULE (STTS)
+# ==============================================================================
+# Profile: stts
+# Speech-to-Text AND Text-to-Speech via Speaches (Whisper STT + Kokoro/Piper
+# TTS). #68: the separate edge-tts (GPL-3.0) container was removed — Speaches
+# covers both STT and TTS (the stack's default TTS already points at
+# http://speaches:8000/v1, see cli/post-install.sh).
+# ==============================================================================
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:${SPEACHES_VERSION:-0.8.3-cpu}
+    profiles: ["stts"]
+    container_name: speaches
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${SPEACHES_PORT:-5003}:8000"
+    volumes:
+      - speaches-data:/home/ubuntu/.cache/huggingface/hub
+
+networks:
+  # #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+  coding-agents:
+    name: coding-agents
+    driver: bridge

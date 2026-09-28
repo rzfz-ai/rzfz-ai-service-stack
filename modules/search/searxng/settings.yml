@@ -1,0 +1,107 @@
+# -----------------------------------------------------------------
+# MINIMALE settings.yml NUR FÜR OPEN WEBUI FIXES
+#
+# Server-, General-, BaseURL- und Secret-Key-Einstellungen
+# kommen aus der .env-Datei (docker-compose.yml).
+# -----------------------------------------------------------------
+
+use_default_settings:
+  engines:
+    remove:
+      - duckduckgo
+      - duckduckgo images
+      - duckduckgo videos
+      - duckduckgo news
+      - duckduckgo weather
+      - duckduckgo definitions
+      - ahmia
+      - torch
+      - brave
+      - brave.images
+      - brave.videos
+      - brave.news
+
+general:
+  #debug:true
+  base_url: "http://127.0.0.1:8088"
+  instance_name: "SearXNG"
+  language: "de"
+
+search:
+  # Suchsprache für Engines (verhindert hl=ZZ-ZZ bei Google)
+  default_lang: "de"
+  # Erlaube 'json'-Anfragen, die Open WebUI stellt
+  formats:
+    - html
+    - json
+
+server:
+  use_proxy: false
+  bind_address: "127.0.0.1"
+  port: "8088"
+  secret_key: "7021a21f53794a2e5cceecf5c5cf8b337f52d539d97227dd79dac4bb26117963"
+
+api:
+  # Aktiviere die JSON-API explizit
+  json_format: true
+
+# -----------------------------------------------------------------
+# KORREKTUR FÜR 403 FORBIDDEN (DOCKER-NETZWERKE)
+# -----------------------------------------------------------------
+limiter:
+  # DIES IST DER WICHTIGSTE FIX:
+  # Erlaube Anfragen von IPs in gängigen Docker-Netzwerk-Bereichen.
+  - key: "ip"
+    limit: "600/minute" # Sehr hohes Limit für vertrauenswürdige IPs
+    bypassed_if: >
+      ip.in_network('127.0.0.1') or
+      ip.in_network('172.17.0.0/16') or
+      ip.in_network('172.18.0.0/16') or
+      ip.in_network('172.19.0.0/16') or
+      ip.in_network('172.20.0.0/16') or
+      ip.in_network('192.168.0.0/16')
+
+  # Standard-Limit für alle anderen (externen) IPs
+  - key: "ip"
+    limit: "20/minute"
+    actions:
+      - "block"
+  - key: "ip_search_api"
+    limit: "10/minute"
+    actions:
+      - "block"
+
+# -----------------------------------------------------------------
+# BEISPIEL-SUCHMASCHINEN
+# -----------------------------------------------------------------
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    categories: [general]
+    timeout: 3.0
+    enabled: true
+  - name: bing
+    engine: bing
+    shortcut: bi
+    categories: [general]
+    timeout: 3.0
+    enabled: true
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    categories: [general]
+    timeout: 3.0
+    enabled: true
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    categories: [general]
+    timeout: 3.0
+    enabled: true
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    categories: [general]
+    timeout: 3.0
+    enabled: true

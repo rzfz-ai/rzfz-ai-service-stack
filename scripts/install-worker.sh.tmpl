@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# rzfz.ai — turn a blank box into a registered inference worker (#1059).
+#
+#   curl -fsSL https://<master>/install-worker | bash -s -- --token <enrol-token> \
+#        [--name worker-2] [--hardware amd|cpu|nvidia|cuda-gb10]
+#
+# This file is a TEMPLATE. The master's LLM Manager renders it per request at
+# GET /install-worker, substituting the placeholders below with ITS OWN
+# coordinates — so the script an operator fetches always matches the master it
+# came from, and there is nothing to keep in sync by hand.
+#
+# WHAT IS AND IS NOT A SECRET HERE
+# --------------------------------
+# Nothing in this file is a secret, by design, and the /install-worker route is
+# deliberately UNAUTHENTICATED: a blank box has no Authentik session and cannot
+# get one until it is enrolled. What it carries is the master's URL, the
+# master's CA FINGERPRINT (public by construction — the node authenticates the
+# CA it fetches by hashing it, #585) and image coordinates.
+#
+# The **enrolment token is the only secret**, it is passed as `--token` at run
+# time, and it is what actually authorises joining the fleet (#340: TTL,
+# single-use jti, revocable). It is minted per worker in the Fleet console and
+# NEVER templated into this file — an unauthenticated route that handed out
+# valid enrolment tokens would be an open door into the fleet, whoever asked.
+#
+# ONE ENROLMENT IMPLEMENTATION
+# ----------------------------
+# This script does NOT talk to /api/workers/enroll. It fetches the master's
+# worker bundle — which contains the very `cli/worker-join.sh` a full box uses —
+# and runs THAT. There is one enrolment path in the product, and adding a second
+# one here would be the kind of duplicate that drifts silently until a token
+# format changes.
+#
+# AIR-GAP / "download, inspect, run"
+# ----------------------------------
+# The same file is also served statically at https://<master>/install-worker.sh
+# straight off the master's disk (the Caddy fallback, for when the manager is
+# not reachable — an offline master, or an operator who wants to read before
+# running). Fetched that way the placeholders are UNSUBSTITUTED, and the script
+# then REQUIRES `--master` (and `--ca-pin` on a self-signed master) rather than
+# guessing: an unresolved placeholder is treated as "unset", never as a value.
+# ==============================================================================
+set -euo pipefail
+
+# --- rendered by the master (see the note above) ------------------------------
+# Each default is a placeholder of the form '@@' + NAME + '@@'. `_resolved`
+# treats any value that still looks like one as UNSET, which is what makes the
+# statically-served copy usable with explicit flags.
+MASTER_URL_DEFAULT="@@RZFZ_MASTER_URL@@"
+CA_PIN_DEFAULT="@@RZFZ_CA_PIN@@"
+AGENT_IMAGE_DEFAULT="@@RZFZ_AGENT_IMAGE@@"
+REGISTRY_DEFAULT="@@RZFZ_REGISTRY@@"
+STACK_VERSION="@@RZFZ_STACK_VERSION@@"
+
+# --- where things land (overridable so the logic is testable off-box) ---------
+WORKER_DIR="${RZFZ_WORKER_DIR:-/opt/rzfz-worker}"
+SYSTEMD_DIR="${RZFZ_SYSTEMD_DIR:-/etc/systemd/system}"
+OS_RELEASE="${RZFZ_OS_RELEASE:-/etc/os-release}"
+COMPOSE_PROJECT="${RZFZ_NODE_PROJECT:-rzfz-node}"
+SERVICE_NAME="llm-worker-agent.service"
+#: The bundle the master serves: the minimal runtime a thin node needs, and the
+#: enrolment implementation itself. Laid out on disk so worker-join.sh resolves
+#: its own SCRIPT_DIR + scripts/lib.sh exactly as it does in a checkout.
+BUNDLE_ROUTE="${RZFZ_BUNDLE_ROUTE:-/worker-bundle}"
+
+MASTER=""
+TOKEN=""
+NAME=""
+HARDWARE="cpu"
+CA_PIN=""
+OFFLINE_DIR=""
+AGENT_IMAGE=""
+REGISTRY=""
+ADVERTISE=""
+CO_LOCATED=0
+ARCH=""
+CA_FILE=""
+CURL_TLS=()
+
+usage() {
+    cat <<'EOF'
+rzfz.ai — install this box as an inference worker
+
+Usage:
+  curl -fsSL https://<master>/install-worker | bash -s -- --token <token> [options]
+
+Required:
+  --token <token>        Enrolment token, minted in the Fleet console
+                         (Fleet -> Add worker). Short-lived and single-use.
+
+Options:
+  --name <name>          Preferred worker name. The token's name wins (#285).
+  --hardware <class>     amd | cpu | nvidia   (default: cpu)
+                         cpu is a FIRST-CLASS worker class, not a fallback.
+  --master <url>         The master's URL. Required only when this script was
+                         fetched statically (placeholders unresolved).
+  --ca-pin sha256:<hex>  The master's CA fingerprint. Required for a
+                         self-signed master; the console emits one with the
+                         command.
+  --offline <dir>        Install from a staged offline package instead of the
+                         network.
+  -h, --help             Show this help
+  --advertise <host:port>  How the master should label this node's engines
+                         (#262). Sets LLM_WORKER_ADVERTISE_ADDR, which is what
+                         makes the node REMOTE: its inference is relay-routed
+                         and its registry is the master's hub. Default: this
+                         box's address on the route to the master, port 8090.
+  --co-located           This box IS the master's machine — no advertise
+                         address, container DNS reaches the engines directly.
+
+Supported: Ubuntu 24.04+ on amd64 or arm64. Docker is installed if absent and
+LEFT ALONE if already present.
+EOF
+}
+
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'NOTE: %s\n' "$*" >&2; }
+note() { printf '  %s\n' "$*"; }
+step() { printf '\n== %s\n' "$*"; }
+
+# A placeholder the master never substituted is NOT a value.
+_resolved() {
+    case "${1:-}" in
+        ""|@@*@@) return 1 ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --token)    TOKEN="${2:?--token needs a value}"; shift 2 ;;
+            --name)     NAME="${2:?--name needs a value}"; shift 2 ;;
+            --hardware) HARDWARE="${2:?--hardware needs amd|cpu|nvidia}"; shift 2 ;;
+            --master)   MASTER="${2:?--master needs a URL}"; shift 2 ;;
+            --ca-pin)   CA_PIN="${2:?--ca-pin needs a fingerprint}"; shift 2 ;;
+            --offline)  OFFLINE_DIR="${2:?--offline needs a directory}"; shift 2 ;;
+            --advertise) ADVERTISE="${2:?--advertise needs host:port}"; shift 2 ;;
+            --co-located) CO_LOCATED=1; shift ;;
+            -h|--help)  usage; exit 0 ;;
+            *) printf 'unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+        esac
+    done
+}
+
+# The address this box shows the master, as the master would reach it: the
+# source address of the route toward the master's host (what `ip route get`
+# picks), plus the worker-agent port. Empty when the route cannot be
+# determined — the install then says so and the operator passes --advertise.
+derive_advertise() {
+    local master="$1" host ip
+    host="${master#*://}"; host="${host%%/*}"; host="${host%%:*}"
+    [ -n "$host" ] || return 1
+    ip="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}')"
+    [ -n "$ip" ] || ip="$host"
+    ip="$(ip -4 route get "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    [ -n "$ip" ] || return 1
+    printf '%s:%s\n' "$ip" "${RZFZ_WORKER_AGENT_PORT:-8090}"
+}
+
+resolve_config() {
+    [ -n "$MASTER" ] || MASTER="$(_resolved "$MASTER_URL_DEFAULT" || true)"
+    [ -n "$CA_PIN" ] || CA_PIN="$(_resolved "$CA_PIN_DEFAULT" || true)"
+    AGENT_IMAGE="$(_resolved "$AGENT_IMAGE_DEFAULT" || true)"
+    REGISTRY="$(_resolved "$REGISTRY_DEFAULT" || true)"
+    # #1419: a node installed from the master's one-liner is, by definition,
+    # NOT the master's machine — yet without LLM_WORKER_ADVERTISE_ADDR the
+    # manager treated it as co-located, wrote the node's container names into
+    # the router config (500 on every /v1 call) and the agent pinned its
+    # registry to the master's compose-network name. The advertise address is
+    # the REMOTE signal (the master routes back through the worker's WS relay,
+    # #262 Task 4), so derive it here unless the operator says otherwise.
+    if [ "$CO_LOCATED" = 1 ]; then
+        ADVERTISE=""
+    elif [ -z "$ADVERTISE" ]; then
+        ADVERTISE="$(derive_advertise "$MASTER" || true)"
+    fi
+    MASTER="${MASTER%/}"
+}
+
+validate() {
+    [ -n "$TOKEN" ] || die "--token is required (mint one in Fleet -> Add worker)."
+    [ -n "$MASTER" ] || die "no master URL: this copy of the script was not rendered by a master, so pass --master https://<master>."
+    # #1517 rev-B: the retired spellings are accepted so a documented command
+    # keeps working — but they are FOLDED here, loudly, exactly as cli/node-init.sh
+    # does it. Accepting them silently and then writing them into `.env.node`
+    # (which is what this did) kept stamping NEW nodes with `HARDWARE=cuda-gb10`,
+    # so the "one cycle, then gone" deprecation could never end. It also made the
+    # error message below contradict the list two lines above it.
+    case "$HARDWARE" in
+        gb10|nvidia-gb10|cuda-gb10|cuda)
+            warn "--hardware ${HARDWARE} is retired; enrolling this node as 'nvidia'. Its runner is chosen from the GPU's CUDA compute capability (#1517)."
+            HARDWARE="nvidia" ;;
+    esac
+    case "$HARDWARE" in
+        amd|cpu|nvidia) ;;
+        *) die "--hardware must be amd, cpu or nvidia (got '${HARDWARE}'). #1517: a GB10 enrols as 'nvidia'; its runner is chosen from the GPU's CUDA compute capability." ;;
+    esac
+    if [ -n "$CA_PIN" ] && ! printf '%s' "$CA_PIN" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+        die "--ca-pin must look like sha256:<64 lowercase hex>. Got: ${CA_PIN}"
+    fi
+    [ -z "$OFFLINE_DIR" ] || die "the offline/air-gap source is not in this build yet (#1059 P4). Nothing was changed."
+}
+
+# ==============================================================================
+# P3.1 — the platform: architecture, OS, docker, and (on nvidia) the toolkit
+# ==============================================================================
+
+# amd64 + arm64 on Ubuntu 24.04+ is the v1 support matrix (spec, decision 5).
+# Refusing an unsupported arch here is far kinder than failing three steps later
+# on an image manifest that has no matching platform.
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *) die "unsupported architecture $(uname -m) — v1 supports amd64 and arm64." ;;
+    esac
+    printf '%s\n' "$ARCH"
+}
+
+# Reads ID/VERSION_ID out of os-release WITHOUT sourcing it: an os-release is a
+# file on a machine we are about to install software on, and `source` executes
+# whatever is in it.
+os_field() {
+    local key="$1"
+    [ -r "$OS_RELEASE" ] || return 1
+    local raw
+    raw=$(grep -E "^${key}=" "$OS_RELEASE" 2>/dev/null | head -n1 | cut -d= -f2-) || return 1
+    raw="${raw%\"}"; raw="${raw#\"}"
+    printf '%s\n' "$raw"
+}
+
+check_os() {
+    local id ver
+    id="$(os_field ID || true)"
+    ver="$(os_field VERSION_ID || true)"
+    if [ "${RZFZ_ALLOW_ANY_OS:-0}" = "1" ]; then
+        note "OS check bypassed (RZFZ_ALLOW_ANY_OS=1): ${id:-unknown} ${ver:-unknown}"
+        return 0
+    fi
+    [ "$id" = "ubuntu" ] || die "unsupported OS '${id:-unknown}' — v1 supports Ubuntu 24.04+. Set RZFZ_ALLOW_ANY_OS=1 to try anyway."
+    # 24.04 <= ver, compared as major.minor rather than as a string ("4.10"
+    # sorts above "24.04" lexically, which is how this check usually goes wrong).
+    local major="${ver%%.*}"
+    [ -n "$major" ] && [ "$major" -ge 24 ] 2>/dev/null \
+        || die "Ubuntu ${ver:-unknown} is too old — v1 supports 24.04+. Set RZFZ_ALLOW_ANY_OS=1 to try anyway."
+    note "OS: ubuntu ${ver} (${ARCH})"
+}
+
+docker_usable()  { command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; }
+compose_usable() { docker compose version >/dev/null 2>&1; }
+
+as_root() {
+    if [ "$(id -u)" = "0" ]; then "$@"; else sudo "$@"; fi
+}
+
+# VERIFY-OR-INSTALL, never verify-and-clobber (#1051 RUNNER_ONLY). A box that
+# already runs Docker may be running someone else's containers; restarting the
+# daemon or rewriting daemon.json to "normalise" it is how an install of one
+# thing takes down another. If the daemon works, we use it and touch nothing.
+ensure_docker() {
+    if docker_usable; then
+        note "docker is already installed and running — NOT touching the daemon"
+    else
+        if command -v docker >/dev/null 2>&1; then
+            # Installed but not answering: could be a stopped unit on a fresh
+            # image. Enabling is in scope; reconfiguring is not.
+            note "docker is installed but not responding — enabling the service"
+            as_root systemctl enable --now docker || true
+            docker_usable || die "docker is installed but the daemon is not reachable. Fix it (systemctl status docker) and re-run."
+        else
+            note "installing docker.io + compose v2 (the same pair the fleet and appliance install)"
+            as_root env DEBIAN_FRONTEND=noninteractive apt-get update -y
+            as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+            as_root systemctl enable --now docker
+            docker_usable || die "docker was installed but the daemon is not reachable."
+        fi
+    fi
+    if ! compose_usable; then
+        note "installing the compose v2 plugin"
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2
+        compose_usable || die "'docker compose' is still unavailable after installing docker-compose-v2."
+    fi
+    note "docker + compose v2 ready"
+}
+
+# The NVIDIA/CUDA family exactly as the node agent spells it
+# (modules/llm/node-agent/app/drivers/base.py: _HARDWARE_ALIASES + CUDA_CLASSES):
+# the fleet token `nvidia`, the driver class `cuda`, and the GB10 class with its
+# short forms. The toolkit decision below branches on the FAMILY — a `cuda-gb10`
+# worker without the runtime starts its engines on the CPU exactly like a
+# `nvidia` one, and before #1429 it was not even asked (#1329 added the class to
+# the agent, not to this installer). A consistency test pins this list to base.py.
+nvidia_family() {
+    case "$HARDWARE" in
+        nvidia|cuda|cuda-gb10|gb10|nvidia-gb10) return 0 ;;
+    esac
+    return 1
+}
+
+# Docker lists the `nvidia` runtime only after `nvidia-ctk runtime configure`
+# wrote it into daemon.json AND the daemon re-read that file.
+nvidia_runtime_registered() {
+    docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'
+}
+
+# An NVIDIA worker WITHOUT the container toolkit starts engines that cannot see
+# the GPU — they run, slowly, on the CPU, and nothing reports a fault. So this
+# refuses rather than continuing when the toolkit cannot be installed.
+#
+# A present toolkit is NOT enough either (#1429): DGX OS on the GB10 ships
+# nvidia-ctk for CDI (`--device nvidia.com/gpu=all`) without registering the
+# `nvidia` runtime that the agent's CUDA drivers request (`runtime="nvidia"`),
+# so every engine start there failed with "unknown or invalid runtime name:
+# nvidia". The registration therefore runs whenever docker does not list the
+# runtime — whether the toolkit was just installed or was there all along.
+ensure_nvidia_toolkit() {
+    nvidia_family || return 0
+    if command -v nvidia-ctk >/dev/null 2>&1; then
+        note "nvidia container toolkit present"
+    else
+        note "installing the nvidia container toolkit"
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-container-toolkit \
+            || die "--hardware ${HARDWARE} was requested but nvidia-container-toolkit is not installable from this box's apt sources.
+       Add NVIDIA's repository (or install the toolkit by hand) and re-run. Continuing
+       would give you a worker whose engines silently run on the CPU."
+        note "nvidia container toolkit installed"
+    fi
+    if nvidia_runtime_registered; then
+        note "nvidia docker runtime registered"
+        return 0
+    fi
+    note "registering the nvidia docker runtime"
+    as_root nvidia-ctk runtime configure --runtime=docker
+    as_root systemctl restart docker
+    nvidia_runtime_registered \
+        || die "nvidia-ctk configured the nvidia runtime, but docker still does not list it after the restart.
+       Check /etc/docker/daemon.json and 'docker info --format {{json .Runtimes}}', then re-run.
+       Without the runtime every engine start on this worker fails with 'unknown or invalid runtime name: nvidia'."
+    note "nvidia docker runtime registered"
+}
+
+# ==============================================================================
+# P3.2 — the master's bundle, enrolment, and the systemd service
+# ==============================================================================
+
+# TLS trust, established BEFORE anything is fetched.
+#
+# The pin is a fingerprint, and a chain cannot be verified against a hash — so
+# fetch the CA over the untrusted connection, AUTHENTICATE those bytes against
+# the pin we already hold, then hand the file to curl as --cacert for every
+# subsequent request. curl then requires the master's leaf to verify against it,
+# which closes the "replay the genuine CA in front of my own certificate" gap.
+# Same algorithm as cli/worker-join.sh, on purpose.
+verify_master() {
+    if [ -z "$CA_PIN" ]; then
+        # No pin: the master must be verifiable against the system trust store
+        # (a real certificate). We deliberately do NOT fall back to -k here —
+        # `curl | bash` over an unverified connection, on a box that will then
+        # accept code rollouts from that same address, is not a trade-off worth
+        # offering silently.
+        CURL_TLS=()
+        curl -fsS --max-time 30 -o /dev/null "${MASTER}/healthz" 2>/dev/null && {
+            note "master verified against the system trust store"
+            return 0
+        }
+        die "cannot verify ${MASTER} from this box and no --ca-pin was given.
+       A self-signed master needs its pin; Fleet -> Add worker emits one with the command."
+    fi
+    command -v openssl >/dev/null 2>&1 || die "--ca-pin was given but openssl is not installed."
+    CA_FILE="$(mktemp)"
+    curl -fsSk --max-time 30 "${MASTER}/api/workers/ca.pem" -o "$CA_FILE" \
+        || die "the master did not serve its CA at ${MASTER}/api/workers/ca.pem — a pin cannot be checked without it."
+    grep -q 'BEGIN CERTIFICATE' "$CA_FILE" || die "the master's CA endpoint did not return a certificate."
+    local got
+    got="sha256:$(openssl x509 -in "$CA_FILE" -outform DER 2>/dev/null \
+                  | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+    if [ "$got" != "$CA_PIN" ]; then
+        die "PIN MISMATCH — refusing to install.
+       expected: ${CA_PIN}
+       served:   ${got}
+       Either the command is stale, or something that is not the master is answering."
+    fi
+    CURL_TLS=(--cacert "$CA_FILE")
+    note "master verified: the served CA matches the pin"
+}
+
+# #1860: the CA this installer VERIFIED must also be trusted by the process that
+# PULLS — and that is the docker daemon, not curl.
+#
+# `verify_master` fetches the master's CA, checks it against the pin, and hands
+# it to `CURL_TLS=(--cacert …)`. That covers every fetch this script makes. It
+# does NOT cover the image pulls: `worker-join.sh` pulls the agent image, and
+# the node-agent later pulls runner images through the docker SDK — both of
+# which are executed by the DAEMON, which reads /etc/docker/certs.d/<host>/ca.crt
+# and knows nothing about our temp file.
+#
+# Behind a self-signed master the result is an x509 failure on every image pull,
+# with the credentials and the ref both correct — measured on a fleet node
+# (#1860). Same shape as #1625: the certificate was fetched and verified, and
+# then not given to the one that acts.
+#
+# Deliberately narrow:
+#   * only when a CA was actually verified (no pin → the master is publicly
+#     trusted and the daemon already knows it);
+#   * only for a registry host that needs it — docker treats 127.0.0.0/8 as
+#     insecure-by-default, so writing into /etc/docker for a localhost registry
+#     would be a mutation with no effect;
+#   * one file, root-owned, 0644 — the CA is public by construction (#585).
+trust_registry_ca() {
+    [ -n "$CA_FILE" ] && [ -s "$CA_FILE" ] || return 0
+    [ -n "$REGISTRY" ] || return 0
+    local host="${REGISTRY#*://}"
+    host="${host%%/*}"
+    case "$host" in
+        localhost|localhost:*|127.*|::1|"[::1]"*)
+            note "registry ${host} is local — docker trusts it without a CA"
+            return 0 ;;
+    esac
+    local dir="${RZFZ_DOCKER_CERTS_DIR:-/etc/docker/certs.d}/${host}"
+    as_root install -d -m 0755 "$dir" || die "could not create ${dir}"
+    as_root tee "${dir}/ca.crt" < "$CA_FILE" >/dev/null \
+        || die "could not write ${dir}/ca.crt"
+    as_root chmod 0644 "${dir}/ca.crt"
+    note "docker now trusts the master's CA for ${host}"
+}
+
+fetch() {
+    local url="$1" dest="$2"
+    as_root install -d -m 0755 "$(dirname "$dest")"
+    curl -fsSL "${CURL_TLS[@]+"${CURL_TLS[@]}"}" --max-time 120 "$url" \
+        | as_root tee "$dest" >/dev/null \
+        || die "could not fetch ${url}"
+}
+
+# The bundle is laid out EXACTLY as it sits in a checkout, because
+# cli/worker-join.sh resolves its own SCRIPT_DIR and sources scripts/lib.sh
+# relative to it. Reproducing the layout is what lets us run the real thing
+# instead of writing a second enrolment client.
+fetch_bundle() {
+    step "Fetching the worker bundle from ${MASTER}"
+    fetch "${MASTER}${BUNDLE_ROUTE}/worker-join.sh"  "${WORKER_DIR}/cli/worker-join.sh"
+    fetch "${MASTER}${BUNDLE_ROUTE}/lib.sh"          "${WORKER_DIR}/scripts/lib.sh"
+    fetch "${MASTER}${BUNDLE_ROUTE}/compose.thin.yml" "${WORKER_DIR}/modules/llm/node-agent/compose.thin.yml"
+    fetch "${MASTER}${BUNDLE_ROUTE}/node.env.example" "${WORKER_DIR}/config/node.env.example"
+    as_root chmod 0755 "${WORKER_DIR}/cli/worker-join.sh"
+    note "bundle staged in ${WORKER_DIR}"
+}
+
+# Small and local on purpose: the alternative is sourcing the bundle's lib.sh
+# into this process, and a blank-box bootstrap should not take a dependency on
+# a 1900-line library to set three keys.
+env_set() {
+    local file="$1" key="$2" value="$3" tmp
+    tmp="$(mktemp)"
+    if as_root grep -qE "^${key}=" "$file"; then
+        as_root sed "s|^${key}=.*|${key}=${value}|" "$file" > "$tmp"
+    else
+        as_root cat "$file" > "$tmp"
+        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    fi
+    as_root tee "$file" < "$tmp" >/dev/null
+    rm -f "$tmp"
+}
+
+write_env() {
+    step "Writing ${WORKER_DIR}/.env.node"
+    local env_file="${WORKER_DIR}/.env.node"
+    if [ ! -f "$env_file" ]; then
+        as_root cp "${WORKER_DIR}/config/node.env.example" "$env_file"
+    fi
+    # 0600 BEFORE anything secret lands in it: worker-join writes this node's
+    # command key here, and the template ships 0644.
+    as_root chmod 600 "$env_file"
+    env_set "$env_file" "HARDWARE" "$HARDWARE"
+    [ -z "$REGISTRY" ] || {
+        env_set "$env_file" "LLM_REGISTRY_URL" "https://${REGISTRY#*://}"
+        env_set "$env_file" "LLM_WORKER_RUNNER_REGISTRY" "${REGISTRY#*://}"
+    }
+    if [ -n "$ADVERTISE" ]; then
+        env_set "$env_file" "LLM_WORKER_ADVERTISE_ADDR" "$ADVERTISE"
+    elif [ "$CO_LOCATED" != 1 ]; then
+        echo "WARN: could not derive this box's address toward ${MASTER} — the node will register as CO-LOCATED and the master cannot route to it (#1419). Re-run with --advertise <host:port>, or --co-located if this really is the master's machine." >&2
+    fi
+    write_gpu_access "$env_file"
+    write_cuda_capability "$env_file"
+    note "hardware=${HARDWARE} registry=${REGISTRY:-<master default>} advertise=${ADVERTISE:-<co-located>}"
+}
+
+# #1552 — the AGENT's own GPU access on an NVIDIA node.
+#
+# The agent launches engine containers; it does not run inference. But it
+# reports this node's memory picture, and on NVIDIA that reading comes from
+# nvidia-smi/NVML, which a container sees only with the nvidia runtime and the
+# `utility` capability. Measured on the GB10 (.191) before this: the agent ran
+# `runtime=runc` with no NVIDIA_* env and no nvidia-smi inside, so `vram_total`
+# was empty and the manager's admission gate was INERT for that worker
+# (#227/#328 — it accepts placements it cannot hold). AMD reads amdgpu sysfs,
+# which every container sees; CPU needs nothing. So this is NVIDIA-only.
+#
+# The values live in `.env.node` rather than in a second compose file because
+# the node runs ONE compose file from a systemd unit — an overlay would mean
+# editing the unit per hardware class.
+#
+# An operator value is never overwritten: a box that pins a different runtime
+# (or restricts NVIDIA_VISIBLE_DEVICES to one card) keeps it.
+write_gpu_access() {
+    local env_file="$1"
+    [ "$HARDWARE" = "nvidia" ] || return 0
+    if as_root grep -qE "^LLM_WORKER_RUNTIME=.+" "$env_file" 2>/dev/null; then
+        note "LLM_WORKER_RUNTIME already set in .env.node — left alone."
+        return 0
+    fi
+    if ! docker info --format "{{json .Runtimes}}" 2>/dev/null | grep -q nvidia; then
+        warn "the docker daemon has no 'nvidia' runtime, so the agent cannot read this GPU. Install nvidia-container-toolkit and re-run, or the manager will see no VRAM for this worker and its admission gate stays inert (#1552/#328)."
+        return 0
+    fi
+    env_set "$env_file" "LLM_WORKER_RUNTIME" "nvidia"
+    env_set "$env_file" "NVIDIA_VISIBLE_DEVICES" "all"
+    env_set "$env_file" "NVIDIA_DRIVER_CAPABILITIES" "utility"
+    note "agent GPU access: runtime=nvidia, capabilities=utility (memory reporting only)."
+}
+
+# #1517: record the GPU's CUDA compute capability at install time.
+#
+# The agent picks its llama.cpp runner from that number (a CUDA binary is
+# compiled FOR a capability), and it asks the card itself with
+# `nvidia-smi --query-gpu=compute_cap`. On a THIN node it cannot: measured on
+# the GB10 (.191) the agent container runs `runtime=runc` with no NVIDIA_* env
+# and no nvidia-smi inside — `modules/llm/node-agent/compose.thin.yml` gives it
+# no GPU access, and it does not need any for its actual job (it launches
+# engine containers, it does not run inference). The HOST has the tool, the
+# answer is a property of the box, and the agent already reads the override —
+# so the installer asks once and writes it down.
+#
+# Without this the node enrols fine and then refuses its first load with
+# "unknown CUDA capability", which is exactly the hand-typed-vocabulary
+# failure #1517 exists to remove — only moved from `--hardware cuda-gb10` to
+# a variable nobody knows to set.
+#
+# An existing value is never overwritten: it is the documented override for a
+# box the probe gets wrong.
+write_cuda_capability() {
+    local env_file="$1" cap=""
+    [ "$HARDWARE" = "nvidia" ] || return 0
+    if as_root grep -qE "^RAZZFAZZ_CUDA_COMPUTE_CAP=.+" "$env_file" 2>/dev/null; then
+        note "RAZZFAZZ_CUDA_COMPUTE_CAP already set in .env.node — left alone."
+        return 0
+    fi
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        warn "nvidia-smi not found on this host, so the GPU's CUDA compute capability could not be recorded. The agent cannot ask the card itself on a thin node — set RAZZFAZZ_CUDA_COMPUTE_CAP (e.g. 12.0 for RTX PRO 6000, 12.1 for GB10) in ${env_file} before deploying a model (#1517)."
+        return 0
+    fi
+    # First card decides; a multi-GPU box with mixed capabilities is the
+    # operator's to resolve with the override (same rule as the agent).
+    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d "[:space:]" | head -n1)"
+    case "$cap" in
+        ""|*[!0-9.]*|N/A)
+            warn "nvidia-smi did not report a usable compute capability (got '${cap:-<empty>}') — set RAZZFAZZ_CUDA_COMPUTE_CAP in ${env_file} by hand (#1517)."
+            return 0 ;;
+    esac
+    env_set "$env_file" "RAZZFAZZ_CUDA_COMPUTE_CAP" "$cap"
+    note "CUDA compute capability ${cap} recorded (the agent has no GPU access on a thin node and cannot probe it)."
+}
+
+# THE enrolment step — and the only one. `cli/worker-join.sh` verifies the pin,
+# exchanges the token for this worker's command key, and persists
+# LLM_WORKER_COMMAND_KEY + LLM_MANAGER_URL + the CA into the env file.
+enrol() {
+    step "Enrolling with ${MASTER}"
+    local args=(--manager "$MASTER" --token "$TOKEN" --env-file "${WORKER_DIR}/.env.node")
+    [ -z "$NAME" ]   || args+=(--name "$NAME")
+    [ -z "$CA_PIN" ] || args+=(--ca-pin "$CA_PIN")
+    as_root bash "${WORKER_DIR}/cli/worker-join.sh" "${args[@]}" \
+        || die "enrolment failed — nothing was started. The token is single-use; mint a fresh one."
+}
+
+# The systemd unit is the ONLY host-level install this leaves behind. Type=oneshot
+# + RemainAfterExit because compose exits once the containers are up; the
+# containers' own restart policy handles crashes, and the unit handles boot.
+write_service() {
+    step "Installing ${SERVICE_NAME}"
+    local unit="${SYSTEMD_DIR}/${SERVICE_NAME}"
+    local compose="${WORKER_DIR}/modules/llm/node-agent/compose.thin.yml"
+    local tmp; tmp="$(mktemp)"
+    cat > "$tmp" <<UNIT
+[Unit]
+Description=rzfz.ai LLM worker agent (#1059)
+Documentation=https://git.razzfazz.ai/razzfazz.ai/razzfazz-ai-service-stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${WORKER_DIR}
+Environment=RZFZ_WORKER_STACK_VERSION=${STACK_VERSION}
+ExecStart=/usr/bin/docker compose -p ${COMPOSE_PROJECT} -f ${compose} --env-file ${WORKER_DIR}/.env.node up -d
+ExecStop=/usr/bin/docker compose -p ${COMPOSE_PROJECT} -f ${compose} --env-file ${WORKER_DIR}/.env.node down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    as_root install -d -m 0755 "$SYSTEMD_DIR"
+    as_root tee "$unit" < "$tmp" >/dev/null
+    rm -f "$tmp"
+    as_root chmod 0644 "$unit"
+    as_root systemctl daemon-reload
+    as_root systemctl enable --now "$SERVICE_NAME" \
+        || die "the worker service did not start. Inspect: systemctl status ${SERVICE_NAME}"
+    # #1438: `enable --now` is not the start's verdict. On the first GB10 join
+    # (2026-09-05) it returned 0 while systemd printed "Job for
+    # llm-worker-agent.service failed" (compose could not build the agent image),
+    # and this script went on to announce "This box is now a worker" — of a
+    # worker that did not exist. Ask systemd for the unit's state; a oneshot +
+    # RemainAfterExit unit is `active` exactly when its compose `up -d` succeeded.
+    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        printf -- '--- journalctl -u %s (last 20 lines) ---\n' "$SERVICE_NAME" >&2
+        as_root journalctl -u "$SERVICE_NAME" --no-pager -n 20 >&2 || true
+        die "${SERVICE_NAME} is not active after start (systemctl is-active: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)).
+       The box is enrolled with the master, but no worker is running on it. Fix the cause
+       shown above, then: systemctl restart ${SERVICE_NAME}"
+    fi
+    note "${SERVICE_NAME} active + enabled — the worker comes back after a reboot"
+}
+
+report() {
+    printf '\n'
+    printf 'This box is now a worker of %s\n' "$MASTER"
+    note "agent:    ${AGENT_IMAGE:-<master default>}"
+    note "service:  ${SERVICE_NAME}   (systemctl status ${SERVICE_NAME})"
+    note "config:   ${WORKER_DIR}/.env.node"
+    printf '\n'
+    printf 'It appears in the Fleet console at %s (pending approval if the\n' "${MASTER}/#/fleet"
+    printf 'master runs approval_mode=manual, #419).\n'
+}
+
+main() {
+    parse_args "$@"
+    resolve_config
+    validate
+
+    step "rzfz.ai worker install${STACK_VERSION:+ (${STACK_VERSION})}"
+    detect_arch >/dev/null
+    check_os
+    note "master:   ${MASTER}"
+    note "pin:      ${CA_PIN:-<none>}"
+    note "name:     ${NAME:-<from token>}"
+
+    step "Docker"
+    ensure_docker
+    ensure_nvidia_toolkit
+
+    verify_master
+    trust_registry_ca
+    fetch_bundle
+    write_env
+    enrol
+    write_service
+    report
+}
+
+# Sourcing this file with RZFZ_INSTALL_WORKER_LIB=1 defines the functions
+# without running the install — that is how the unit tests exercise the
+# platform and bundle logic with stubbed docker/apt/systemctl.
+if [ "${RZFZ_INSTALL_WORKER_LIB:-0}" != "1" ]; then
+    main "$@"
+fi

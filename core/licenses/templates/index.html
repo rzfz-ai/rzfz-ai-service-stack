@@ -1,0 +1,180 @@
+{# #983 licenses redesign — Task 3.
+
+   Ports the operator-signed-off prototype (Gitea epic #983): a dark
+   collapsible category rail on the left (razzfazz.ai tiers + bundled-upstream
+   categories, with counts), a light content column (3 open-core tier cards +
+   section cards whose rows carry colour-coded license-family chips + a live
+   filter), and an in-site slide-in side pane (markup only here — the fetch /
+   open / close behaviour is licenses.js, added in the NEXT task).
+
+   Overrides razz_base's `layout` block (same pattern as core/config/app/
+   templates/base.html and core/help/templates/base.html) instead of
+   `content`, because the rail + main shell needs to span the full viewport,
+   not the default 1100px-capped `.razz-container`.
+
+   Presentation-only: `sections` (5-tuples: name, license, link, family,
+   local), `nav_categories` ({id, label, count} per section, in section
+   order) and `tiers` ({subscription_change_date, cur_tag}) all come from
+   app.py's index() — no data-model change (#524 current_change_date() is
+   untouched). Page title and footer legal line are unchanged (legal
+   wording — do not edit without sign-off).
+
+   The razzfazz-base.css link is owned by razz_base.html — do not re-link.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai Licence & Attribution Overview{% endblock %}
+
+{% block extra_css %}
+    {# Cache-bust per release, same pattern as core/config/app/templates/base.html
+       and core/help/templates/base.html — otherwise browsers keep serving a
+       stale licenses-overrides.css across upgrades. #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='licenses-overrides.css') }}?v={{ stack_version|default('0') }}">
+{% endblock %}
+
+{# The rail IS the navigation chrome (like config / help) — no separate top header. #}
+{% block header %}{% endblock %}
+
+{% block layout %}
+<div class="app" id="app">
+    <button type="button" class="railopen" id="railopen" title="Show navigation">&#9776;</button>
+    <aside class="rail" id="rail">
+        <div class="brand">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z"/></svg>
+            <span class="bn">rzfz.ai</span>
+            <button type="button" class="railtog" id="railtog" title="Collapse navigation">&laquo;</button>
+        </div>
+        <div class="brand-sub">Licenses</div>
+        <nav id="cats">
+            {% for c in nav_categories %}
+            <a class="rl{% if loop.first %} on{% endif %}" data-j="{{ c.id }}" href="#sec-{{ c.id }}">
+                {{ c.label }}<span class="n">{{ c.count }}</span>
+            </a>
+            {% endfor %}
+        </nav>
+        <div class="legend">
+            <div class="lh">License families</div>
+            <div class="lr"><span class="swatch busl"></span>BSL 1.1 (source-available)</div>
+            <div class="lr"><span class="swatch apache"></span>Apache-2.0</div>
+            <div class="lr"><span class="swatch mit"></span>MIT</div>
+            <div class="lr"><span class="swatch bsd"></span>BSD / PostgreSQL</div>
+            <div class="lr"><span class="swatch copyleft"></span>AGPL / GPL (strong copyleft)</div>
+            {# HLP-8: LGPL is WEAK copyleft — different obligations from AGPL/GPL — and
+               SSPL / Elastic / CC / public-domain ids used to fall through to an
+               uncoloured `other` chip with no legend row to look it up in. #}
+            <div class="lr"><span class="swatch lgpl"></span>LGPL (weak copyleft)</div>
+            <div class="lr"><span class="swatch mpl"></span>MPL-2.0</div>
+            <div class="lr"><span class="swatch sourceavail"></span>SSPL / Elastic (source-available)</div>
+            <div class="lr"><span class="swatch cc"></span>Creative Commons</div>
+            <div class="lr"><span class="swatch publicdomain"></span>Public domain (CC0 / Unlicense)</div>
+            <div class="lr"><span class="swatch other"></span>Other / unclassified</div>
+        </div>
+    </aside>
+
+    <div class="main">
+        <div class="topbar">
+            <span class="crumb"><span class="rz">rzfz.ai</span> Licenses &amp; Attribution</span>
+            <div class="tb-search">
+                <span class="mag" aria-hidden="true">&#128269;</span>
+                <input id="q" type="search" placeholder="Filter components or licenses&#8230;" autocomplete="off">
+            </div>
+            {% if tiers.cur_tag %}<span class="verchip">Current version <b>{{ tiers.cur_tag }}</b></span>{% endif %}
+        </div>
+
+        <div class="body" id="scroll">
+            <div class="tiers" id="tiers">
+                <div class="tier sub">
+                    <h3>rzfz.ai Subscription</h3>
+                    <div class="lic">BUSL-1.1</div>
+                    <p>Our source-available code. Not OSI open source &mdash; you get the source, with a rolling conversion.</p>
+                    {% if tiers.subscription_change_date %}
+                    <div class="cd">Converts to <b>Apache-2.0</b> on <b>{{ tiers.subscription_change_date }}</b></div>
+                    {% endif %}
+                </div>
+                <div class="tier comm">
+                    <h3>rzfz.ai Community</h3>
+                    <div class="lic">Apache-2.0</div>
+                    <p>The open-source tier: compose wiring, config templates, base model wiring, build recipes and documentation.</p>
+                </div>
+                <div class="tier up">
+                    <h3>Bundled upstream</h3>
+                    <div class="lic">Their own licenses</div>
+                    <p>Every third-party component keeps its upstream license, listed below by category with a link to the full text.</p>
+                </div>
+            </div>
+
+            <p class="note">Open-core model. See the repository <code>LICENSE</code>, <code>NOTICE</code>
+                and <code>docs/LICENSING.md</code>. License families below are colour-coded; the Change Date
+                is read from the build this box runs, so it always reflects <b>your</b> version.
+                Questions: <a href="mailto:licensing@razzfazz.ai">licensing@razzfazz.ai</a>.</p>
+
+            {% for s in sections %}
+            <div class="card" id="sec-{{ s.id }}">
+                <h2>
+                    <span class="catbadge {{ s.kind_class }}"></span>{{ s.label }}
+                    <span class="kind kind-{{ s.kind_class }}">{{ s.kind }}</span>
+                    {% if s.note %}<span class="hnote">{{ s.note }}</span>{% endif %}
+                    <span class="cnt">{{ s.count }}</span>
+                </h2>
+                {# HLP-13: `data-lic` carries the license text for the live filter.
+                   The filter used to build its haystack from `r.textContent`, which
+                   includes the chip AND the anchor's literal "view →" — so typing
+                   "view" matched every row on the page. Matching happens on the two
+                   data attributes only. HLP-12: `rel="noopener noreferrer"` on the
+                   external link (modern browsers imply noopener for target=_blank,
+                   but the referrer still leaked); the href scheme is validated
+                   server-side in app.py's license_link(). #}
+                {# #1056: `link` is None when there is neither a downloaded
+                   licence text nor a safe upstream URL. Render NO anchor then —
+                   the previous code emitted a constructed /static/licenses/*.txt
+                   href that no build step ever writes, i.e. a guaranteed 404.
+                   licenses.js already tolerates a row without a `.view` link. #}
+                {% for name, license, link, family, local in s.rows %}
+                <div class="row" data-nm="{{ name|lower }}" data-lic="{{ license|lower }}"{% if link and not local %} data-upstream="{{ link }}"{% endif %}>
+                    <div class="nm">{{ name }}</div>
+                    <span class="chip {{ family }}">{{ license }}</span>
+                    {% if link %}<a class="view" href="{{ link }}"{% if not local %} target="_blank" rel="noopener noreferrer"{% endif %} data-local="{{ 'y' if local else 'n' }}">view {{ '→' if local else '↗' }}</a>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+
+            <div class="empty" id="empty">No components match your filter.</div>
+        </div>
+    </div>
+
+    <div class="scrim" id="scrim"></div>
+    {# HLP-6: the closed pane is off-screen via `transform` only — it keeps
+       `display: flex` and full visibility — so its close button and "Open
+       upstream" link stayed KEYBOARD-FOCUSABLE inside an `aria-hidden="true"`
+       subtree (an ARIA violation, and in practice a keyboard user tabbing into
+       an invisible off-screen pane). `inert` when closed removes it from the
+       tab order and from AT, the CSS adds `visibility: hidden`, and
+       licenses.js moves focus in on open / restores it to the trigger on
+       close. `role="dialog" aria-modal` + the labelled scroll region give the
+       pane the semantics its behaviour already implied. #}
+    <aside class="pane" id="pane" aria-hidden="true" inert
+           role="dialog" aria-modal="true" aria-labelledby="pane-title">
+        <div class="pane-hd">
+            <div class="pt">
+                <h3 id="pane-title">License</h3>
+                <div class="sub" id="pane-sub">Full text &middot; served from this box</div>
+            </div>
+            <button type="button" class="x" id="pane-x" title="Close" aria-label="Close license pane">&times;</button>
+        </div>
+        <div class="pane-meta">
+            <span class="chip" id="pane-chip">&mdash;</span>
+            <a class="up" id="pane-up" href="#" target="_blank" rel="noopener noreferrer">Open upstream &#8599;</a>
+        </div>
+        <div class="pane-body" tabindex="0" role="region" aria-labelledby="pane-title"><pre id="pane-text"></pre></div>
+        <div class="pane-src" id="pane-src"></div>
+    </aside>
+</div>
+<script src="{{ url_for('static', filename='licenses.js') }}?v={{ stack_version|default('0') }}"></script>
+{% endblock %}
+
+{% block footer %}
+<div class="footer">
+    &copy; 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group · Community: Apache-2.0 (open source) · rzfz.ai Subscription: BSL 1.1 (source-available) · licensing@razzfazz.ai
+</div>
+{% endblock %}

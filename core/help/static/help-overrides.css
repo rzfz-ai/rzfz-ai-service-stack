@@ -1,0 +1,562 @@
+/* help-overrides.css — razzfazz-help container-local styles
+ *
+ * #982 Task 5: rewritten for the "rzfz.ai Help Center" shell rework —
+ * ports the operator-signed-off prototype's rail/sub-nav/topbar-search/doc
+ * chrome (Gitea epic #982). Follows the SAME convention already used by
+ * core/config/app/static/styles.css and core/start-portal/static/
+ * start-portal-overrides.css: the #296 design-token set is copied verbatim
+ * into this file's own :root (NOT re-declared in the shared
+ * razzfazz-base.css, which still carries the older --razz-* baseline used
+ * by admin.html's legacy chrome below).
+ *
+ * Structure:
+ *   1. #296 tokens (verbatim)
+ *   2. body reset + background watermark
+ *   3. NEW: rail / sub-nav / topbar-search / doc shell (index.html, viewer.html)
+ *   4. LEGACY: admin.html chrome + shared .panel/.button/.badge classes +
+ *      .doc-content typography (still used to render the actual doc HTML
+ *      inside the new .doc pane — untouched by the shell rework).
+ */
+
+:root {
+    /* #982 — #296 console tokens, copied verbatim from
+       modules/llm/manager-ui/src/styles.css (same values as core/config/app/
+       static/styles.css and core/start-portal/static/start-portal-overrides.css). */
+    --razz-red: #CD1719;
+    --razz-red-hover: #b01416;
+    --razz-red-soft: rgba(205, 23, 25, 0.10);
+    --razz-red-tint: rgba(205, 23, 25, 0.05);
+
+    --bg: #F1EDE9;
+    --bg-card: #FFFFFF;
+    --bg-soft: #F6F4F2;
+    --bg-muted: #F0EDEA;
+
+    --rail: #201D22;
+    --rail-ink: #ECEAE8;
+    --rail-muted: #9A9298;
+
+    --text: #1A1A1A;
+    --text-secondary: #4A4F57;
+    --text-muted: #6B7280;
+
+    --border: rgba(0, 0, 0, 0.10);
+    --border-strong: rgba(0, 0, 0, 0.14);
+    --border-soft: #ECE8E4;
+
+    --success: #1F9D57;
+    --warn: #C77A00;
+
+    --radius: 10px;
+    --radius-sm: 7px;
+    --radius-pill: 999px;
+    --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+
+    --rail-w: 216px;
+    --rail-w-collapsed: 60px;
+    --subnav-w: 238px;
+
+    /* Legacy alias kept for the panel-bg used by admin.html below. */
+    --panel-bg: rgba(255, 255, 255, 0.95);
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    /* Never let the shell's fixed-width rail/subnav columns force a
+       horizontal scrollbar on the page itself — each column scrolls its
+       own overflow instead (see .rail / .snlist / .doc below). */
+    overflow-x: hidden;
+}
+
+/* ============================================================ */
+/* NEW: two-level nav shell — rail (topics) -> sub-nav (pages)   */
+/* -> main (topbar search + doc). Ported from the #982 prototype. */
+/* ============================================================ */
+.app {
+    display: flex;
+    height: 100vh;
+    position: relative;
+    overflow: hidden;
+}
+
+/* ── dark rail: top-level topics, collapsible icon-only (like Agent Manager) ── */
+.rail {
+    width: var(--rail-w);
+    flex-shrink: 0;
+    background: var(--rail);
+    color: var(--rail-ink);
+    display: flex;
+    flex-direction: column;
+    padding: 12px 8px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    transition: width 0.18s ease;
+    /* #1054: anchor for the brand-image ::before below */
+    position: relative;
+}
+.rail.collapsed { width: var(--rail-w-collapsed); }
+/* #1054: razzfazz brand image on the DARK rail (a light image reads with
+   contrast on the dark rail); the doc content stays plain — see .doc. `left
+   center / cover` shows the left crop; `center / cover` is the fallback.
+
+   The asset comes from THIS app's own static dir, not from Caddy's
+   `/branding/*` route. The visual pass on 0.91 (#1054, 2026-09-02) found the
+   Help rail "flat dark, no watermark" while licenses and the Config Portal
+   showed it — and those two are exactly the apps that serve the asset
+   themselves: the Config Portal roots its Flask static at `/branding`, and
+   licenses (like the Start Portal) reads it from the Authentik-media bind
+   mount under `/static/media`. Only the Help Center depended on Caddy's
+   branding_static handler reading the authentik-media VOLUME, which is a copy
+   of this directory made at init time and has been observed missing the webp
+   (see tests/unit/branding/test_media_copy_on_fast_path.py: `/branding/media/
+   razzfazz.webp` 404 on a customer box while the png was served).
+
+   core/compose.yml already mounts `./Authentik/media:/app/static/media:ro`
+   into razzfazz-help — the same mount licenses has — so this path needs no
+   new plumbing and no cross-service route. */
+.rail::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: url('/static/media/razzfazz.webp') no-repeat left center / cover;
+    opacity: 0.14;
+    pointer-events: none;
+    z-index: 0;
+}
+.rail > * { position: relative; z-index: 1; }
+
+.brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 2px; }
+.brand svg { width: 22px; height: 22px; fill: var(--razz-red); flex-shrink: 0; }
+.brand .bn { font-weight: 700; color: #fff; white-space: nowrap; }
+.brand .railtog {
+    margin-left: auto;
+    background: none;
+    border: 0;
+    color: var(--rail-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 4px;
+    border-radius: 6px;
+}
+.brand .railtog:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.rail.collapsed .bn,
+.rail.collapsed .brand-sub { display: none; }
+.rail.collapsed .brand { justify-content: center; padding: 4px 0 2px; }
+.rail.collapsed .brand .railtog { margin: 0; }
+
+.brand-sub {
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--rail-muted);
+    padding: 6px 10px 10px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.topic {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    color: var(--rail-muted);
+    text-decoration: none;
+    padding: 9px 11px;
+    border-radius: 8px;
+    font-size: 0.86rem;
+    cursor: pointer;
+    white-space: nowrap;
+    margin-bottom: 1px;
+}
+/* #986: nav icons are inline SVG (not emoji) — light grey, inherit the rail's
+   colour so the active topic can tint them. */
+.topic .ic { width: 20px; height: 20px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted, #9aa0a6); }
+.topic .ic svg { width: 18px; height: 18px; display: block; }
+.topic.on .ic { color: currentColor; }
+.topic:hover { background: rgba(255, 255, 255, 0.06); color: var(--rail-ink); }
+.topic.on {
+    background: rgba(205, 23, 25, 0.18);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--razz-red);
+}
+.rail.collapsed .topic { justify-content: center; padding: 9px 0; }
+.rail.collapsed .topic .lb { display: none; }
+
+/* ── light sub-nav column: pages of the active topic ── */
+.subnav {
+    width: var(--subnav-w);
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.subnav .snhd { padding: 14px 16px 10px; border-bottom: 1px solid var(--border-soft); }
+.subnav .snhd .t { font-weight: 700; font-size: 0.95rem; display: flex; align-items: center; gap: 8px; }
+.subnav .snhd .t .ic { display: inline-flex; align-items: center; color: var(--text-muted, #9aa0a6); }
+.subnav .snhd .t .ic svg { width: 18px; height: 18px; display: block; }
+.subnav .snhd .c { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; }
+.snlist { flex: 1; overflow-y: auto; padding: 8px; }
+.sn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 11px;
+    border-radius: 7px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-decoration: none;
+}
+.sn:hover { background: var(--bg-soft); color: var(--text); }
+.sn.on { background: var(--razz-red-soft); color: var(--razz-red); font-weight: 600; }
+.sn code { font-family: var(--mono); font-size: 0.82em; }
+.sn .dot { width: 7px; height: 7px; border-radius: 50%; margin-left: auto; flex-shrink: 0; }
+.dot.ok { background: var(--success); }
+.dot.no { background: transparent; border: 1.5px solid var(--border-strong); }
+
+/* ── main column: topbar (global search) + doc pane ── */
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.topbar {
+    height: 52px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 22px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+}
+.crumb { font-weight: 700; color: var(--text-secondary); font-size: 0.85rem; }
+.tb-search { flex: 1; max-width: 420px; position: relative; }
+.tb-search input {
+    width: 100%;
+    padding: 8px 12px 8px 34px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    font-size: 0.85rem;
+    background: var(--bg-soft);
+    font-family: var(--font);
+}
+.tb-search input:focus {
+    outline: none;
+    border-color: var(--razz-red);
+    background: #fff;
+    box-shadow: 0 0 0 3px var(--razz-red-soft);
+}
+.tb-search .mag { position: absolute; left: 12px; top: 8px; color: var(--text-muted); }
+.cacheadmin { font-size: 0.8rem; color: var(--text-secondary); text-decoration: none; white-space: nowrap; }
+.cacheadmin:hover { color: var(--razz-red); }
+
+/* ── search results overlay (ONE global search — no per-topic search field) ── */
+.results {
+    position: absolute;
+    top: 44px;
+    left: 0;
+    width: 100%;
+    background: var(--bg-card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+    padding: 8px;
+    display: none;
+    max-height: 400px;
+    overflow-y: auto;
+    z-index: 20;
+}
+.results.on { display: block; }
+.results .rhd {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    padding: 8px 10px 4px;
+    font-weight: 700;
+}
+.res { display: block; padding: 9px 10px; border-radius: 8px; cursor: pointer; text-decoration: none; }
+.res:hover { background: var(--bg-soft); }
+.res .rt { font-weight: 600; font-size: 0.88rem; color: var(--text); }
+.res .rc {
+    font-size: 0.68rem;
+    color: var(--razz-red);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-left: 8px;
+}
+.res .rs { font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
+.res .rs mark { background: var(--razz-red-soft); color: var(--razz-red); padding: 0 2px; border-radius: 3px; }
+.results .rempty { padding: 10px; font-size: 0.82rem; color: var(--text-muted); }
+/* HLP-14: distinct FAILURE state — an empty result set and a broken /api/search
+   used to look identical (the latter looked like stale results). */
+.results .rerror { padding: 10px; font-size: 0.82rem; color: var(--razz-red); font-weight: 600; }
+/* HLP-14: keyboard highlight for Up/Down through the results overlay. */
+.res.sel { background: var(--bg-soft); outline: 2px solid var(--razz-red); outline-offset: -2px; }
+
+/* ── doc pane: page furniture (eyebrow/title/meta/callout) around the
+   rendered .doc-content (typography for that lives in the LEGACY section
+   below, reused unchanged from the pre-#982 template). ── */
+.doc {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 32px 46px;
+    position: relative;
+    /* #1054: plain content — the razzfazz brand image moved to the dark rail
+       (see .rail::before), so the doc pane carries no watermark. */
+    background: var(--bg);
+}
+.doc > * { position: relative; z-index: 1; }
+/* #986: widened from 800px — the 800 column cramped wide tables (e.g. the
+   install-preset matrix) while half the screen sat empty. Prose paragraphs stay
+   readable via the 68ch cap on .doc p below; only wide content (tables, code)
+   uses the extra width. */
+.doc .inner { max-width: 1160px; }
+.doc .eyebrow {
+    color: var(--razz-red);
+    font-weight: 700;
+    font-size: 0.74rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.doc h1 { font-size: 1.85rem; font-weight: 800; letter-spacing: -0.02em; margin: 4px 0 6px; }
+.doc .meta {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-bottom: 22px;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.doc .meta .chip { background: var(--success); color: #fff; border-radius: var(--radius-pill); padding: 1px 9px; font-size: 0.66rem; font-weight: 700; }
+.doc h2 { font-size: 1.2rem; font-weight: 700; margin: 26px 0 8px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+.doc p { color: var(--text-secondary); line-height: 1.65; margin-bottom: 12px; }
+/* HLP-16: the 68ch measure is a PROSE cap, not a paragraph cap. It used to sit
+   on `.doc p` alone, so after .doc .inner widened to 1160px the own docs — which
+   alternate paragraphs and bullet lists heavily — rendered 68ch paragraphs next
+   to 1160px bullets, two measures on one page. Tables, <pre> and images are
+   deliberately NOT in this list: the widening exists for them. */
+.doc p,
+.doc ul,
+.doc ol,
+.doc dl,
+.doc blockquote,
+.doc .callout { max-width: 68ch; }
+.doc code { font-family: var(--mono); background: var(--bg-muted); border-radius: 5px; padding: 1px 5px; font-size: 0.85em; }
+.callout {
+    background: var(--razz-red-tint);
+    border-left: 3px solid var(--razz-red);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+}
+.callout b { color: var(--text); }
+
+/* Responsive — narrow viewports collapse the rail automatically and shrink
+   the sub-nav; the body itself never scrolls horizontally (each column
+   scrolls its own content, see overflow rules above). */
+@media (max-width: 900px) {
+    :root { --subnav-w: 200px; }
+    .doc { padding: 24px; }
+}
+@media (max-width: 720px) {
+    .rail { position: absolute; z-index: 10; height: 100%; }
+    .rail:not(.collapsed) { box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25); }
+    .tb-search { max-width: none; }
+}
+
+
+/* ============================================================ */
+/* LEGACY: admin.html chrome + shared classes, unchanged by #982. */
+/* admin.html still overrides the older `content` block (see base.html's   */
+/* nested-block fallback) and keeps using these class names directly.      */
+/* ============================================================ */
+.panel {
+    background: var(--panel-bg);
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+    margin-bottom: 20px;
+}
+.panel h2, .panel h3 {
+    color: var(--razz-red);
+    border-bottom: 2px solid var(--razz-red);
+    padding-bottom: 5px;
+}
+
+.button {
+    background-color: var(--razz-red);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 14px;
+    transition: background-color 0.2s;
+}
+.button:hover { background-color: #a01214; }
+.button-secondary { background-color: #666; }
+.button-secondary:hover { background-color: #444; }
+.button-small { padding: 6px 12px; font-size: 13px; }
+.button:disabled { background-color: #ccc; cursor: not-allowed; }
+
+.badge { background: #eee; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+.badge-success { background: #d4edda; color: #155724; }
+.badge-warning { background: #ffeeba; color: #856404; }
+.badge-info    { background: #d1ecf1; color: #0c5460; }
+
+.help-attribution {
+    background: linear-gradient(135deg, #f0f0f0 0%, #e8e8e8 100%);
+    padding: 8px 15px;
+    border-left: 3px solid var(--razz-red);
+    border-radius: 0 4px 4px 0;
+    margin-bottom: 15px;
+}
+.help-attribution a { color: var(--razz-red); }
+
+.flash-message { padding: 15px 20px; border-radius: 8px; margin-bottom: 20px; }
+.flash-message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+.flash-message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+.not-cached { text-align: center; padding: 40px 20px; color: #666; }
+.not-cached h2 { border: none; color: #999; }
+
+.status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+.status-online  { background: #28a745; }
+.status-offline { background: #dc3545; }
+
+.cache-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+.cache-table th, .cache-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #e0e0e0; }
+.cache-table th { background: #f5f5f5; font-weight: 600; color: #333; }
+.cache-table tr:hover { background: #fafafa; }
+.cache-table .app-name { display: flex; align-items: center; gap: 10px; }
+.cache-table .app-name img { width: 24px; height: 24px; border-radius: 4px; }
+
+.refresh-btn {
+    background: var(--razz-red);
+    color: white;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+.refresh-btn:hover { background: #a01214; }
+.refresh-btn:disabled { background: #ccc; cursor: not-allowed; }
+.refresh-btn.refreshing { background: #ffc107; color: #333; }
+
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+.connection-status { font-size: 14px; color: #666; }
+.auto-refresh-note { font-size: 12px; color: #999; text-align: center; margin-top: 10px; }
+
+/* ============================================================ */
+/* .doc-content — typography for the ACTUAL rendered doc HTML     */
+/* (own docs / local module docs / mirror fallback). Reused        */
+/* verbatim from the pre-#982 template; only the surrounding shell */
+/* changed. Selector specificity ties with the new `.doc h1` etc.  */
+/* above are broken by source order — these rules apply to content */
+/* nested inside `.doc-content`, the new `.doc h1` etc. apply to    */
+/* the page furniture (eyebrow/title) that sits OUTSIDE it.         */
+/* ============================================================ */
+.doc-content {
+    background: white;
+    border-radius: 8px;
+    padding: 30px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    line-height: 1.7;
+    font-size: 15px;
+    overflow-x: auto;
+}
+.doc-content h1 { color: var(--razz-red); border-bottom: 2px solid var(--razz-red); padding-bottom: 8px; }
+.doc-content h2 { color: var(--razz-red); border-bottom: 1px solid #eee; padding-bottom: 5px; margin-top: 30px; }
+.doc-content h3 { color: #333; margin-top: 25px; }
+.doc-content code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+.doc-content pre { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; overflow-x: auto; position: relative; }
+.doc-content pre code { background: none; padding: 0; color: inherit; }
+.doc-content pre .copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: #3a3a3a;
+    color: #ccc;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    z-index: 1;
+}
+.doc-content pre:hover .copy-btn { opacity: 1; }
+.doc-content pre .copy-btn:hover { background: #555; color: #fff; }
+.doc-content table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+.doc-content table th, .doc-content table td { padding: 10px 12px; border: 1px solid #ddd; text-align: left; }
+.doc-content table th { background: #f5f5f5; font-weight: 600; }
+.doc-content img { max-width: 100%; height: auto; border-radius: 4px; }
+.doc-content a { color: var(--razz-red); }
+.doc-content a:hover { text-decoration: underline; }
+.doc-content blockquote {
+    border-left: 4px solid var(--razz-red);
+    margin: 15px 0;
+    padding: 10px 20px;
+    background: #f9f9f9;
+    color: #555;
+}
+.doc-content pre.mermaid {
+    background: transparent;
+    color: inherit;
+    padding: 10px 0;
+    text-align: center;
+    overflow-x: auto;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    white-space: pre;
+}
+.doc-content pre.mermaid svg { max-width: 100%; height: auto; }
+
+/* ── #1196: markdown-tree mirrors (llms-txt / git-markdown) rendered in the
+   Help theme — table of contents, crumb, prev/next, callouts, admonitions. ── */
+.doc .mtree-desc { color: var(--text-secondary); font-size: 1.02rem; margin-bottom: 18px; }
+.doc .mtree-crumb { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 14px; }
+.doc .mtree-crumb a { color: var(--razz-red); text-decoration: none; font-weight: 600; }
+.doc .mtree-toc { margin: 8px 0 22px; max-width: none; }
+.doc .mtree-toc h2 { font-size: 1.05rem; margin: 20px 0 6px; padding-top: 8px; }
+.doc .mtree-toc h3 { font-size: 0.92rem; margin: 14px 0 4px; color: var(--text-secondary); }
+.doc .mtree-toc h4 { font-size: 0.84rem; margin: 10px 0 4px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.doc .mtree-toc ul { list-style: none; padding: 0; margin: 0 0 6px; max-width: none;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 18px; }
+.doc .mtree-toc li a { display: block; padding: 5px 8px; border-radius: 6px; text-decoration: none; color: var(--text); font-size: 0.9rem; }
+.doc .mtree-toc li a:hover { background: var(--bg-soft); color: var(--razz-red); }
+.doc .mtree-pn { display: flex; justify-content: space-between; gap: 12px; margin: 28px 0 10px; padding-top: 14px; border-top: 1px solid var(--border-soft); }
+.doc .mtree-pn a { text-decoration: none; font-weight: 600; color: var(--razz-red); font-size: 0.9rem; }
+.doc .mtree-pn a.next { margin-left: auto; }
+.doc .mtree-source { font-size: 0.76rem; color: var(--text-muted); margin-top: 18px; }
+.doc .callout-warning, .doc .callout-danger, .doc .callout-caution { border-left-color: #c77700; background: rgba(199, 119, 0, 0.08); }
+.doc .callout-tip, .doc .callout-check { border-left-color: #2e8b57; background: rgba(46, 139, 87, 0.08); }
+.doc .callout-info, .doc .callout-note { border-left-color: #2f6fb0; background: rgba(47, 111, 176, 0.08); }
+.doc .callout p:last-child { margin-bottom: 0; }
+.doc .admonition { border-left: 3px solid #2f6fb0; background: rgba(47, 111, 176, 0.08); border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px; max-width: 68ch; font-size: 0.9rem; }
+.doc .admonition.warning, .doc .admonition.danger, .doc .admonition.caution { border-left-color: #c77700; background: rgba(199, 119, 0, 0.08); }
+.doc .admonition.tip, .doc .admonition.success { border-left-color: #2e8b57; background: rgba(46, 139, 87, 0.08); }
+.doc .admonition-title { font-weight: 700; margin-bottom: 6px; color: var(--text); }
+.doc details { margin-bottom: 12px; }
+.doc details summary { cursor: pointer; font-weight: 600; }

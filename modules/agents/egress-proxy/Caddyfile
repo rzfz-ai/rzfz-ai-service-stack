@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# agent-egress-proxy — default-deny egress for the agent fence networks
+# (#959 W4 / #802, opt-in via modules/agents/compose.egress-allowlist.yml)
+# ==============================================================================
+# This is NOT the stack edge. It is a separate Caddy process (same image, own
+# config) that sits on `coding-agents` + `agent-assistants` — both flipped to
+# `internal: true` by the overlay — plus a bare uplink bridge that carries
+# nothing else. It is the ONLY route from a fenced agent to the internet.
+#
+# Why not dual-home the stack Caddy instead: an agent could then CONNECT
+# through it into Authentik-gated stack routes and the source-IP anchor would
+# see the request arriving from Caddy. That is a confused deputy, and it hands
+# back exactly the lateral path #256 closed. Keep this process separate.
+#
+# ACL direction — read this before editing it. The Dify SSRF proxy (:8195 in
+# core/Caddy/Caddyfile) exists to keep workflows OUT of RFC1918 and therefore
+# ends in `allow all`. This proxy exists for the opposite reason: everything is
+# denied unless named. `deny all` is the terminal rule and must stay last.
+#
+# DNS note: inside an `internal` network, public names do not resolve — there is
+# no route to an upstream resolver. That is fine and intentional: a proxy-aware
+# client sends `CONNECT host:443` and never resolves the name itself, so
+# curl/git/npm/pip work while a direct connection cannot even get an address.
+# ==============================================================================
+
+{
+    admin off
+    auto_https off
+    order forward_proxy before reverse_proxy
+}
+
+:8197 {
+    log
+
+    route {
+        forward_proxy {
+            hide_ip
+            hide_via
+            acl {
+                # First-match-wins. The operator's allowlist comes FIRST so the
+                # in-fence service names (gitea, gpustack, agent-manager, …),
+                # which resolve to 172.16/12 addresses, match here instead of
+                # falling into the private-range denies below.
+                #
+                # The `:disabled.invalid` default is not decoration: Caddy's
+                # `{$VAR:default}` only applies when the var is UNSET, and a
+                # set-but-empty value expands to a bare `allow` — which is both
+                # a startup crash and, if it parsed, a wide-open proxy. The
+                # non-resolving sentinel is how "fully closed" is spelled.
+                allow {$AGENT_EGRESS_ALLOW:disabled.invalid}
+
+                # Anything private that was not explicitly named above stays
+                # unreachable — postgres, valkey, authentik, the socket proxy,
+                # the host gateway, cloud metadata.
+                deny 10.0.0.0/8
+                deny 172.16.0.0/12
+                deny 192.168.0.0/16
+                deny 127.0.0.0/8
+                deny 169.254.0.0/16
+
+                # Default deny. The one rule that makes this file worth having.
+                deny all
+            }
+        }
+
+        # Fall-through: a plain (non-CONNECT) request that the forward proxy did
+        # not take. #802's third open question was "what does a refusal look
+        # like" — a blocked egress that presents as a hung tool becomes a
+        # support ticket, so say which policy stopped it and which variable
+        # widens it.
+        respond <<DENYMSG
+            403 blocked by the razzfazz.ai agent egress policy.
+
+            This sandbox is fenced (AGENT_EGRESS_POLICY=allowlist). Only hosts
+            named in AGENT_EGRESS_ALLOW are reachable, through this proxy.
+            Ask your operator to add the destination if it belongs there.
+            DENYMSG 403
+    }
+}

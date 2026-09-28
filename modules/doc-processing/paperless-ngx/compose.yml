@@ -1,0 +1,81 @@
+# ==============================================================================
+# PAPERLESS-NGX MODULE (Document Management)
+# ==============================================================================
+# Profile: paperless-ngx
+# Description: Scan, archive, and OCR your physical documents into a searchable
+#              online archive. Integrates with existing Gotenberg (Office docs)
+#              and Tika (metadata extraction) services.
+# Status: Experimental — validate OCR quality with your document types
+# Config: .env (PAPERLESS_* variables)
+# Dependencies: postgres, valkey, gotenberg, tika
+# Upstream: https://github.com/paperless-ngx/paperless-ngx (GPL-3.0)
+# ==============================================================================
+services:
+  paperless-ngx:
+    image: ghcr.io/paperless-ngx/paperless-ngx:2.20.15
+    profiles: ["paperless-ngx"]
+    container_name: paperless-ngx
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PAPERLESS_PORT:-8001}:8000"
+    environment:
+      # Database
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_DBHOST: postgres
+      PAPERLESS_DBPORT: 5432
+      PAPERLESS_DBNAME: ${PAPERLESS_DB:-paperless_db}
+      PAPERLESS_DBUSER: ${PAPERLESS_DB_USER:-${POSTGRES_USER:-docker}}
+      PAPERLESS_DBPASS: ${PAPERLESS_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}
+      # Redis/Valkey broker (DB 8)
+      PAPERLESS_REDIS: redis://:${VALKEY_PASSWORD:-}@valkey:6379/8
+      # Gotenberg + Tika (reuse existing containers)
+      PAPERLESS_TIKA_ENABLED: 1
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: http://gotenberg:3000
+      PAPERLESS_TIKA_ENDPOINT: http://tika:9998
+      # Application settings
+      PAPERLESS_URL: https://${PAPERLESS_DOMAIN:-paperless.${MAIN_DOMAIN:-razzfazz-box}}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY:-}
+      PAPERLESS_TIME_ZONE: ${TZ:-UTC}
+      PAPERLESS_OCR_LANGUAGE: ${PAPERLESS_OCR_LANGUAGE:-eng+deu}
+      PAPERLESS_TASK_WORKERS: 2
+      PAPERLESS_THREADS_PER_WORKER: 2
+      # Authentik SSO — trust the X-authentik-username header from Caddy forward auth
+      # ENABLE_HTTP_REMOTE_USER enables the middleware (non-API routes)
+      # ENABLE_HTTP_REMOTE_USER_API adds PaperlessRemoteUserAuthentication to DRF,
+      # required for /api/* endpoints including /api/ui_settings/ used by the SPA
+      PAPERLESS_ENABLE_HTTP_REMOTE_USER: 1
+      PAPERLESS_ENABLE_HTTP_REMOTE_USER_API: 1
+      PAPERLESS_HTTP_REMOTE_USER_HEADER_NAME: HTTP_X_AUTHENTIK_USERNAME
+      # Filename format for archived documents
+      PAPERLESS_FILENAME_FORMAT: "{{ created_year }}/{{ correspondent }}/{{ title }}"
+      PAPERLESS_CONSUMER_POLLING: 0
+      # Email via central SMTP relay
+      PAPERLESS_EMAIL_HOST: smtp-relay
+      PAPERLESS_EMAIL_PORT: 587
+      PAPERLESS_EMAIL_HOST_USER: ""
+      PAPERLESS_EMAIL_HOST_PASSWORD: ""
+      PAPERLESS_EMAIL_USE_TLS: "false"
+      PAPERLESS_EMAIL_USE_SSL: "false"
+      PAPERLESS_FROM_EMAIL: paperless@${MAIN_DOMAIN:-razzfazz-box}
+    volumes:
+      - paperless-data:/usr/src/paperless/data
+      - paperless-media:/usr/src/paperless/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --noproxy '*' -fs http://localhost:8000/accounts/login/ || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  paperless-data:
+  paperless-media:

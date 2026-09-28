@@ -1,0 +1,12 @@
+# Never commit Authentik export / full-backup dumps here.
+# They embed the full SSO object graph — user PKs, token identifiers, and any
+# operator host/bastion IPs captured at export time — and this directory ships
+# in the public release surface (core/ is on the publish-public.sh allow-list).
+# Two such dumps leaked a dev bastion IP + bootstrap-token identifiers (#27);
+# they were stripped and this rule keeps the class from recurring.
+*.yaml
+*.yml
+# keep the directory + its docs tracked
+!.gitignore
+!.gitkeep
+!README.md

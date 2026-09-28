@@ -1,0 +1,218 @@
+/* SPDX-License-Identifier: BUSL-1.1
+ * Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+ *
+ * 2026.09-ga.4 (#2517, #959 critique "Dialogs"): styles for the portal's own
+ * dialog and menu primitives (static/portal/ui.js). The --p-* tokens are the
+ * #296 aliases declared on body.portal in portal.html; dialogs and menus are
+ * appended to <body>, so they inherit them. */
+
+/* ── dialog ─────────────────────────────────────────────────────────────── */
+/* 2026.09-ga.4 U6: the dialog also runs on the base_shell pages (settings,
+ * /agents, admin), which do not declare the portal's --p-* aliases; every
+ * token falls back to the shared #296 token it aliases. */
+.am-dialog {
+    /* styles.css resets `* { margin: 0 }`, which pinned the modal <dialog> to
+     * the top-left corner; the UA's `margin: auto` is what centres it. */
+    margin: auto;
+    width: calc(100vw - 32px); max-width: 420px; box-sizing: border-box;
+    padding: 18px 20px 16px; border: 1px solid var(--p-line, var(--border, #E4DFDA));
+    border-radius: var(--radius, 10px);
+    background: var(--p-card, var(--bg-card, #fff)); color: var(--text);
+    box-shadow: 0 16px 48px rgba(0,0,0,.22);
+}
+.am-dialog::backdrop { background: rgba(32,29,34,.45); }
+.am-dialog-title { margin: 0 0 8px; font-size: 1rem; font-weight: 600;
+    overflow-wrap: anywhere; }
+.am-dialog-body { margin: 0 0 12px; font-size: .86rem; color: var(--text-dim);
+    line-height: 1.45; overflow-wrap: anywhere; white-space: pre-line; }
+.am-dialog-fields { display: flex; flex-direction: column; gap: 10px; }
+.am-dialog-label { display: flex; flex-direction: column; gap: 6px; font-size: .82rem;
+    color: var(--text-dim); overflow-wrap: anywhere; }
+.am-dialog-expected { color: var(--text); font-weight: 600; unicode-bidi: isolate; }
+.am-dialog-input { width: 100%; box-sizing: border-box; padding: 7px 9px; font: inherit;
+    font-size: .9rem; color: var(--text); background: var(--p-card, var(--bg-card, #fff));
+    border: 1px solid var(--p-line, var(--border, #E4DFDA)); border-radius: var(--radius-sm, 7px); }
+.am-dialog-input:focus { outline: 2px solid var(--p-red, var(--razz-red, #CD1719)); outline-offset: 1px; }
+.am-dialog-error { margin-top: 8px; font-size: .8rem; color: var(--error); }
+.am-dialog-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.am-dialog-foot .btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+/* ── toast (AmUi.toast; the base_shell pages) ─────────────────────────────── */
+.am-toast { position: fixed; right: 16px; bottom: 16px; z-index: 400;
+    max-width: min(420px, calc(100vw - 32px)); box-sizing: border-box;
+    padding: 10px 14px; border-radius: 8px; font-size: .86rem; overflow-wrap: anywhere;
+    background: #201D22; color: #ECEAE8; box-shadow: 0 8px 28px rgba(0,0,0,.25); }
+
+/* ── the Settings tab of a pane (2026.09-ga.4 U6, #2517 §5) ─────────────── */
+.slot .pane-settings { flex: 1; overflow: auto; padding: 12px 14px;
+    background: var(--p-soft, var(--bg-soft)); }
+.slot .pane-settings .card { margin-bottom: 12px; }
+.slot .pane-settings select, .slot .pane-settings input { max-width: 100%; }
+.slot .pane-msg .pane-msg-start { margin-top: 12px; }
+/* the partial on both surfaces: a lone button keeps its own width (.card is
+ * a flex column that stretches its children) */
+.am-settings .card > .btn { align-self: flex-start; }
+
+/* ── menu ───────────────────────────────────────────────────────────────── */
+.am-menu {
+    position: fixed; z-index: 300; min-width: 200px; max-width: min(360px, calc(100vw - 8px));
+    list-style: none; margin: 0; padding: 4px;
+    background: var(--p-card); border: 1px solid var(--p-line); border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.2);
+}
+.am-menu:focus { outline: none; }
+.am-menu-item {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px;
+    padding: 7px 10px; border-radius: 6px; min-height: 32px; box-sizing: border-box;
+    font-size: .86rem; color: var(--text); cursor: pointer; user-select: none;
+}
+.am-menu-item:focus, .am-menu-item:hover { background: var(--p-red-soft); outline: none; }
+.am-menu-item[aria-disabled=true] { opacity: .55; cursor: default; }
+.am-menu-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.am-menu-secondary { display: block; flex-basis: 100%; font-size: .72rem; color: var(--text-dim); }
+.am-menu-arrow { flex: 0 0 auto; color: var(--text-dim); }
+.am-menu-item.danger { color: var(--p-red); }
+.am-menu-sep { border-top: 1px solid var(--p-line-soft); margin: 4px 0; }
+
+@media (pointer: coarse) {
+    .am-menu-item { min-height: 44px; }
+}
+
+/* ── the agent tree (2026.09-ga.4, #2517 §1) ─────────────────────────────
+ * One tree of real agents in folders. Folder rows are disclosure rows, not
+ * uppercase section headings (#959 critique). The rail is dark chrome, so
+ * these use the rail tokens. */
+.tree-folder { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 2px;
+    margin-top: 2px; border-radius: 8px; cursor: pointer; user-select: none;
+    font-size: .86rem; font-weight: 600; color: var(--p-rail-ink); }
+.tree-folder:hover { background: rgba(255,255,255,.06); }
+.tree-folder.unfiled { color: var(--p-rail-muted); }
+.tree-folder.drop { background: rgba(205,23,25,.18); box-shadow: inset 0 0 0 1px var(--p-red); }
+.tree-disclosure { border: 0; background: none; color: var(--p-rail-muted); cursor: pointer;
+    width: 16px; padding: 0; font-size: 11px; line-height: 1; flex: 0 0 16px; }
+.folder-icon { color: var(--p-rail-muted); font-size: 12px; flex: 0 0 auto; }
+.folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; unicode-bidi: isolate; }
+.folder-count { font-size: 11px; font-weight: 600; color: var(--p-rail-muted);
+    font-variant-numeric: tabular-nums; min-width: 1.4em; text-align: right; }
+/* The row's "…" (2026.09-ga.4, #2517 §2). Visible by default; only a device
+ * that can hover with a fine pointer hides it until the row is hovered,
+ * focused or selected. On touch it is always there and a 44 px target. */
+.row-act { border: 0; background: none; color: var(--p-rail-muted); cursor: pointer;
+    padding: 0; width: 22px; min-height: 22px; flex: 0 0 22px; border-radius: 5px;
+    font-size: .95rem; line-height: 1.2; }
+/* keeps Unfiled's count in the same column as the folders' (no "…" there) */
+.folder-spacer { flex: 0 0 22px; }
+#new-folder { white-space: nowrap; flex-shrink: 0; }
+@media (hover: hover) and (pointer: fine) {
+    .row-act { opacity: 0; }
+    .tree-folder:hover .row-act, .tree-node:hover .row-act, .tree-node.selected .row-act,
+    .tree-folder:focus .row-act, .tree-node:focus .row-act,
+    .tree-folder:focus-within .row-act, .tree-node:focus-within .row-act,
+    .row-act:focus-visible { opacity: 1; }
+}
+.row-act:hover { color: var(--p-rail-ink); background: rgba(255,255,255,.08); }
+@media (pointer: coarse) {
+    .row-act { opacity: 1; width: 44px; min-width: 44px; min-height: 44px; flex: 0 0 44px;
+        font-size: 1.1rem; }
+    .folder-spacer { flex-basis: 44px; }
+    .slot .pane-head .slot-more { min-width: 44px; min-height: 44px; }
+    /* the id outranks portal.html's inline .tree-node padding */
+    #agent-tree .tree-node, #agent-tree .tree-folder { min-height: 44px; box-sizing: border-box;
+        padding-top: 0; padding-bottom: 0; }
+}
+.tree-node[aria-level="2"] { padding-left: 26px; }
+#agent-tree .tree-node .name { unicode-bidi: isolate; flex: 1 1 auto; min-width: 2.5em; }
+/* the type yields first when the row is tight: the agent's own name wins */
+.tree-node .type-label { font-size: 11px; color: var(--p-rail-muted); flex: 0 100 auto;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#agent-tree [role="treeitem"]:focus { outline: none; }
+#agent-tree [role="treeitem"]:focus-visible { outline: 2px solid var(--p-red); outline-offset: -2px; }
+
+/* State is a SHAPE and a label, never a colour alone (#2517): stopped is a
+ * hollow ring, starting a half-filled dot, serving a solid dot, error a ⚠
+ * glyph. The .circle colours in portal.html still apply; these rules only
+ * add the shape (scoped under .tree-node so they outrank the inline .circle
+ * rules, which load later). Each icon also carries role=img + aria-label. */
+.tree-node .state-icon { box-sizing: border-box; }
+.tree-node .state-icon.stopped { background: transparent; border: 2px solid #9ca3af; }
+.tree-node .state-icon.starting, .tree-node .state-icon.running {
+    background: linear-gradient(90deg, #f59e0b 50%, transparent 50%);
+    border: 1.5px solid #f59e0b; }
+.tree-node .state-icon.error { background: none; box-shadow: none; border: 0; border-radius: 0;
+    width: auto; height: auto; flex: 0 0 auto; color: #dc2626; font-size: 11px; line-height: 1; }
+
+/* inline rename (AmUi.inlineEdit) */
+.am-inline-edit { display: flex; flex-direction: column; gap: 3px; overflow: visible !important;
+    white-space: normal !important; min-width: 0; }
+.am-inline-input { width: 100%; box-sizing: border-box; font: inherit; font-size: .88rem;
+    padding: 2px 6px; border-radius: 5px; border: 1px solid var(--p-red);
+    background: var(--p-card); color: var(--text); }
+.am-inline-error { font-size: 11px; line-height: 1.35; color: #f0a9a7; overflow-wrap: anywhere; }
+
+/* #2517: the head row carries the label, "New folder" and "New Agent" in the
+ * fixed 248px column; tighter gaps keep both buttons unclipped. */
+.agents-col .rail-head { gap: 6px; padding-left: 10px; padding-right: 10px; }
+
+/* the pane head's title: an agent's name (up to 64 characters, any script)
+ * ellipsises instead of widening the pane (2026.09-ga.4, #2517 §2) */
+.slot .pane-head { min-width: 0; }
+.slot .pane-head .title { flex: 0 1 auto; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
+.slot .pane-head .title.am-inline-edit { flex: 1 1 auto; }
+
+/* ── the mobile remote-control view (2026.09-ga.4, #2516) ─────────────────
+ * body.mobile-view (static/portal/mobile.js) on a touch device or a window
+ * ≤ 1024 px: the agent list first (m-list), then one agent full screen
+ * (m-session) with a top bar and, for a terminal (m-term), the key bar.
+ * These rules outrank the inline ≤ 768 px drawer rules by specificity. */
+.m-listbar, .m-topbar { display: none; }
+body.mobile-view .icon-rail { display: none; }
+/* no transition: the <= 768 px drawer's delayed visibility flip would hide
+ * the list for its .15 s */
+body.mobile-view .agents-col { position: static; transform: none; visibility: visible;
+    transition: none; width: 100%; flex: 1 1 auto; box-shadow: none; border-left: 0; }
+body.mobile-view .agents-col .rail-head, body.mobile-view .agents-col .rail-foot { display: none; }
+body.mobile-view.m-list .pane-wrap { display: none; }
+body.mobile-view.m-session .agents-col { display: none; }
+body.mobile-view .m-listbar { display: flex; align-items: center; gap: 8px; min-height: 48px;
+    padding: 6px 12px; border-bottom: 1px solid rgba(255,255,255,.10); }
+body.mobile-view .m-list-title { font-weight: 700; color: #fff; font-size: 1.05rem; }
+body.mobile-view .m-listbar .spacer { flex: 1; }
+body.mobile-view.m-session .m-topbar { display: flex; align-items: center; gap: 8px; min-height: 48px;
+    padding: 4px 8px; background: var(--p-rail); color: var(--p-rail-ink); flex: 0 0 auto; }
+body.mobile-view .m-topbar button, body.mobile-view .m-listbar button { min-width: 44px; min-height: 44px;
+    border: 0; border-radius: 8px; background: transparent; color: var(--p-rail-ink);
+    font: inherit; font-size: 1.05rem; cursor: pointer; }
+body.mobile-view .m-topbar button:active, body.mobile-view .m-listbar button:active {
+    background: rgba(255,255,255,.12); }
+body.mobile-view .m-topbar .m-back { font-size: 1.6rem; line-height: 1; }
+body.mobile-view .m-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-weight: 600; unicode-bidi: isolate; }
+/* the font size belongs to a terminal */
+body.mobile-view:not(.m-term) .m-font-down, body.mobile-view:not(.m-term) .m-font-up { display: none; }
+/* the state icon: the same shapes as the tree's (see .tree-node .state-icon) */
+.m-topbar .state-icon { box-sizing: border-box; }
+.m-topbar .state-icon.stopped { background: transparent; border: 2px solid #9ca3af; }
+.m-topbar .state-icon.starting, .m-topbar .state-icon.running {
+    background: linear-gradient(90deg, #f59e0b 50%, transparent 50%); border: 1.5px solid #f59e0b; }
+.m-topbar .state-icon.error { background: none; box-shadow: none; border: 0; border-radius: 0;
+    width: auto; height: auto; flex: 0 0 auto; color: #dc2626; font-size: 12px; line-height: 1; }
+body.mobile-view.m-session .grid-head, body.mobile-view.m-session .slot .pane-head { display: none; }
+body.mobile-view.m-session .grid { padding: 0; gap: 0; grid-template: 1fr / 1fr; }
+body.mobile-view.m-session .slot { border: 0; border-radius: 0; box-shadow: none; }
+body.mobile-view.m-session.m-term .keybar { display: flex; position: fixed; left: 0; right: 0;
+    bottom: var(--kb-inset, 0px); z-index: 45; }
+/* the key bar's own height, plus the soft keyboard's (fix round 1) */
+body.mobile-view.m-session.m-term .pane-wrap { padding-bottom: calc(var(--kb-h) + var(--kb-inset, 0px)); }
+body.mobile-view { --kb-h: 58px; }
+body.mobile-view.m-session .pane-terminal .xterm { padding: 4px 6px; }
+/* the key bar is a terminal's; the inline ≤ 768 px rule forces it on */
+body.mobile-view:not(.m-session) .keybar, body.mobile-view:not(.m-term) .keybar { display: none !important; }
+/* 44 px touch targets; the bar is --kb-h tall (6 + 44 + 6 + 1 border) */
+body.mobile-view .keybar { box-sizing: border-box; height: var(--kb-h); align-items: center; }
+body.mobile-view .keybar button { min-width: 44px; min-height: 44px; flex: 0 0 auto; }
+/* keys hidden off the right edge: the bar fades out there (fix round 1) */
+body.mobile-view .keybar.kb-more {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }

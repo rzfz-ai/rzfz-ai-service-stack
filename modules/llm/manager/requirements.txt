@@ -1,0 +1,11 @@
+# LLM Manager (manager) — runtime deps (#254 Phase 1).
+# Versions verified to resolve on Python 3.14 (2026-08-10). The release
+# security review must confirm/repin these before any GA.
+fastapi==0.141.*
+uvicorn[standard]==0.52.*
+sqlalchemy==2.0.*
+alembic==1.19.*
+psycopg2-binary==2.9.*
+redis==8.*
+httpx==0.28.*
+pyyaml==6.*

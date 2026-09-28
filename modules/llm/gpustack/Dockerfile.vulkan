@@ -1,0 +1,415 @@
+# Stage 1: gpustack-builder
+# Baut das gpustack v0.7.1 (Legacy) Python Wheel-Paket.
+# Verwendet rocm-terminal als Basis, damit Python 3.10 in Builder und Final Image übereinstimmt.
+# Bases PINNED to digests for reproducible per-box builds (the GitLab registry is
+# sunsetting → boxes build locally, so the build MUST be deterministic). rocm/
+# rocm-terminal:6.4 is Ubuntu 22.04-based (glibc 2.35); the patched-llamacpp
+# builder below uses ubuntu:22.04 (also glibc 2.35) so the compiled llama-server
+# runs on this final base — building on ubuntu:24.04 (glibc 2.39) produced a
+# GLIBC_2.38 binary that failed on the 2.35 runtime. Re-pin (and re-verify the
+# build immediately, NOT at clean-install) whenever bumping these.
+FROM rocm/rocm-terminal:6.4@sha256:72b323c5d56c511ea75f7353d0fee04e637390dd4874d414020284627a658014 AS gpustack-builder
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make git curl python3-pip python3-dev build-essential \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /
+# WICHTIG: Pinned auf v0.7.1 – die letzte Version mit nativem llama-box Support.
+RUN git clone --branch v0.7.1 --depth 1 https://github.com/gpustack/gpustack.git
+WORKDIR /gpustack
+RUN make build
+
+# -----------------------------------------------------------------------------
+
+# Stage 1b: patched-llamacpp-builder
+# BSB-08: bake the patched llama.cpp build INTO the image instead of relying
+# on `llm/gpustack/patched-llama-cpp/deploy.sh` to hot-cp it after every
+# `compose up --force-recreate`. Pre-BSB-08, every image rebuild silently
+# reverted to the upstream b9101 binary and re-introduced the gemma4 SWA
+# prompt-cache crash on Strix Halo Vulkan.
+#
+# Source: llama.cpp@b9112 (line numbers in 22458.patch only match this tag,
+# see llm/gpustack/patched-llama-cpp/README.md for the rationale) +
+# upstream PR #22458 ("ggml-backend: allow NULL tensor->data in
+# set/get_tensor for device-only buffers").
+#
+# Build base: ubuntu:24.04 has libvulkan-dev / glslc / spirv-headers at
+# versions matching b9112's expectations. Glibc 2.39 binaries run fine in
+# the rocm/rocm-terminal:6.4 final stage (glibc 2.35) — verified.
+#
+# patchelf sets RUNPATH=$ORIGIN so the .so files in llama-box-default
+# resolve their siblings without LD_LIBRARY_PATH gymnastics.
+#
+# Memory: project_gemma4_swa_prompt_cache_patched_build.md.
+# ubuntu:22.04 (glibc 2.35) — MUST match the final rocm-terminal:6.4 runtime base
+# (also Ubuntu 22.04, glibc 2.35) so the compiled llama-server actually RUNS there.
+# Building on ubuntu:24.04 used to work but its apt archive drifted and now links a
+# GLIBC_2.38 / GLIBCXX_3.4.32 binary that fails to load on the 2.35 runtime. 22.04's
+# stock apt lacks glslc/spirv for the Vulkan shader build, so we add the LunarG
+# Vulkan SDK repo (jammy) below. Pinned to a digest for reproducible per-box builds.
+FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d AS patched-llamacpp-builder
+
+ARG LLAMA_CPP_TAG=b9112
+ARG UPSTREAM_PR=22458
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Vulkan shader-build toolchain: ubuntu:22.04 stock apt has no glslc/spirv, so pull
+# them from the LunarG Vulkan SDK repo (jammy) — `vulkan-sdk` provides glslc,
+# glslangValidator, spirv tools, libvulkan-dev, vulkan-tools. Everything else comes
+# from 22.04 (glibc 2.35), so the resulting llama-server links against 2.35 and runs
+# on the rocm-terminal:6.4 final base.
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+         -o /etc/apt/trusted.gpg.d/lunarg.asc \
+    && curl -fsSL https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list \
+         -o /etc/apt/sources.list.d/lunarg-vulkan-jammy.list \
+    && apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake git patchelf \
+        vulkan-sdk \
+        libcurl4-openssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# Patch source — committed as build context (binaries are .gitignored,
+# the patch itself is committed so the build is reproducible from git).
+COPY patched-llama-cpp/22458.patch /work/22458.patch
+
+# Clone, patch, build, set RUNPATH=$ORIGIN.
+RUN git clone --branch "${LLAMA_CPP_TAG}" --depth 1 \
+        https://github.com/ggml-org/llama.cpp.git src \
+    && cd src \
+    && git apply --check /work/22458.patch \
+    && git apply /work/22458.patch \
+    && grep -q 'may be NULL for device-only buffers' \
+        ggml/src/ggml-backend.cpp \
+    && cmake -B build \
+        -DGGML_VULKAN=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_CURL=ON \
+    && cmake --build build -j"$(nproc)" -t llama-server \
+    && mkdir -p /out \
+    && cp -L build/bin/llama-server /out/ \
+    && find build -name '*.so*' -exec cp -L {} /out/ \; \
+    && cd /out \
+    && for f in llama-server *.so.*.*; do \
+        [ -L "$f" ] && continue; \
+        patchelf --set-rpath '$ORIGIN' "$f" || true; \
+    done \
+    && for base in libggml-base libggml-cpu libggml-rpc libggml \
+                   libggml-vulkan libllama-common libllama libmtmd; do \
+        versioned=$(ls ${base}.so.*.* 2>/dev/null | head -1); \
+        if [ -n "$versioned" ]; then \
+            ln -sf "$versioned" /out/${base}.so; \
+            ln -sf "$versioned" /out/${base}.so.0; \
+        fi; \
+    done
+
+# Emit the build fingerprint as JSON. The final stage COPYs this file into
+# the image so operators can verify "is THIS image actually patched?"
+# without running --version on the binary.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+        coreutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && PATCH_SHA=$(sha256sum /work/22458.patch | awk '{print $1}') \
+    && BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    && mkdir -p /out/fingerprint \
+    && printf '{"llama_cpp_tag":"%s","upstream_pr":%s,"patch_sha256":"%s","build_date":"%s","baked_in":true}\n' \
+        "${LLAMA_CPP_TAG}" "${UPSTREAM_PR}" "${PATCH_SHA}" "${BUILD_DATE}" \
+        > /out/fingerprint/llama-cpp-patch.json
+
+# -----------------------------------------------------------------------------
+
+# Stage 1c: gguf-parser-builder
+# CVE-REFRESH (#20, 2026.07): build gguf-parser FROM SOURCE on a current Go
+# toolchain instead of pulling the upstream release binary.
+#
+# ALL 122 Go-module CVEs in the legacy image — stdlib `go1.22.9` + vendored
+# `golang.org/x/crypto v0.29.0`, including the Go Criticals (GO-2024-3321,
+# GO-2026-5005/5017/5019/5020/5021/5023, CVE-2026-27143, CVE-2025-68121) — live
+# in this ONE binary (verified via grype artifact locations). The upstream
+# RELEASE asset for BOTH v0.23.1 and v0.24.1 is still built with go1.22.9 and
+# pins x/crypto v0.29.0 (verified: `strings` on the downloaded binary), so a
+# release-version bump alone does NOT clear them. The only in-our-control lever
+# is to recompile on a patched Go toolchain with an updated x/crypto.
+#
+# CGO_ENABLED=1 (gguf-parser links native GGUF code), and the binary must run on
+# the rocm-terminal:6.4 final stage (glibc 2.35) — so we build on ubuntu:22.04
+# (glibc 2.35, same digest-pin as the llama.cpp builder) with the Go toolchain
+# fetched as a pinned tarball. `go get golang.org/x/crypto@v0.53.0` bumps the
+# vendored dep past the x/crypto fix line (0.52.0); building on go1.26.4 clears the
+# stdlib CVEs (residual fix-versions top out at 1.26.4). gpustack itself stays
+# v0.7.1 — this only changes how the bundled gguf-parser helper is produced.
+FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d AS gguf-parser-builder
+
+ARG GGUF_PARSER_VERSION=v0.24.1
+# go1.26.4 + x/crypto v0.53.0 — chosen because every residual Critical/High in the
+# gguf-parser binary is fixed at exactly these lines (stdlib fix-versions top out at
+# 1.26.4; x/crypto Criticals fixed at 0.52.0). Building lower (e.g. go1.24.6 / x/crypto
+# 0.43.0) leaves the late-2026 stdlib + x/crypto Criticals.
+ARG GO_VERSION=1.26.4
+ARG GO_SHA256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
+ARG XCRYPTO_VERSION=v0.53.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned Go toolchain tarball (current Go → patched stdlib). Digest-verified.
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+    && echo "$(echo "${GO_SHA256}" | tr -d ' ')  /tmp/go.tgz" | sha256sum -c - \
+    && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local
+
+RUN git clone --branch "${GGUF_PARSER_VERSION}" --depth 1 \
+        https://github.com/gpustack/gguf-parser-go.git /src
+WORKDIR /src/cmd/gguf-parser
+# Bump the vulnerable x/crypto past the fix line, then build with the new Go.
+RUN go get golang.org/x/crypto@${XCRYPTO_VERSION} \
+    && go mod tidy \
+    && CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+        -ldflags="-w -s -X main.Version=${GGUF_PARSER_VERSION}-razzfazz-cve" \
+        -o /out/gguf-parser . \
+    && /out/gguf-parser --version
+
+# -----------------------------------------------------------------------------
+
+# Stage 2: Final Production Image
+# Kombiniert eine minimale ROCm-Basis mit einer Vulkan-Engine und einem intelligenten Mock für die GPU-Erkennung.
+FROM rocm/rocm-terminal:6.4@sha256:72b323c5d56c511ea75f7353d0fee04e637390dd4874d414020284627a658014
+
+# Wechsle zum root-Benutzer für die Installation.
+USER root
+
+# Installiere alle notwendigen Laufzeit-Abhängigkeiten.
+# CVE-REFRESH (#20, 2026.07): `apt-get upgrade -y` pulls the patched Ubuntu 22.04
+# security-pocket packages on top of the digest-pinned rocm-terminal:6.4 base
+# (glibc 2.35 unchanged). Clears the base-OS Critical/High deb CVEs that the
+# v2026.06-ga.6 reproducible rebuild surfaced (sudo CVE-2025-32462/CVE-2026-35535,
+# git CVE-2025-48384, gnupg CVE-2025-68973, openssl/libssl3 CVE-2026-45447, …)
+# WITHOUT changing the base digest (rocm-terminal:6.4 has not been republished
+# upstream — verified) and WITHOUT switching off Ubuntu 22.04 (glibc-2.35 / Vulkan
+# runner constraint, see fix 196d9612). The base image layer itself is unchanged;
+# the fixes come from the 22.04 security archive at build time.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv tini iproute2 libvulkan1 vulkan-tools e2fsprogs unzip curl libpcre3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pip aktualisieren, um Resolver-Probleme zu vermeiden.
+RUN pip3 install --upgrade pip
+
+# Kopiere die von dir erstellten Mock-Dateien in den Container.
+COPY mock_rocminfo.txt /mock_rocminfo.txt
+COPY mock_rocm_smi.json /mock_rocm_smi.json
+
+# Überschreibe die fehlerhaften ROCm-Befehle mit unseren Mock-Skripten.
+RUN echo '#!/bin/sh' > /usr/local/bin/rocminfo && \
+    echo 'cat /mock_rocminfo.txt' >> /usr/local/bin/rocminfo && \
+    chmod +x /usr/local/bin/rocminfo
+
+# rocm-smi Mock: Liest VRAM-Werte DYNAMISCH aus sysfs statt statisch.
+# GPUStack ruft rocm-smi regelmäßig auf um VRAM-Auslastung zu tracken.
+# Statische Werte zeigen immer ~300MB – mit sysfs sehen wir die echten GB.
+COPY mock_rocm_smi.sh /usr/local/bin/rocm-smi
+RUN chmod +x /usr/local/bin/rocm-smi
+
+# Installiere gpustack.
+COPY --from=gpustack-builder /gpustack/dist/*.whl /tmp/
+RUN for f in /tmp/*.whl; do pip3 install --no-cache-dir "$f"; done && rm /tmp/*.whl
+
+# Installiere fehlende Runtime-Dependencies die im v0.7.1 Wheel nicht enthalten sind.
+RUN pip3 install --no-cache-dir cachetools
+
+# ── Tools Setup ──────────────────────────────────────────────────────────────
+# Wir tun so, als hätte GPUStack die Tools bereits heruntergeladen.
+# Dadurch überspringt GPUStack beim Start den Download komplett.
+
+# 1. gguf-parser installieren
+# CVE-REFRESH (#20, 2026.07): install the gguf-parser we built FROM SOURCE in the
+# gguf-parser-builder stage (go1.26.4 + x/crypto v0.53.0) instead of
+# the upstream RELEASE binary. The upstream release asset (v0.23.1 AND v0.24.1) is
+# still built with go1.22.9 + x/crypto v0.29.0 — verified — so a release-version
+# bump alone does NOT clear the 122 Go-module CVEs (all in this one binary). The
+# from-source build clears the Go Criticals + the x/crypto Criticals. gpustack
+# stays v0.7.1; only this bundled helper's build provenance changed.
+COPY --from=gguf-parser-builder /out/gguf-parser /tmp/gguf-parser
+RUN THIRD_PARTY_DIR="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')/third_party/bin" && \
+    mkdir -p "$THIRD_PARTY_DIR/gguf-parser" && \
+    cp /tmp/gguf-parser "$THIRD_PARTY_DIR/gguf-parser/gguf-parser" && \
+    chmod +x "$THIRD_PARTY_DIR/gguf-parser/gguf-parser" && \
+    rm /tmp/gguf-parser
+
+# 2. llama.cpp b9101 (Vulkan) als Drop-in-Replacement für llama-box installieren.
+#    GPUStack v0.7.1 erwartet: llama-box/llama-box-v0.0.171-linux-amd64-rocm/llama-box
+#    Wir packen stattdessen llama-server (b9101) dort rein, da die CLI-Argumente kompatibel sind.
+#    Dies bringt Support für neue Architekturen wie gemma4, qwen35moe (Qwen3.5), mistral3, etc.
+RUN THIRD_PARTY_DIR="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')/third_party/bin" && \
+    LLAMA_BOX_DIR="$THIRD_PARTY_DIR/llama-box/llama-box-v0.0.171-linux-amd64-rocm" && \
+    mkdir -p "$LLAMA_BOX_DIR" && \
+    curl -Lo /tmp/llama-vulkan.tar.gz \
+      "https://github.com/ggml-org/llama.cpp/releases/download/b9101/llama-b9101-bin-ubuntu-vulkan-x64.tar.gz" && \
+    tar xzf /tmp/llama-vulkan.tar.gz -C /tmp/ && \
+    # Alle Binaries und Libraries ins Zielverzeichnis kopieren
+    cp /tmp/llama-b9101/* "$LLAMA_BOX_DIR/" && \
+    # RPC-Server Symlink erstellen (GPUStack erwartet diesen)
+    ln -sf rpc-server "$LLAMA_BOX_DIR/llama-box-rpc-server" && \
+    # Aufräumen
+    rm -rf /tmp/llama-vulkan.tar.gz /tmp/llama-b9101 && \
+    # Symlink llama-box-default -> llama-box-v0.0.171-linux-amd64-rocm erstellen
+    cd "$THIRD_PARTY_DIR/llama-box" && \
+    ln -sf llama-box-v0.0.171-linux-amd64-rocm llama-box-default
+
+# 3. Wrapper-Script als "llama-box" installieren.
+#    GPUStack ruft "llama-box" auf, aber llama-server akzeptiert nicht alle
+#    llama-box-spezifischen Argumente (z.B. --max-projected-cache).
+#    Der Wrapper filtert diese heraus und leitet an llama-server weiter.
+COPY llama-box-wrapper.sh /tmp/llama-box-wrapper.sh
+RUN THIRD_PARTY_DIR="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')/third_party/bin" && \
+    LLAMA_BOX_DIR="$THIRD_PARTY_DIR/llama-box/llama-box-v0.0.171-linux-amd64-rocm" && \
+    cp /tmp/llama-box-wrapper.sh "$LLAMA_BOX_DIR/llama-box" && \
+    chmod +x "$LLAMA_BOX_DIR/llama-box" && \
+    rm /tmp/llama-box-wrapper.sh
+
+# 3b. BSB-08: overlay the PATCHED llama-server + .so* on top of the upstream
+#     b9101 binaries unpacked above. Order matters: this MUST come AFTER
+#     step 2 (the b9101 tarball unpack) so the patched files win.
+#
+#     Without this, every `compose build gpustack-legacy` (or pulling the
+#     image fresh from the gitlab registry) would silently re-introduce
+#     the gemma4 SWA prompt-cache crash on Strix Halo Vulkan, requiring an
+#     out-of-band `patched-llama-cpp/deploy.sh` run after every recreate.
+#
+#     The .so / .so.0 symlinks are recreated inside the destination
+#     because `COPY` collapses symlinks into duplicate file content; the
+#     dlopen of `lib<name>.so.0` then needs the symlink target to resolve.
+#
+#     Memory: project_gemma4_swa_prompt_cache_patched_build.md.
+COPY --from=patched-llamacpp-builder /out/llama-server /tmp/patched/llama-server
+COPY --from=patched-llamacpp-builder /out/*.so.*.* /tmp/patched/
+RUN THIRD_PARTY_DIR="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')/third_party/bin" && \
+    LLAMA_BOX_DIR="$THIRD_PARTY_DIR/llama-box/llama-box-v0.0.171-linux-amd64-rocm" && \
+    cp /tmp/patched/llama-server "$LLAMA_BOX_DIR/llama-server" && \
+    chmod +x "$LLAMA_BOX_DIR/llama-server" && \
+    for f in /tmp/patched/*.so.*.*; do \
+        cp "$f" "$LLAMA_BOX_DIR/"; \
+    done && \
+    cd "$LLAMA_BOX_DIR" && \
+    for base in libggml-base libggml-cpu libggml-rpc libggml libggml-vulkan libllama-common libllama libmtmd; do \
+        versioned=$(ls ${base}.so.*.* 2>/dev/null | head -1); \
+        if [ -n "$versioned" ]; then \
+            ln -sf "$versioned" "${base}.so"; \
+            ln -sf "$versioned" "${base}.so.0"; \
+        fi; \
+    done && \
+    rm -rf /tmp/patched
+
+# 3c. BSB-08: emit the patch fingerprint marker at /etc/razzfazz/llama-cpp-patch.json
+#     so operators (and the BSB-08 acceptance test) can verify the image
+#     actually carries the patched build without running `--version` on
+#     the binary. Includes upstream tag (b9112), upstream PR (#22458),
+#     sha256 of the input patch, and build date.
+RUN mkdir -p /etc/razzfazz
+COPY --from=patched-llamacpp-builder /out/fingerprint/llama-cpp-patch.json /etc/razzfazz/llama-cpp-patch.json
+
+# 4b. fastfetch (2.25.0.1) baken — GPUStack v0.7.1 lädt es sonst beim ersten
+#     Worker-Start via prepare_tools()/download_fastfetch() herunter. Nach einem
+#     Container-Recreate (z.B. ein Offline-Paket-Upgrade) ist der Download-State
+#     weg; auf Offline-/Air-Gap-Boxen schlägt das Nachladen dann fehl und der
+#     Worker bleibt dauerhaft not_ready → keine Modelle (#127). Exakt dieselbe
+#     Quelle + Version wie GPUStack selbst verwendet (github.com/gpustack/fastfetch,
+#     2.25.0.1); Archiv-Layout: fastfetch-linux-amd64/usr/bin/fastfetch.
+RUN TPB="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')/third_party/bin" && \
+    mkdir -p "$TPB/fastfetch" && \
+    curl -fsSL -o /tmp/fastfetch.zip \
+        "https://github.com/gpustack/fastfetch/releases/download/2.25.0.1/fastfetch-linux-amd64.zip" && \
+    unzip -q /tmp/fastfetch.zip -d /tmp/fastfetch-ext && \
+    cp /tmp/fastfetch-ext/fastfetch-linux-amd64/usr/bin/fastfetch "$TPB/fastfetch/fastfetch" && \
+    chmod +x "$TPB/fastfetch/fastfetch" && \
+    rm -rf /tmp/fastfetch.zip /tmp/fastfetch-ext
+
+# 5. versions.json erstellen, damit GPUStack den Download überspringt.
+#    Die Versionen MÜSSEN den BUILTIN_*_VERSION-Werten von GPUStack v0.7.1
+#    entsprechen (nicht der tatsächlich gebauten Binary-Version), sonst lädt
+#    prepare_tools()/download_* die Tools offline erneut herunter und crasht (#127):
+#      - gguf-parser: v0.22.1  (BUILTIN; unsere Binary ist der CVE-fixe
+#        v0.24.1-Quellbuild — der Skip-Check vergleicht nur den Versions-String,
+#        nicht die Binary, also bleibt der CVE-Fix erhalten)
+#      - fastfetch:   2.25.0.1 (BUILTIN, hardcodiert in download_fastfetch)
+#      - llama-box:   v0.0.171 (unser Vulkan-Build)
+RUN TPB="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')/third_party/bin" && \
+    echo '{"llama-box-v0.0.171-linux-amd64-rocm":"v0.0.171","gguf-parser":"v0.22.1","fastfetch":"2.25.0.1"}' \
+    > "$TPB/versions.json"
+
+# 6. Patch: Bug in _link_llama_box_default_dir beheben.
+#    Der Originalcode prüft nur auf Symlinks, nicht auf vorhandene Verzeichnisse.
+#    Das führt zu FileExistsError wenn llama-box-default ein normales Verzeichnis ist.
+COPY patch_tools_manager.py /tmp/patch_tools_manager.py
+RUN python3 /tmp/patch_tools_manager.py && rm /tmp/patch_tools_manager.py
+
+# 7. Patch: "null"-Prefix in Streaming-Antworten beheben.
+#    llama-server sendet im ersten SSE-Chunk {"role":"assistant","content":null}.
+#    Das ist OpenAI-Spec-konform, aber llama-box hat das nicht gemacht.
+#    Clients (z.B. Dify) rendern null als String "null" vor der Antwort.
+COPY patch_null_content.py /tmp/patch_null_content.py
+RUN python3 /tmp/patch_null_content.py && rm /tmp/patch_null_content.py
+
+# 8. Patch: Duplicate 'Server' header
+#    Monkey-patch proxy code to avoid "Duplicate 'Server' header" error
+#    when proxying requests between gpustack master and worker.
+RUN GPKG="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')" && \
+    sed -i 's/headers=dict(resp.headers),/headers={k: v for k, v in resp.headers.items() if k.lower() != "server"},/' "$GPKG/routes/worker/proxy.py"
+
+# 9. #536: make the gpustack install tree writable by the NON-ROOT runtime uid
+#    so the opt-in de-root overlay (modules/llm/compose.nonroot.yml) works.
+#    At worker startup tools_manager._link_llama_box_rpc_server() creates a
+#    symlink INSIDE third_party/bin/llama-box/<ver>/ — that dir is root-owned in
+#    the image, so a non-root uid hits `PermissionError: [Errno 13]` there and
+#    the worker hangs at ready_replicas:0. This is a DIFFERENT failure from the
+#    RENDER_GID/GPU one the amd device overlay already handles (that path is
+#    fine — /dev/kfd + /dev/dri reach the container via group_add render gid).
+#    chown the whole gpustack tree to the runtime uid; harmless for the default
+#    root run (root ignores ownership). Verified live on an AMD box: after this
+#    chown a de-rooted gpustack (uid 1000) reaches ready_replicas:1 and serves
+#    on GPU. Keep GPUSTACK_UID/GID in lockstep with the `user:` seam in
+#    modules/llm/compose.yml (gpustack-legacy). See #536.
+#
+#    2026.09 FLEET FLIP (#536): this is no longer an opt-in nicety — the
+#    gpustack-legacy service now carries `user:` by default, so this step is
+#    load-bearing for every AMD box.
+ARG GPUSTACK_UID=1000
+ARG GPUSTACK_GID=1000
+RUN GPKG="$(python3 -c 'import gpustack, os; print(os.path.dirname(gpustack.__file__))')" && \
+    chown -R ${GPUSTACK_UID}:${GPUSTACK_GID} "$GPKG"
+
+# 10. #536 (2026.09 fleet flip): the gpustack-data MOUNT POINT must exist in the
+#     image, owned by the runtime uid. Docker initialises an EMPTY named volume
+#     from the image's directory at the mount path — content, mode AND ownership
+#     — so with no /var/lib/gpustack in the image a fresh box gets a root:root
+#     0755 volume and the non-root server cannot write /var/lib/gpustack
+#     (its state dir, the #278 schema-line guard file, the HF cache and the
+#     offline local-models dir all live there). Existing boxes are re-owned once
+#     by cli/upgrade.sh Step 7c; FRESH installs are covered here and only here.
+RUN mkdir -p /var/lib/gpustack && \
+    chown ${GPUSTACK_UID}:${GPUSTACK_GID} /var/lib/gpustack
+
+# 11. #536: advertise the non-root contract so the upgrade path can ASK this
+#     image whether it was built with steps 9+10, without starting a container:
+#     `docker image inspect --format '{{ index .Config.Labels "…" }}'`.
+#     cli/upgrade.sh refuses to flip a box whose image lacks the label and keeps
+#     it on root — a PRE-#536 image plus a non-root `user:` is the silent
+#     ready_replicas:0 hang, and a hang with green health signals is exactly the
+#     failure #536 exists to prevent.
+LABEL ai.razzfazz.gpustack.nonroot-uid="${GPUSTACK_UID}"
+LABEL ai.razzfazz.gpustack.nonroot-gid="${GPUSTACK_GID}"
+
+# Kein custom Entrypoint nötig – die Compose-Datei definiert den command Block.

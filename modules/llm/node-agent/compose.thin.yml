@@ -1,0 +1,239 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+#
+# #549 R0 — the THIN NODE: an inference worker that is NOT a stack.
+#
+#   docker compose -p rzfz-node -f modules/llm/node-agent/compose.thin.yml \
+#       --env-file .env.node up -d
+#
+# Exactly three things run on a thin node: the worker-agent, its scoped
+# docker-socket-proxy, and the engine containers the agent launches. No Caddy,
+# no Authentik, no Postgres, no portals, no backup — the node is machine-
+# authenticated (per-worker command key, #285) and managed entirely from the
+# master; the only local surface is this compose file and `rzfz node-init`.
+# That is the requirement, not an optimisation: every service a worker does not
+# run is a service that needs no local upgrade, no local certs, and offers no
+# local attack surface (#419).
+#
+# The project name is rzfz-node ON PURPOSE (-p rzfz-node): volume and network
+# get node-scoped names (rzfz-node_llm-node-models / rzfz-node_default), and
+# .env.node points LLM_WORKER_MODELS_VOLUME / LLM_WORKER_ENGINE_NETWORK at exactly
+# those. The full stack's names (razzfazz-stack_*) appear nowhere here — a thin
+# node that accidentally resolves a stack name is a thin node that was
+# installed on a stack box, which is what compose.yml (the module form) is for.
+#
+# Image note (#419 transport, honest about the bootstrap): the worker-agent image
+# itself is BUILT from the local checkout/package at init time — it cannot be
+# deploy_runner'd onto the box, because it is the thing that executes
+# deploy_runner. Runner/engine images, by contrast, never build here: they
+# arrive from the master's registry (#549 R2) or with the offline package.
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: rzfz-node-socket-proxy
+    restart: unless-stopped
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/lib/haproxy
+    environment:
+      # NARROWER than the stack's proxy (core/compose.yml:567), on purpose —
+      # scope is what the worker-agent's drivers actually call, nothing more:
+      #   containers run/stop/logs/list  -> CONTAINERS + POST + ALLOW_START/STOP
+      #   restart_engine                 -> ALLOW_RESTARTS
+      #   deploy/remove/list runners     -> IMAGES + POST (#549 R2)
+      #   engine network attach          -> NETWORKS
+      #   models volume mount            -> VOLUMES
+      # EXEC is 0 (the stack's is 1 for agent-manager terminals; nothing on a
+      # node execs into an engine). BUILD stays 0 — a node never builds.
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      INFO: 1
+      VERSION: 1
+      PING: 1
+      EVENTS: 1
+      POST: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+      ALLOW_RESTARTS: 1
+      EXEC: 0
+      BUILD: 0
+      COMMIT: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  llm-worker-agent:
+    # #1438 (E2): NO build: block — a thin node never builds this image (the
+    # bundle ships no Dockerfile; the first GB10 join died in "open Dockerfile:
+    # no such file"). worker-join pulls it from the master's hub and tags it to
+    # this bare name; pull_policy never turns an absent image into an explicit
+    # failure instead of a docker.io reach (#307).
+    image: razzfazz-llm-worker-agent:latest
+    pull_policy: never
+    container_name: llm-worker-agent
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+    networks:
+      - default
+    ports:
+      - "127.0.0.1:${LLM_WORKER_AGENT_PORT:-8090}:8090"
+    environment:
+      LLM_WORKER_AGENT_RUNTIME: "1"
+      HARDWARE: "${HARDWARE:-amd}"
+      RAZZFAZZ_VERSION: "${RAZZFAZZ_VERSION:-}"
+      # #2219: the box's network mode reaches the node agent. Without it the
+      # agent defaults to "online", attempts a HuggingFace pull on an
+      # air-gapped box, and its refusal blames HuggingFace's missing digest for
+      # a purely local absence (journey B on 2026.09-rc9). With it, the agent's
+      # own offline branch answers "weights not present and offline mode".
+      RAZZFAZZ_NETWORK_MODE: "${RAZZFAZZ_NETWORK_MODE:-online}"
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
+      # The master is REMOTE for a thin node — there is no default, because the
+      # only sane value is this fleet's manager URL and a wrong guess registers
+      # the node nowhere. rzfz node-init writes it.
+      LLM_MANAGER_URL: "${LLM_MANAGER_URL:?rzfz node-init writes this}"
+      LLM_MANAGER_NODE_KEY: "${LLM_MANAGER_NODE_KEY:-}"
+      LLM_WORKER_COMMAND_KEY: "${LLM_WORKER_COMMAND_KEY:-}"
+      LLM_WORKER_NAME: "${LLM_WORKER_NAME:?rzfz node-init writes this}"
+      LLM_WORKER_ADDRESS: "${LLM_WORKER_ADDRESS:-llm-worker-agent}"
+      LLM_WORKER_ADVERTISE_ADDR: "${LLM_WORKER_ADVERTISE_ADDR:-}"
+      LLM_WORKER_REPORT_INTERVAL: "${LLM_WORKER_REPORT_INTERVAL:-30}"
+      # #1619: the lean beat beside the full report — utilisation numbers +
+      # the command claim, so the console's live chart moves and a queued
+      # `tail_logs` is picked up in seconds instead of up to a report cycle.
+      # 0 switches it off and the box behaves exactly as before.
+      LLM_WORKER_FAST_BEAT_INTERVAL: "${LLM_WORKER_FAST_BEAT_INTERVAL:-3}"
+      # node-scoped names — see the project-name note in the header
+      LLM_WORKER_MODELS_VOLUME: "${LLM_WORKER_MODELS_VOLUME:-rzfz-node_llm-node-models}"
+      LLM_WORKER_ENGINE_NETWORK: "${LLM_WORKER_ENGINE_NETWORK:-rzfz-node_default}"
+      # Both registries are the MASTER's, reached over the LAN — a thin node has
+      # no Zot of its own. See .env.node for the reachability caveat.
+      LLM_REGISTRY_URL: "${LLM_REGISTRY_URL:-}"
+      LLM_WORKER_RUNNER_REGISTRY: "${LLM_WORKER_RUNNER_REGISTRY:-}"
+      # #1677: the coordinate the HOST daemon can resolve. An empty
+      # LLM_WORKER_RUNNER_REGISTRY now means "the hub domain" — which is what
+      # config/.env.example has documented all along.
+      LLM_HUB_DOMAIN: "${LLM_HUB_DOMAIN:-}"
+      # #307 S4: a REMOTE thin node authenticates to the master's Zot with the
+      # shared #559/#571 Basic credential — without forwarding these two, the
+      # worker-agent process never sees them and every REMOTE model-weight pull
+      # (and runner-image pull) 401s. node-init writes them alongside the URL.
+      LLM_WORKER_REGISTRY_USER: "${LLM_WORKER_REGISTRY_USER:-}"
+      LLM_WORKER_REGISTRY_PASSWORD: "${LLM_WORKER_REGISTRY_PASSWORD:-}"
+      LLM_WORKER_MEM_BUDGET_GB: "${LLM_WORKER_MEM_BUDGET_GB:-}"
+      RAZZFAZZ_GPU_GROUP_GIDS: "${RAZZFAZZ_GPU_GROUP_GIDS:-}"
+      RAZZFAZZ_ENGINE_IMAGE_AMD: "${RAZZFAZZ_ENGINE_IMAGE_AMD:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CPU: "${RAZZFAZZ_ENGINE_IMAGE_CPU:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CUDA: "${RAZZFAZZ_ENGINE_IMAGE_CUDA:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CUDA_LLAMACPP: "${RAZZFAZZ_ENGINE_IMAGE_CUDA_LLAMACPP:-}"
+      # #1552: the agent's own GPU visibility. Empty on AMD/CPU (and then
+      # ignored by the runtime), set by the installer on --hardware nvidia.
+      # `utility` is the smallest capability that makes nvidia-smi/NVML work;
+      # the agent needs no compute, video or graphics — it only reads memory.
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-}"
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-}"
+      # #1436: the GB10 (cuda-gb10, DGX Spark class) images — vLLM from NGC and
+      # the CUDA-13/121a llama.cpp runner. Defined in images.py since #1329 but
+      # never forwarded, so the "repin without a code change" was unreachable
+      # on exactly the boxes it was written for.
+      RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10: "${RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10:-}"
+      RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10_LLAMACPP: "${RAZZFAZZ_ENGINE_IMAGE_CUDA_GB10_LLAMACPP:-}"
+      # #1517 (E5) rev-B: the compute-capability override. `select_driver` asks
+      # the GPU which runner it can execute; this key is the documented — and
+      # ONLY — way to correct a box whose GPU we have not mapped, and it is
+      # what UnknownCudaCapability's message tells the operator to set. An
+      # `environment:` block is an ALLOW-LIST (#319/#1436): without this line
+      # the key never reaches the process and the escape hatch does not exist
+      # on a real box. That is the #1436 defect verbatim, four lines under the
+      # comment describing it.
+      RAZZFAZZ_CUDA_COMPUTE_CAP: "${RAZZFAZZ_CUDA_COMPUTE_CAP:-}"
+      # #1456: per-box override for the GB10 memory fraction. An
+      # `environment:` block is an allow-list (#319) — without this line the
+      # key the driver reads never reaches the process, and the documented
+      # escape hatch would not exist on a real box.
+      RAZZFAZZ_NODE_ENGINE: "${RAZZFAZZ_NODE_ENGINE:-}"
+      # #1517 rev-B: the llama.cpp binary name inside the runner image (EMPTY =
+      # llama-server). Read by the AMD and CUDA llama.cpp drivers and, until
+      # now, forwarded by neither compose — the #319 allow-list class again.
+      RAZZFAZZ_LLAMACPP_BINARY: "${RAZZFAZZ_LLAMACPP_BINARY:-}"
+      # #971 Engine supervision windows — see the long note in compose.yml. A
+      # thin node is where the readiness window matters most: the remote CUDA
+      # boxes the master manages are the ones running the large models whose
+      # first boot outlasts the default. Non-empty defaults on purpose: an
+      # empty-default interpolation sets "" and float("") raises at startup.
+      RZFZ_ENGINE_READINESS_GRACE: "${RZFZ_ENGINE_READINESS_GRACE:-300}"
+      RZFZ_ENGINE_RECOVER_AFTER: "${RZFZ_ENGINE_RECOVER_AFTER:-180}"
+      RZFZ_ENGINE_MAX_RECOVER_ATTEMPTS: "${RZFZ_ENGINE_MAX_RECOVER_ATTEMPTS:-3}"
+      RZFZ_ENGINE_PROBE_TIMEOUT: "${RZFZ_ENGINE_PROBE_TIMEOUT:-2}"
+      TZ: "${TZ:-UTC}"
+      # #585 — the trust anchor for everything this node dials over TLS.
+      # Always the same in-container path, so nothing here is conditional; what
+      # varies is the file mounted onto it (see the volume below).
+      SSL_CERT_FILE: "/etc/rzfz/ca.pem"
+      REQUESTS_CA_BUNDLE: "/etc/rzfz/ca.pem"
+    volumes:
+      - "llm-node-models:/models"
+      # #585 — the master's CA, as authenticated against the join pin and
+      # persisted by `rzfz worker-join`. Without it the agent speaks
+      # https://<master> with the system truststore, which holds no internal
+      # root: CERTIFICATE_VERIFY_FAILED on every call, and the node never
+      # registers. The master itself never hit this — its embedded agent talks
+      # in-network http://llm-manager:8080; a thin node is the first consumer
+      # that crosses the TLS edge.
+      #
+      # The DEFAULT is the box's public bundle, not an empty mount: a master on
+      # a real certificate has no CA to persist, and there the public roots are
+      # exactly the right anchor. So both cases mount a valid file and neither
+      # needs a conditional environment key.
+      - "${LLM_WORKER_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}:/etc/rzfz/ca.pem:ro"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    # #1552 — GPU ACCESS FOR THE AGENT ITSELF, on NVIDIA only.
+    #
+    # The agent does not run inference — it launches engine containers. But it
+    # DOES report this node's memory picture, and on NVIDIA that reading comes
+    # from `nvidia-smi`/NVML, which is visible only with the nvidia runtime and
+    # `NVIDIA_DRIVER_CAPABILITIES=utility` (AMD reads amdgpu sysfs, which every
+    # container sees; NVIDIA has no such sysfs). Measured on the GB10 `.191`
+    # before this change:
+    #
+    #     docker inspect llm-worker-agent → runtime=runc, no NVIDIA_* env
+    #     docker exec  llm-worker-agent   → nvidia-smi: not found
+    #     the host                        → /usr/bin/nvidia-smi → compute_cap 12.1
+    #
+    # Consequence on a DISCRETE card (RTX PRO 6000): no `vram_total`, so the
+    # #227/#328 admission gate is INERT for that worker — it accepts placements
+    # it cannot hold, and the console shows `admission_basis: none`. The GB10
+    # only escapes it through the #1456 meminfo fallback its UMA allows.
+    #
+    # #1014/PR #1534 fixed exactly this for the FULL box (an overlay hung off
+    # HARDWARE); a thin node is installed differently and never sees that
+    # overlay, so it needs the same thing here.
+    #
+    # Written as env-driven defaults instead of a second compose file: the thin
+    # node runs ONE compose file from a systemd unit
+    # (`docker compose -f …/compose.thin.yml --env-file …/.env.node up -d`), so
+    # an overlay would mean editing the unit per hardware class. `runc` is the
+    # daemon's own default runtime, and empty NVIDIA_* variables are ignored, so
+    # an AMD or CPU node renders exactly what it rendered before —
+    # `test_1552_…::test_an_amd_node_renders_what_it_rendered_before` pins that.
+    runtime: ${LLM_WORKER_RUNTIME:-runc}
+    # `scripts/install-worker.sh.tmpl` sets both for --hardware nvidia.
+
+volumes:
+  llm-node-models:
+    # explicit name so the agent's docker-py engine launches (which bypass
+    # compose) mount the SAME volume — the #207 trap, avoided here too
+    name: rzfz-node_llm-node-models
+
+networks:
+  default:
+    name: rzfz-node_default
