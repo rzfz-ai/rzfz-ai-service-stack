@@ -1,0 +1,13 @@
+# This tree is a curated export of the rzfz.ai stack's development repository,
+# written by its publisher. The commit ids of this public repository exist only
+# here; the lines below name the development commit the export was cut from.
+# rzfz init / rzfz upgrade record source_commit in .env as RAZZFAZZ_SOURCE_COMMIT
+# beside RAZZFAZZ_COMMIT (this checkout's own commit). Quote both to support.
+source_commit=ce5c6bc0c44764042a774734bcb7b7ee3abb6915
+source_describe=2026.09-ga.5-2-gce5c6bc0c
+source_worktree=clean
+# release_docs_commit: the commit the release notes and images were taken from (#2363).
+release_docs_commit=f4f6e28bc1034725ac0818e84f411df11ab85027
+# release_tag: the release this source corrects (licence notices only, RZFZAI-2079).
+release_tag=2026.09-ga.5
+release_tag_commit=719a0f4cdce7d492ddd5fda90dda2104d59cbf35

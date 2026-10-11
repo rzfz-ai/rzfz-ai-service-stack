@@ -1,0 +1,1193 @@
+/* rzfz.ai Configuration — Base Styles (T01 scaffold, enhanced in T07)
+ *
+ * M026 S07 #5: deduplicated against razzfazz-base.css; container-specific
+ * chrome stays local. The shared baseline (`/static/razzfazz-common/
+ * razzfazz-base.css`) is loaded BEFORE this file by base.html and exposes
+ * a `razz-*` prefixed token + utility set (--razz-red, .razz-card, .razz-button,
+ * etc.). This file continues to own:
+ *   - the management-portal layout chrome (.layout, .sidebar, .nav-*, .content)
+ *   - module browser primitives (.module-card, .module-grid, .module-*)
+ *   - apply / what's-new dialog (.apply-*, .whats-new-*)
+ *   - module detail page (.detail-*, .container-table)
+ *   - memory bar + terminal output (.memory-*, .terminal-*)
+ *   - the local .btn / .card / .badge / .panel / .flash classes referenced
+ *     directly by templates (NOT renamed to .razz-* in S07; would be a
+ *     much bigger refactor)
+ *   - the local --color-* CSS custom properties (different naming scheme
+ *     from the shared --razz-* tokens; both coexist intentionally)
+ *
+ * Selector overlap with razzfazz-base.css: none (shared uses .razz-*
+ * exclusively; local classes are unprefixed). The shared link is loaded
+ * mostly so future templates / partials in this container can opt into
+ * the shared utilities incrementally without a second CSS round-trip.
+ */
+
+:root {
+    /* #300 Phase 1 — #296 design tokens, copied verbatim from the shipped
+       LLM-Manager console (modules/llm/manager-ui/src/styles.css). Warm
+       flat ground, dark left rail, ink headings, red reserved as the accent. */
+    --razz-red: #CD1719;
+    --razz-red-hover: #b01416;
+    --razz-red-soft: rgba(205, 23, 25, 0.10);
+    --razz-red-tint: rgba(205, 23, 25, 0.05);
+
+    --bg: #F1EDE9;
+    --bg-card: #FFFFFF;
+    --bg-soft: #F6F4F2;
+    --bg-muted: #F0EDEA;
+
+    --rail: #201D22;
+    --rail-ink: #ECEAE8;
+    --rail-muted: #9A9298;
+
+    --text: #1A1A1A;
+    --text-secondary: #4A4F57;
+    /* CFG-18: was #6B7280, which measures 4.15:1 on --bg (#F1EDE9) and
+       4.41:1 on --bg-soft (#F6F4F2) — under the 4.5:1 WCAG AA floor for the
+       0.625–0.8125rem text this token carries across the dashboard and
+       settings pages. It only passed on white cards (4.83:1), i.e. exactly
+       where it was checked. #5C636E measures 5.20 / 5.52 / 6.06:1 on
+       --bg / --bg-soft / --bg-card, so every surface clears AA. */
+    --text-muted: #5C636E;
+
+    --border: rgba(0, 0, 0, 0.10);
+    --border-strong: rgba(0, 0, 0, 0.14);
+    --border-soft: #ECE8E4;
+
+    --success: #1F9D57; --success-bg: #e5f5ec; --success-fg: #14603a;
+    --warn: #C77A00;    --warn-bg: #fbeed6;    --warn-fg: #8a5600;
+    --error: #C0271F;   --error-bg: #fbe4e2;   --error-fg: #8f1d17;
+    --info-bg: #e6ecf7; --info-fg: #274b8f;
+
+    --radius: 10px; --radius-sm: 7px; --radius-pill: 999px;
+    --sidebar-width: 224px;
+    --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+
+    /* Legacy --color-* aliases kept pointing at the new tokens so every
+       template/page not yet reskinned (later #300 phases) inherits the new
+       palette for free instead of keeping its own stale literal colours. */
+    --color-brand: var(--razz-red);
+    --color-brand-hover: var(--razz-red-hover);
+    --color-bg-dark: var(--rail);
+    --color-bg-sidebar: var(--rail);
+    --color-bg-content: var(--bg);
+    --color-bg-card: var(--bg-card);
+    --color-bg-soft: var(--bg-soft);
+    --color-text-primary: var(--text);
+    --color-text-secondary: var(--text-secondary);
+    --color-text-light: var(--text);
+    --color-text-muted: var(--text-muted);
+    --color-border: var(--border);
+    --color-border-dark: var(--border-strong);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.875rem;
+    line-height: 1.5;
+}
+
+/* Sidebar */
+/* #300 Task 1.3 — the outer shell is now a flex row: dark rail + a `.main`
+   column (topbar + content), replacing the old fixed-sidebar `.layout`. */
+.app { display: flex; min-height: 100vh; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.topbar {
+    height: 54px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1.5rem;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 5;
+}
+.topbar .crumb { font-weight: 600; color: var(--text); }
+.topbar-actions { display: flex; align-items: center; gap: 0.5rem; }
+.who {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: 0.5rem;
+}
+.who .avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-pill);
+    background: var(--razz-red);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.sidebar {
+    background: var(--rail);
+    color: var(--rail-ink);
+    overflow-y: auto;
+    width: var(--sidebar-width);
+    flex-shrink: 0;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    padding: 1rem 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border-strong);
+}
+/* #1054: razzfazz brand image on the DARK rail (a light image reads with
+   contrast on the dark rail); the content stays plain — see .content. `left
+   center / cover` shows the left crop; `center / cover` is the fallback.
+   Reuses the same /branding/media/razzfazz.webp asset the app already served
+   for the (now-removed) content watermark. `position: sticky` above already
+   establishes the positioning context for the absolute ::before. */
+.sidebar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: url('/branding/media/razzfazz.webp') no-repeat left center / cover;
+    opacity: 0.14;
+    pointer-events: none;
+    z-index: 0;
+}
+.sidebar > * { position: relative; z-index: 1; }
+
+/* #300 rail reorg (approved prototype match) — brand block replaces the
+   broken-PNG `.nav-brand`/`.brand-logo` (dark-on-transparent logo, invisible
+   on the dark rail — operator feedback: "logo looks crap"). Classes ported
+   verbatim from the shipped LLM-Manager console
+   (modules/llm/manager-ui/src/styles.css), which the approved prototype
+   also uses for its Config Portal screen. */
+.brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 2px; }
+.brand .brand-spark { width: 22px; height: 22px; fill: var(--razz-red); flex-shrink: 0; }
+.brand .brand-name { font-weight: 700; color: #fff; letter-spacing: -0.01em; }
+
+.brand-sub {
+    font-size: 0.6875rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--rail-muted);
+    padding: 2px 8px 16px;
+    font-weight: 700;
+}
+
+/* Nav header version line (moved out of inline styles in nav.html so the
+   dark-rail palette applies without per-template overrides). */
+.nav-version {
+    padding: 0 1rem 0.5rem;
+    font-size: 0.6875rem;
+    color: var(--rail-muted);
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+    margin-bottom: 0.5rem;
+}
+.nav-version-num { font-weight: 600; color: var(--rail-ink); }
+
+/* Flat icon-nav (prototype IA) — replaces the old `.nav-section` /
+   `.nav-category` header-block grouping with a plain list separated only
+   by thin `.nav-divider`s. `.railnav` is the flex column wrapper; `.nav` is
+   each entry (was `.nav-item`); `.nav-ico` is the leading glyph. */
+.railnav {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 0 0.5rem;
+}
+
+.nav {
+    color: var(--rail-muted);
+    text-decoration: none;
+    padding: 8px 11px;
+    border-radius: 8px;
+    font-weight: 500;
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    font-size: 0.875rem;
+}
+.nav:hover { background: rgba(255,255,255,0.06); color: var(--rail-ink); }
+.nav.active { background: rgba(205,23,25,0.18); color: #fff; font-weight: 600; box-shadow: inset 2px 0 0 var(--razz-red); }
+.nav.disabled { opacity: 0.4; pointer-events: none; }
+
+.nav-ico { width: 16px; text-align: center; opacity: 0.9; flex-shrink: 0; }
+
+.nav-divider { height: 1px; background: rgba(255,255,255,0.12); margin: 10px 14px; }
+
+.nav-count {
+    margin-left: auto;
+    font-size: 0.6875rem;
+    background: rgba(255,255,255,0.08);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 3px;
+    color: var(--rail-muted);
+}
+.nav.active .nav-count { background: rgba(255,255,255,0.2); color: #fff; }
+
+/* Foot of the rail — domain label + de-emphasised Factory Reset (destructive;
+   kept reachable but out of the main flat list). No "Sign out": the app has
+   no in-app login, it's gated by Authentik at the proxy. */
+.sidebar-foot {
+    margin-top: auto;
+    padding: 12px 16px 2px;
+    border-top: 1px solid rgba(255,255,255,0.10);
+    font-size: 0.7rem;
+    color: var(--rail-muted);
+}
+.sidebar-foot a { color: #e78d8d; text-decoration: none; }
+.sidebar-foot a:hover { text-decoration: underline; }
+
+/* #300-followup — Settings secondary sub-pane (master-detail). A flex
+   sibling of `.sidebar` inside `.app` (rail -> subnav -> content), included
+   from base.html only on settings routes (see the `{% if %}` around
+   `{% include "components/settings_subnav.html" %}`). Light card-surface —
+   deliberately NOT the dark rail: this is the #296 "secondary nav sits on
+   the card surface, not the dark rail" language applied to a real two-level
+   nav. Active state uses a `--razz-red` left accent + tinted background
+   (matches `.nav.active`'s dark-rail treatment, translated to the light
+   surface) so the SAME "you are here" language is used at both nav levels. */
+.subnav {
+    width: 200px;
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    padding: 1.25rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    overflow-y: auto;
+}
+.subnav-label {
+    font-size: 0.6875rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 700;
+    padding: 0 0.625rem 0.625rem;
+}
+.subnav-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 0.8125rem;
+    font-weight: 500;
+}
+.subnav-link:hover { background: var(--bg-soft); color: var(--text); }
+.subnav-link.active {
+    background: var(--razz-red-soft);
+    color: var(--razz-red);
+    font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--razz-red);
+}
+
+/* Content area — plain flat warm ground (#1054: the razzfazz brand image moved
+   to the dark rail — see .sidebar::before — so the content carries no
+   watermark). Sits inside `.main` as a flex sibling of the rail (#300). */
+.content {
+    padding: 2rem;
+    min-height: calc(100vh - 54px);
+    position: relative;
+    background: var(--bg);
+}
+.content > * { position: relative; z-index: 1; }
+
+.page-header {
+    margin-bottom: 1.5rem;
+}
+
+.page-header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.page-subtitle {
+    font-size: 0.875rem;
+    color: var(--color-text-secondary);
+    margin-top: 0.25rem;
+}
+
+/* Cards */
+.card {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+/* #300 operator feedback — "text is always stuck directly to the border of
+   the white fields and light grey lines." Root cause: `.card` itself had
+   `padding: 0` (only `.card-header`/`.card-body` were padded), but the
+   settings forms place bare content (`.field`, `.hint`, `<p>`, `.form-grid`,
+   plain `<div>` wrappers, etc.) DIRECTLY inside `.card` — verified by
+   grepping every `class="card"` usage across templates/ (settings/domain.html,
+   settings/smtp.html, settings/auth.html, settings/gpustack.html,
+   settings/rag_models.html, settings/agents.html, settings/mcp_integrations.html,
+   settings/factory_reset.html, modules/detail.html, modules/overview.html
+   banners, ...) — so that content sat flush against the card edge.
+   Lowest-risk fix: default-pad `.card` itself and reset back to 0 for the
+   THREE shapes that manage their own padding — `.card-header`/`.card-body`
+   pages (which must keep their edge-to-edge header border), `.card.stat`
+   (dashboard/detail stat tiles, compact padding), and `.module-card` (module
+   browser tile, own 1rem padding + icon/badge layout). `:has(> ...)` is
+   already an established pattern in this file (see `.field label:has(>
+   input[type="checkbox"])` below), so this reads as one house style, not a
+   bespoke workaround. Enumerating "every bare child selector" instead
+   (`.card > .field`, `.card > .hint`, ...) was rejected: settings/factory_reset.html
+   and settings/mcp_integrations.html put `.field`/content inside a `<form>`
+   wrapper, one level BELOW the card's direct children, which a
+   `.card > .field` child-selector would silently miss. */
+.card:not(:has(> .card-header)):not(:has(> .card-body)):not(.stat):not(.module-card) {
+    padding: 1rem 1.25rem;
+}
+
+.card-header {
+    padding: 0.75rem 1rem;
+    font-weight: 600;
+    font-size: 0.8125rem;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+}
+
+.card-body {
+    padding: 1rem;
+}
+
+/* #300 Phase 2 — #296 stat tiles (card.stat with k/v/sub) + tile grid.
+   Ported verbatim from modules/llm/manager-ui/src/styles.css so the
+   dashboard's six-card resource row reads as the #296 console. */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem; margin-bottom: 0.875rem; }
+.card.stat { padding: 0.5rem 0.625rem; }
+.stat .k { color: var(--text-muted); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.stat .v { font-size: 1rem; font-weight: 600; line-height: 1.1; margin-top: 0.25rem; }
+.stat .v small { font-size: 0.625rem; color: var(--text-muted); font-weight: 500; margin-left: 0.125rem; }
+.stat .sub { color: var(--text-secondary); font-size: 0.6875rem; margin-top: 0.125rem; }
+
+/* #300 Phase 2 — #296 data table (table-wrap + table.rz). */
+.table-wrap { overflow-x: auto; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); }
+table.rz { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+table.rz th { text-align: left; padding: 0.5rem 0.75rem; background: var(--bg-soft); color: var(--text-secondary);
+  font-weight: 600; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); }
+table.rz td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+table.rz tr:last-child td { border-bottom: none; }
+table.rz tr:hover td { background: var(--razz-red-tint); }
+
+/* #300 Phase 3 — #296 page frame / section heading / chip / button row.
+   Ported verbatim from modules/llm/manager-ui/src/styles.css. `.page-header`/
+   `.page-subtitle` above stay in place (still used by unreskinned pages);
+   `.page`/`.lede` is the vocabulary the reskin recipe migrates pages onto. */
+.page > h1 { margin: 0 0 0.25rem; font-size: 1.4rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
+.page .lede { color: var(--text-secondary); margin: 0 0 1.25rem; max-width: 74ch; }
+h2.section { font-size: 1.05rem; font-weight: 700; color: var(--text); margin: 1.5rem 0 0.75rem; padding-bottom: 0.375rem; border-bottom: 1px solid var(--border); }
+.chip { display: inline-block; padding: 0.125rem 0.5rem; margin: 0.125rem 0.1875rem 0.125rem 0; border-radius: var(--radius-sm); background: var(--bg-muted); font-size: 0.6875rem; color: var(--text-secondary); font-family: var(--mono); }
+.btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+
+/* Panel — used for content blocks that aren't full cards but still need
+   readable opaque background over the razzfazz brand image. Same look as
+   .card but no hover/header semantics. */
+.panel {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+/* Filter bar */
+/* #300 rail reorg: status chips folded onto the Modules page from the old
+   nav sidebar's All/Running/Enabled/Disabled sub-links + count badges
+   (see templates/modules/overview.html). Light-ground equivalent of the
+   dark-rail `.nav`/`.nav-count` pairing — same shape, card-surface colours. */
+.status-chips {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+}
+.status-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.3125rem 0.75rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.8125rem;
+    font-weight: 500;
+}
+.status-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.status-chip.active { background: var(--razz-red-soft); border-color: var(--razz-red); color: var(--razz-red); font-weight: 600; }
+.status-chip .nav-count { background: var(--bg-muted); color: var(--text-muted); }
+.status-chip.active .nav-count { background: var(--razz-red); color: #fff; }
+
+.filter-bar {
+    margin-bottom: 1rem;
+}
+
+.filter-form {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.filter-search {
+    flex: 1;
+    min-width: 200px;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    background: var(--color-bg-card);
+}
+
+.filter-select {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    background: var(--color-bg-card);
+}
+
+/* Module grid */
+.module-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.75rem;
+}
+
+.module-card {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: transform 0.15s, box-shadow 0.15s;
+    transition: box-shadow 0.15s;
+}
+
+a.module-card { text-decoration: none; color: inherit; display: block; }
+.module-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.module-card.module-disabled { opacity: 0.6; }
+
+.module-icon { width: 40px; height: 40px; border-radius: 6px; flex-shrink: 0; }
+.module-icon-lg { width: 48px; height: 48px; border-radius: 8px; flex-shrink: 0; }
+
+.module-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.module-name {
+    font-weight: 600;
+    font-size: 0.9375rem;
+    color: var(--color-text-primary);
+}
+
+.module-description {
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+    margin-bottom: 0.75rem;
+    line-height: 1.4;
+}
+
+.module-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+}
+
+.module-containers {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+.module-ram {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+/* Status dots */
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.status-green { background: #22c55e; }
+.status-yellow { background: #eab308; }
+.status-gray { background: #888; }
+.status-red { background: #ef4444; }
+
+/* #300 Phase 2 — #296 status dot (token-driven; distinct from the legacy
+   .status-dot/.status-<color> pair above, which unreskinned pages still
+   use). Ported from modules/llm/manager-ui/src/styles.css. */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: var(--radius-pill); margin-right: 0.4375rem; vertical-align: middle; position: relative; }
+.dot.ok { background: var(--success); }
+.dot.warn { background: var(--warn); }
+.dot.err { background: var(--error); }
+.dot.muted { background: #9aa3b2; }
+.dot.pulse::after {
+  content: ""; position: absolute; inset: 0; border-radius: var(--radius-pill);
+  background: inherit; animation: rzfz-dot-pulse 1.3s ease-out infinite;
+}
+@keyframes rzfz-dot-pulse {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .dot.pulse::after { animation: none; } }
+
+/* Badges */
+.badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+}
+
+.badge-production { background: #dcfce7; color: #166534; }
+.badge-stable { background: #dbeafe; color: #1e40af; }
+.badge-experimental { background: #fef3c7; color: #92400e; }
+.badge-origin { background: #f3f4f6; color: #374151; }
+.origin-flag { font-size: 1rem; line-height: 1; }
+/* #300 Phase 4 — apply-dialog risk badge: main.js constructs this class
+   NAME dynamically (`'badge-risk-' + p.risk`, values 'safe'|'caution'|
+   'danger' from apply_manager.py); the selector name is NOT touched by the
+   reskin, only its colours move onto the #296 success/warn/error tokens. */
+.badge-risk-safe { background: var(--success-bg); color: var(--success-fg); }
+.badge-risk-caution { background: var(--warn-bg); color: var(--warn-fg); }
+.badge-risk-danger { background: var(--error-bg); color: var(--error-fg); }
+
+/* #300 Phase 2 — #296 token-driven badge modifiers (compound with the
+   `.badge` base above). Ported from modules/llm/manager-ui/src/styles.css. */
+.badge.ok { background: var(--success-bg); color: var(--success-fg); }
+.badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.badge.err { background: var(--error-bg); color: var(--error-fg); }
+.badge.info { background: var(--info-bg); color: var(--info-fg); }
+.badge.muted { background: var(--bg-muted); color: var(--text-muted); }
+
+/* Buttons */
+.btn {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--color-brand); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--color-brand-hover); }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-secondary:hover { background: #d1d5db; }
+.btn-sm { padding: 0.25rem 0.625rem; font-size: 0.75rem; }
+
+/* #300 Task 1.3 — topbar buttons use the #296 space-separated combinator
+   vocabulary (`.btn.ghost`, `.btn.sm`); coexists with the legacy dash
+   variants above until each page's own reskin task migrates it (later
+   #300 phases). */
+.btn.ghost { background: transparent; border: 1px solid var(--border-strong); color: var(--text-secondary); }
+.btn.ghost:hover { background: var(--razz-red-soft); border-color: var(--razz-red); color: var(--razz-red); }
+.btn.sm { padding: 0.3125rem 0.625rem; font-size: 0.75rem; }
+
+/* #300 Phase 4 — apply-dialog buttons move onto the space-separated
+   `.btn.primary`/`.btn.danger` combinator vocabulary (coexists with the
+   legacy `.btn-primary`/`.btn-secondary` dash variants above, still used
+   elsewhere e.g. by main.js's applyImageUpdate classList toggle). */
+.btn.primary { background: var(--razz-red); color: #fff; }
+.btn.primary:hover:not(:disabled) { background: var(--razz-red-hover); }
+.btn.danger { background: var(--error); color: #fff; }
+.btn.danger:hover:not(:disabled) { background: var(--error-fg); }
+
+/* Toggle button */
+.toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    background: var(--color-bg-card);
+    transition: all 0.15s;
+}
+.toggle-btn:hover { border-color: var(--color-brand); }
+.toggle-btn.enabled { background: #dcfce7; border-color: #22c55e; color: #166534; }
+/* #300 operator feedback — the "Enable" affordance (rendered when the
+   module is disabled, see modules/detail.html:42-45) is the primary CTA
+   and should stand out as rzfz-red, not a muted grey. Only THIS state
+   changes — `.toggle-btn.enabled` (the "Disable" affordance) stays as-is. */
+.toggle-btn.disabled-state { background: var(--razz-red); border-color: var(--razz-red); color: #fff; }
+.toggle-btn.disabled-state:hover { background: var(--razz-red-hover); border-color: var(--razz-red-hover); }
+
+/* Apply dialog */
+.apply-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+.apply-overlay.hidden { display: none; }
+
+/* #300 Phase 4 — .apply-dialog geometry moves onto the #296 card surface
+   (--bg-card / --radius / --border), same visual language as .card
+   elsewhere in the app. Structure/id/onclick unchanged — main.js never
+   selects on this class. */
+.apply-dialog {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 100%;
+    /* Fix #37: widen the apply dialog so the streaming action log can show
+       long compose/git output without forcing mid-word wraps. Matches the
+       width used by .whats-new-dialog for visual consistency. */
+    max-width: min(1100px, 94vw);
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.16);
+}
+
+/* Larger variant for Release Notes + What's New — these render rendered
+   markdown (headings, lists, paragraphs) and need breathing room. */
+.apply-dialog.whats-new-dialog {
+    max-width: min(1100px, 94vw);
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    /* The whats-new variant scrolls INSIDE its body (below), not as a
+       whole dialog. Without this it inherits `overflow-y:auto` from
+       `.apply-dialog` and becomes a SECOND scroll container competing
+       with `.whats-new-body`; on long release notes neither engaged and
+       the content clipped un-scrollably (#216). Pin the dialog, scroll
+       the body. */
+    overflow: hidden;
+}
+/* Header must not shrink — it's the fixed top of the flex column so the
+   body gets the remaining height to scroll within. */
+.whats-new-dialog .apply-header { flex: 0 0 auto; }
+.whats-new-dialog .whats-new-body {
+    padding: 1rem 1.5rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    /* Canonical flexbox scroll fix: a flex child won't shrink below its
+       content size (so overflow-y never engages) unless min-height is 0.
+       #216 — long release notes clipped instead of scrolling. */
+    min-height: 0;
+    /* Belt-and-suspenders bound so overflow-y always has a definite height to
+       scroll within, independent of the flex-column resolution. */
+    max-height: 78vh;
+    /* #216 follow-up: the body IS a scroll container (verified on prod:
+       clientHeight < scrollHeight), but the mouse wheel scrolled the PAGE behind
+       the modal, not the body — because the background was never scroll-locked
+       and the small in-body scroll range chained straight to the page.
+       overscroll-behavior:contain stops that scroll chaining; the JS in
+       release_notes_whats_new.html locks the background while any modal is open. */
+    overscroll-behavior: contain;
+}
+.whats-new-dialog .whats-new-body h1,
+.whats-new-dialog .whats-new-body h2 { margin-top: 0; }
+/* Fix #37: per-module headers in release notes are rendered as <h3>/<h4>
+   from `### Module Name` markdown. Without explicit spacing they sit
+   flush against the preceding paragraph and the section structure
+   disappears. Add a generous top margin so each module visually opens. */
+.whats-new-dialog .whats-new-body h3,
+.whats-new-dialog .whats-new-body h4 {
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+}
+.whats-new-dialog .whats-new-body ul,
+.whats-new-dialog .whats-new-body ol { padding-left: 1.25rem; }
+.whats-new-dialog .whats-new-actions {
+    padding: 0.75rem 1.5rem 1rem;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    border-top: 1px solid var(--color-border);
+}
+
+/* Accordion sections in /api/whats-new-history — current release open,
+   previous releases collapsed; user can click to expand. */
+.whats-new-release {
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    background: var(--color-bg-soft, rgba(0,0,0,0.02));
+}
+.whats-new-release > summary {
+    padding: 0.5rem 0.875rem;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    font-size: 0.9375rem;
+}
+.whats-new-release > summary::-webkit-details-marker { display: none; }
+.whats-new-release > summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 0.5rem;
+    transition: transform 0.15s;
+    font-size: 0.75rem;
+}
+.whats-new-release[open] > summary::before { transform: rotate(90deg); }
+.whats-new-release-body {
+    padding: 0.5rem 1rem 1rem;
+    border-top: 1px solid var(--color-border);
+}
+.whats-new-release-body > :first-child { margin-top: 0.5rem; }
+
+.apply-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+}
+.apply-header h2 { font-size: 1rem; font-weight: 600; margin: 0; }
+.apply-close {
+    background: none;
+    border: none;
+    font-size: 1.25rem;
+    cursor: pointer;
+    color: var(--text-muted);
+    padding: 0.25rem;
+}
+
+.apply-phase { padding: 1.25rem; }
+.apply-phase.hidden { display: none; }
+
+.apply-section { margin-bottom: 1rem; }
+.apply-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+.apply-value { font-size: 0.875rem; }
+
+.apply-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+.apply-input:focus { outline: none; border-color: var(--razz-red); }
+
+.apply-error {
+    background: var(--error-bg);
+    border: 1px solid var(--error);
+    color: var(--error-fg);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.8125rem;
+    margin-bottom: 1rem;
+}
+.apply-error.hidden { display: none; }
+
+.apply-conflict {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn);
+    color: var(--warn-fg);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.8125rem;
+    margin-bottom: 1rem;
+}
+.apply-conflict.hidden { display: none; }
+
+.apply-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    padding-top: 0.5rem;
+}
+
+/* Memory bar */
+.memory-bar-container { margin-top: 0.375rem; }
+.memory-bar {
+    position: relative;
+    height: 12px;
+    background: var(--bg-muted);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+.memory-bar-fill {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    background: var(--info-fg);
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+    transition: width 0.3s;
+}
+.memory-bar-delta {
+    position: absolute;
+    top: 0; bottom: 0;
+    border-radius: 0;
+    transition: all 0.3s;
+}
+/* #300 Phase 4 — these 4 class NAMES are constructed dynamically by
+   main.js (`'memory-level-' + mem.level`, mem.level from
+   apply_manager.py in ('ok','warning','critical','blocked')); only the
+   colours move onto tokens, the selectors stay verbatim. */
+.memory-level-ok { background: var(--success); }
+.memory-level-warning { background: var(--warn); }
+.memory-level-critical { background: var(--error-fg); }
+.memory-level-blocked { background: var(--error); }
+
+.memory-bar-text {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+.memory-warning {
+    font-size: 0.8125rem;
+    padding: 0.375rem 0.5rem;
+    border-radius: 4px;
+    margin-top: 0.375rem;
+}
+.memory-warning.hidden { display: none; }
+.memory-warning.memory-level-warning { background: var(--warn-bg); color: var(--warn-fg); }
+.memory-warning.memory-level-critical { background: var(--warn-bg); color: var(--error-fg); }
+.memory-warning.memory-level-blocked { background: var(--error-bg); color: var(--error-fg); }
+
+/* Terminal output — #300 Phase 4: dark --rail panel + --mono, matching the
+   #296 console's SSE terminal treatment. */
+.terminal-output {
+    background: var(--rail);
+    color: var(--success);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    padding: 0.75rem;
+    border-radius: var(--radius-sm);
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: 0.75rem;
+}
+/* Fix #37: overflow-wrap:anywhere lets the browser wrap long URLs/paths
+   only when there's no whitespace to break at, instead of word-break:break-all
+   which forces wraps mid-word even when whitespace was available. */
+.terminal-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.apply-result {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    font-size: 0.875rem;
+}
+.apply-result.hidden { display: none; }
+.result-success { color: var(--success); font-size: 1.125rem; font-weight: bold; }
+.result-failure { color: var(--error); font-size: 1.125rem; font-weight: bold; }
+.apply-duration { color: var(--text-muted); font-size: 0.75rem; }
+
+/* Module detail page */
+.detail-section {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem;
+}
+.detail-section.full-width { grid-column: 1 / -1; }
+
+.detail-section-title {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin-bottom: 0.625rem;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.375rem 0;
+    font-size: 0.8125rem;
+}
+.detail-row + .detail-row { border-top: 1px solid #f3f4f6; }
+.detail-row-label { color: var(--color-text-secondary); }
+.detail-row-value { font-weight: 500; }
+
+.detail-url-link {
+    color: var(--color-brand);
+    text-decoration: none;
+    font-weight: 500;
+}
+.detail-url-link:hover { text-decoration: underline; }
+
+/* Container table */
+.container-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+}
+.container-table th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+}
+.container-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #f3f4f6;
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: var(--color-text-muted);
+}
+
+/* Flash messages */
+.flash-messages { margin-bottom: 1rem; }
+.flash {
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    margin-bottom: 0.5rem;
+}
+.flash-success { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.flash-error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+
+/* Form styles */
+.settings-form { max-width: 600px; }
+.form-group { margin-bottom: 0.75rem; }
+.form-label {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+/* #300 Phase 5 — #296 field/form-grid vocabulary (ported verbatim from
+   modules/llm/manager-ui/src/styles.css), used for the first time in this
+   app by the Settings pages reskin. Coexists with the legacy
+   .form-group/.form-label above (still used by not-yet-reskinned pages,
+   e.g. Secrets/Backup Settings in Phase 6). Scoped to `.field` /
+   `.form-grid` descendants only — NOT a bare `input, select, textarea`
+   selector — so this does not change the appearance of `.apply-input`
+   fields (search/filter inputs, the apply-dialog admin-password field)
+   outside the settings forms this phase touches. */
+.field { display: flex; flex-direction: column; gap: 0.3125rem; margin-bottom: 0.875rem; }
+.field label { font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); }
+/* `.hint` also appears as plain descriptive text OUTSIDE a `.field` (e.g.
+   a paragraph under a section heading, not attached to one input) — kept
+   as a standalone rule rather than `.field .hint` only so both placements
+   render identically. */
+.hint { font-size: 0.6875rem; color: var(--text-muted); font-weight: 400; }
+.field input:not([type="checkbox"]):not([type="radio"]), .field select, .field textarea {
+    font: inherit;
+    font-size: 0.8125rem;
+    /* #300 operator feedback: a touch more inner breathing room than the
+       original 0.5rem/0.625rem so the field no longer reads as flush
+       against its own border, now that `.card` gives the field room from
+       the CARD edge too (see the `.card` padding rule above). */
+    padding: 0.5625rem 0.75rem;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    color: var(--text);
+    width: 100%;
+}
+.field input:focus, .field select:focus, .field textarea:focus {
+    outline: none;
+    border-color: var(--razz-red);
+    box-shadow: 0 0 0 3px var(--razz-red-soft);
+}
+.field input:disabled { opacity: 0.7; }
+/* checkbox/radio inputs live inside a `.field` too (e.g. "Enable Google
+   OAuth", TLS-mode radios) but must NOT stretch to width:100% like a text
+   input — they keep native sizing, inline with their label text. */
+.field input[type="checkbox"], .field input[type="radio"] { width: auto; }
+.field label:has(> input[type="checkbox"]), .field label:has(> input[type="radio"]) {
+    font-weight: 400;
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 1rem; }
+.form-grid .field label { min-height: 2.15rem; }
+
+/* Doc content */
+.doc-content { font-size: 0.9375rem; line-height: 1.7; color: var(--color-text-primary); }
+.doc-content h1 { font-size: 1.5rem; margin: 1.5rem 0 0.75rem; }
+.doc-content h2 { font-size: 1.25rem; margin: 1.25rem 0 0.5rem; }
+.doc-content h3 { font-size: 1.0625rem; margin: 1rem 0 0.5rem; }
+.doc-content code { background: #f3f4f6; padding: 0.125rem 0.375rem; border-radius: 3px; font-size: 0.8125rem; }
+.doc-content pre { background: #1a1a1a; color: #e0e0e0; padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 1rem 0; }
+.doc-content pre code { background: transparent; padding: 0; }
+.doc-content table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+.doc-content th, .doc-content td { border: 1px solid var(--color-border); padding: 0.5rem 0.75rem; text-align: left; }
+.doc-content th { background: #f9fafb; font-weight: 600; }
+
+/* Agent settings tabs */
+.agent-tab {
+    padding: 0.5rem 1rem;
+    border: none;
+    background: none;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+}
+.agent-tab:hover { color: var(--color-text-primary); }
+.agent-tab.active { color: var(--color-brand); border-bottom-color: var(--color-brand); }
+
+/* M029-S04 — LLM runtime stable/experimental panel */
+.runtime-choice {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+}
+.runtime-choice-card {
+    border: 1px solid var(--color-border, #d4d4d8);
+    border-radius: 6px;
+    padding: 1rem;
+    /* Match the .module-card treatment so this page reads consistently
+       with the All Modules grid: active = opaque white, inactive = dim. */
+    background: var(--color-bg-card, #ffffff);
+    backdrop-filter: blur(6px);
+}
+.runtime-choice-card:not(.runtime-choice-active) { opacity: 0.6; }
+.runtime-choice-card h3 { margin-top: 0; margin-bottom: 0.5rem; }
+.runtime-choice-card p { margin-bottom: 0.75rem; font-size: 0.9rem; }
+.runtime-choice-card.runtime-choice-active {
+    border-color: var(--color-brand, #CD1719);
+    box-shadow: 0 0 0 1px var(--color-brand, #CD1719);
+}
+.badge-stable {
+    background: #16a34a; color: white;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.badge-experimental {
+    background: #d97706; color: white;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.badge-warn {
+    background: #ca8a04; color: white;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.modal-dialog {
+    border: 1px solid var(--color-border, #d4d4d8);
+    border-radius: 6px;
+    padding: 1.25rem;
+    min-width: 360px;
+    margin: auto;
+}
+.modal-dialog::backdrop { background: rgba(0,0,0,0.4); }
+.dialog-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
+.log-output {
+    background: #1a1a1a; color: #e4e4e7;
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.85rem;
+    max-height: 320px; overflow: auto;
+    white-space: pre-wrap;
+}
+
+/* Responsive — #300 Task 8.2. The dark rail becomes a horizontally
+   scrollable strip above the content (NOT a wrapped multi-row block: a
+   wrapped rail with this many nav items grows tall enough to push all
+   page content off-screen — the pre-Phase-8 version did exactly that).
+   `.content { margin-left: 0 }` from the pre-#300 fixed-sidebar layout is
+   gone — the current `.app`/`.main` flex shell (Task 1.3) never gives
+   `.content` a margin-left to override, so that declaration was dead. */
+@media (max-width: 768px) {
+    .app { flex-direction: column; }
+    .sidebar {
+        position: static;
+        width: 100%;
+        height: auto;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding: 0.5rem 0;
+    }
+    .railnav { flex-direction: row; flex-shrink: 0; }
+    .subnav {
+        width: 100%;
+        height: auto;
+        position: static;
+        flex-direction: row;
+        flex-wrap: wrap;
+        overflow-y: visible;
+        overflow-x: auto;
+    }
+    .topbar { flex-wrap: wrap; height: auto; min-height: 54px; padding: 0.5rem 1rem; }
+    .content { padding: 1rem; }
+}
+
+/* ── #1191 governance diff ────────────────────────────────────────────────── */
+.diff-card { margin-bottom: 1rem; }
+.diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+.diff-file { font-size: 0.8125rem; font-weight: 600; }
+.diff-meta { margin-left: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
+.diff-note { margin: 0.5rem 0 0; font-size: 0.75rem; color: var(--text-muted); }
+.diff-hashes { margin-top: 0.5rem; font-size: 0.75rem; display: grid; gap: 0.25rem; }
+.diff-hashes code { font-size: 0.6875rem; word-break: break-all; }
+.env-keys-group { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; margin-bottom: 0.375rem; }
+.env-key { font-size: 0.75rem; padding: 0.125rem 0.375rem; border-radius: var(--radius-sm); background: var(--bg-soft); border: 1px solid var(--border-soft); }
+.diff-block {
+    margin: 0; padding: 0.75rem 1rem; overflow-x: auto;
+    font-family: var(--mono); font-size: 0.75rem; line-height: 1.45;
+    background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.diff-line { display: block; white-space: pre; }
+.diff-line.add { color: var(--success-fg); background: var(--success-bg); }
+.diff-line.del { color: var(--error-fg); background: var(--error-bg); }
+.diff-line.hunk { color: var(--info-fg); background: var(--info-bg); }
+.diff-line.meta { color: var(--text-muted); font-weight: 600; }

@@ -1,0 +1,142 @@
+# ==============================================================================
+# OTel Collector logs overlay — SYSLOG EXPORT (#253 X3)
+# ==============================================================================
+# Third overlay variant (sibling of otel-collector-logs-export.yaml): same
+# filelog/containers receiver + processors, but the external target is a
+# plain SYSLOG server (rsyslog, Graylog, Splunk-syslog, QRadar, ...) instead
+# of an OTLP-native one — the half of the customer-SIEM world #197's OTLP
+# exporter cannot reach. Opt in with:
+#   OTEL_LOG_EXPORT_ENABLED=true
+#   OTEL_COLLECTOR_LOGS_OVERLAY=otel-collector-logs-syslog.yaml
+#   OTEL_SYSLOG_HOST=<customer syslog host>          (allow-list this egress!)
+#   OTEL_SYSLOG_PORT=6514            # 6514 = RFC5425 TLS default; 514 = plain
+#   OTEL_SYSLOG_PROTOCOL=rfc5424     # or rfc3164 for legacy receivers
+#   OTEL_SYSLOG_TLS_INSECURE=false   # false = TLS on, system CA roots
+#
+# SECURITY / egress: dialing OTEL_SYSLOG_HOST is a DELIBERATE outbound —
+# allow-list that host in the box egress model. Container stdout/stderr can
+# carry sensitive data; the same commented redaction extension as in the OTLP
+# overlay applies (copy the transform/redact block here when needed).
+# The base traces/metrics/logs→ClickHouse pipelines stay untouched.
+# ==============================================================================
+
+receivers:
+  filelog/containers:
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    storage: file_storage
+    start_at: end
+    include_file_path: true
+    include_file_name: false
+    retry_on_failure:
+      enabled: true
+    operators:
+      - type: container
+        format: docker
+        # FALSE, and it has to be: `add_metadata_from_filepath` makes the
+        # container operator read KUBERNETES metadata out of the path
+        # (/var/log/pods/<ns>_<pod>_<uid>/<container>/0.log). The paths tailed
+        # above are Docker's, so the parse failed on every single entry —
+        # `failed to detect a valid log path`, with a stacktrace, per batch,
+        # for as long as the export ran (#1402, reproduced against the pinned
+        # collector). It never bought anything on this box: there is no
+        # Kubernetes metadata in a Docker path. The container id still comes
+        # from `log.file.path` below.
+        add_metadata_from_filepath: false
+
+processors:
+  resource/logs:
+    attributes:
+      - key: service.namespace
+        value: razzfazz-ai
+        action: upsert
+      - key: deployment.environment
+        value: ${env:MAIN_DOMAIN:-razzfazz-box}
+        action: upsert
+  # #1402: WITHOUT THIS PROCESSOR THE EXPORT SHIPS EMPTY EVENTS. The syslog
+  # exporter does not read the log record — it builds the RFC5424 line out of
+  # log ATTRIBUTES with reserved names (`message`, `hostname`, `appname`,
+  # `proc_id`, `msgid`, `priority`, `version`), and anything it does not find
+  # it writes as NIL. Nothing set them, so a customer SIEM received 3461
+  # timestamped blanks in 90 seconds on 0.91:
+  #
+  #   <165>1 2026-09-05T01:58:39.599602176Z - - - - -
+  #
+  # Measured, not deduced: reproduced byte for byte against
+  # otel/opentelemetry-collector-contrib 0.130.1 (the pin in compose.yml) and
+  # re-measured with this block in place — see
+  # tests/unit/observability/test_1402_syslog_export_carries_the_log.py, which
+  # runs the collector and reads the bytes off a listener.
+  transform/syslog:
+    # A record that fails one statement still ships with the others applied —
+    # a surprising line must cost a field, not the event.
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # The message itself. This is the one that turns a blank into a log.
+          - set(attributes["message"], body)
+          # The box, from the same value `resource/logs` already derives from
+          # MAIN_DOMAIN — one source, so the two cannot disagree.
+          - set(attributes["hostname"], resource.attributes["deployment.environment"])
+          # APP-NAME is the SHORT CONTAINER ID (what `docker ps` prints), taken
+          # out of the Docker log path. Not the friendly container name: that
+          # needs either a docker.sock mount — an attack surface the export
+          # overlay's own header deliberately refuses — or an id→name resolver,
+          # which that header carries as a documented fast-follow. This change
+          # does not quietly overturn that decision; it gives the receiver a
+          # per-container discriminator instead of nothing.
+          - set(attributes["appname"], Substring(ExtractPatterns(attributes["log.file.path"], "/(?P<cid>[0-9a-f]{12,64})/")["cid"], 0, 12)) where attributes["log.file.path"] != nil
+          # PRIORITY = facility * 8 + severity. The facility stays local4 (20),
+          # which is what the exporter's own default 165 encodes, so receiver
+          # rules written against the old stream keep matching; only the
+          # severity now says something: stderr = err(3), everything else =
+          # info(6). `log.iostream` is set by the container operator above.
+          - set(attributes["priority"], 163) where attributes["log.iostream"] == "stderr"
+          - set(attributes["priority"], 166) where attributes["priority"] == nil
+  batch/logs:
+    timeout: 5s
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+
+exporters:
+  syslog:
+    endpoint: ${env:OTEL_SYSLOG_HOST:-}
+    port: ${env:OTEL_SYSLOG_PORT:-6514}
+    network: tcp
+    protocol: ${env:OTEL_SYSLOG_PROTOCOL:-rfc5424}
+    tls:
+      # false (default) = TLS on, verified against system CA roots — the
+      # RFC5425 posture. true = plaintext (port 514 legacy receivers on a
+      # trusted network only). Private CA: mount + uncomment ca_file.
+      insecure: ${env:OTEL_SYSLOG_TLS_INSECURE:-false}
+      # ca_file: /etc/otelcol/ca/custom-ca.pem
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+extensions:
+  # Persist filelog read offsets across restarts (same volume/path as the
+  # OTLP overlay — switching overlays keeps the checkpoint).
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+    # review #687 (found BY the load-test): the extension does not
+    # create its directory — on a FRESH volume (first-ever export
+    # activation on a customer box) the collector crash-looped.
+    create_directory: true
+
+service:
+  # Replaces the base extensions list (list-merge = replace): keep
+  # health_check, add file_storage — dropping health_check here would
+  # silently kill the :13133 liveness surface.
+  extensions: [health_check, file_storage]
+  pipelines:
+    logs/external:
+      receivers: [filelog/containers]
+      # memory_limiter is defined in the base config; reused here.
+      # transform/syslog runs AFTER resource/logs (it reads the resource
+      # attribute that one sets) and BEFORE batch/logs.
+      processors: [memory_limiter, resource/logs, transform/syslog, batch/logs]
+      exporters: [syslog]

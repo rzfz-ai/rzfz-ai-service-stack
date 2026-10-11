@@ -1,0 +1,35 @@
+version: 1
+metadata:
+  name: "Entra - Property Mappings"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Entra OAuth - Username"
+    attrs:
+      expression: |
+        # Entra returns preferred_username in UPN format (user@corp.com)
+        # Fall back to email if preferred_username is absent
+        upn = info.get("preferred_username", "")
+        email = info.get("email", "")
+        source = upn if upn else email
+        if not source:
+            return {"username": ""}
+        local = source.split("@")[0]
+        # Sanitize: replace dots/hyphens that are invalid in Authentik usernames
+        return {"username": local.replace(".", "_").replace("-", "_")}
+
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Entra OAuth - Name"
+    attrs:
+      expression: |
+        name = info.get("name", "")
+        if not name:
+            return {"name": ""}
+        return {"name": name}
+
+  # No avatar mapping — Entra avatar requires a Graph API call (/me/photo/$value)
+  # which is outside the scope of the OIDC userinfo response.
+  # Authentik will fall back to initials-based avatars.

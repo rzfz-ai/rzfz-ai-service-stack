@@ -1,0 +1,10 @@
+flask==3.1.*
+flask-sock==0.7.*
+simple-websocket==1.*
+gunicorn==23.*
+gevent==25.*
+psycopg2-binary==2.9.*
+docker==7.*
+httpx==0.28.*
+apscheduler==3.*
+pyyaml==6.*

@@ -1,0 +1,109 @@
+# Synapse homeserver configuration for razzfazz.ai stack
+# Generated/managed by razzfazz-ai-service-stack
+# Environment variables are expanded by Synapse at startup via ${VAR} syntax.
+#
+# IMPORTANT: server_name is PERMANENT — cannot change after users are created.
+# Matrix user IDs will be @username:${SYNAPSE_SERVER_NAME}
+#
+# Authentik OIDC documentation: https://element-hq.github.io/synapse/latest/openid.html#authentik
+
+# ── Core identity ──────────────────────────────────────────────────────────────
+server_name: "${SYNAPSE_SERVER_NAME}"
+pid_file: /data/homeserver.pid
+
+# ── Listeners ─────────────────────────────────────────────────────────────────
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true    # Caddy sets X-Forwarded-For
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]
+        compress: false
+
+# ── Database (shared PostgreSQL with C locale) ─────────────────────────────────
+database:
+  name: psycopg2
+  args:
+    user: "${POSTGRES_USER}"
+    password: "${POSTGRES_PASSWORD}"
+    database: "${SYNAPSE_DB}"
+    host: postgres
+    port: 5432
+    cp_min: 5
+    cp_max: 10
+
+# ── Media storage ──────────────────────────────────────────────────────────────
+media_store_path: /data/media_store
+max_upload_size: 50M
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+log_config: /synapse-config/log.config
+
+# ── Security ───────────────────────────────────────────────────────────────────
+macaroon_secret_key: "${SYNAPSE_MACAROON_SECRET_KEY}"
+form_secret: "${SYNAPSE_FORM_SECRET}"
+# (#191) Templated per-box: was a hardcoded leftover DEV domain
+# (/data/razzfazz-dev.ai.signing.key). This file is rendered with `envsubst`
+# (init.sh Step 5b → homeserver.yaml.rendered; also synapse/entrypoint.sh), so
+# ${SYNAPSE_SERVER_NAME} expands to the box's own Matrix server name and the
+# signing key follows Synapse's <server_name>.signing.key convention.
+signing_key_path: /data/${SYNAPSE_SERVER_NAME}.signing.key
+
+# Disable open registration — users must log in via Authentik OIDC
+enable_registration: false
+
+# Shared secret for admin API bot account creation (used by post-install script)
+registration_shared_secret: "${SYNAPSE_REGISTRATION_SHARED_SECRET}"
+
+# ── Trusted key servers ────────────────────────────────────────────────────────
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+# ── Metrics ────────────────────────────────────────────────────────────────────
+enable_metrics: false
+
+# ── Federation ─────────────────────────────────────────────────────────────────
+# Federation is disabled by default for self-hosted stacks.
+# Enable by removing federation_domain_whitelist or setting it to an empty list.
+federation_domain_whitelist: []
+
+# ── Public URL ─────────────────────────────────────────────────────────────────
+public_baseurl: "https://${MATRIX_DOMAIN}"
+
+# ── Authentik OIDC Provider ─────────────────────────────────────────────────────
+# Users log in to Element Web → Synapse redirects to Authentik → back to Matrix.
+# RSA keys required (not ECC). The signing key is the Authentik RSA key.
+# See: https://element-hq.github.io/synapse/latest/openid.html#authentik
+oidc_providers:
+  - idp_id: authentik
+    idp_name: "razzfazz.ai SSO"
+    discover: true
+    issuer: "https://${AUTHENTIK_DOMAIN}/application/o/synapse/"
+    client_id: "${MATRIX_CLIENT_ID}"
+    client_secret: "${SYNAPSE_CLIENT_SECRET}"
+    scopes:
+      - "openid"
+      - "profile"
+      - "email"
+    user_mapping_provider:
+      config:
+        localpart_template: "{{ user.preferred_username }}"
+        display_name_template: "{{ user.preferred_username|capitalize }}"
+    allow_existing_users: true
+    # True SSO group->role mapping (#33) — LIMITATION.
+    # Authentik emits a `groups` claim for this provider (razzfazz.ai groups
+    # scope mapping), but Synapse cannot promote a user to SERVER ADMIN from an
+    # OIDC claim — server-admin is a DB / admin-API flag with no OIDC hook in
+    # stable Synapse. So group->admin-ROLE is not wired here. Synapse CAN gate
+    # LOGIN on a group via `attribute_requirements:` (below, commented) if you
+    # want to restrict Matrix to a group; elevate Matrix admins manually with:
+    #   docker exec synapse register_new_matrix_user ... --admin   (or the
+    #   admin API / `UPDATE users SET admin=1`). See #33 / the True SSO brief.
+    # attribute_requirements:
+    #   - attribute: groups
+    #     value: "razzfazz.ai Matrix Users"
+
+# ── Report stats ───────────────────────────────────────────────────────────────
+report_stats: false

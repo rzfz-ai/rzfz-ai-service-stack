@@ -1,0 +1,34 @@
+version: 1
+metadata:
+  name: "Base - Outpost"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_outposts.outpost
+    identifiers:
+      name: "authentik Embedded Outpost"
+    attrs:
+      type: proxy
+      # Linking providers defined in the previous file
+      # F-039: This list contains only the core providers (from 03-providers-apps.yaml).
+      # Module providers (LightRAG, Cognee, Docling, Stirling-PDF, Hermes, Moltis,
+      # Paperclip, Element Web, Paperless-ngx, Infisical, Onyx, OpenHands, Coding Tools)
+      # cannot be listed here because they are defined in later blueprints (10+.yaml)
+      # and may not exist for inactive profiles. Instead, init-authentik.sh dynamically
+      # attaches ALL ProxyProvider objects to the outpost via Python after blueprints
+      # are processed (see "Attach ALL proxy providers to embedded outpost").
+      providers:
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider To Chat"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider to Dify"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider to Admin"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for LLM"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Backup"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Licenses"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Help"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Gitea"]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, "Caddy Forward Auth Provider for Config"]]
+      config:
+        authentik_host: "https://auth.${MAIN_DOMAIN}"
+        authentik_host_insecure: false
+        log_level: info
+        object_naming_template: "ak-outpost-%(name)s"

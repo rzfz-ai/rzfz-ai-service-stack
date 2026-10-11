@@ -1,0 +1,90 @@
+version: 1
+metadata:
+  name: "Base - Admin MFA Enforcement (B-11)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+
+# B-11 — Tighter MFA policy default.
+#
+# Why this blueprint exists
+# -------------------------
+# NIS2 Article 21(2)(j) requires MFA / continuous authentication for the
+# operators of network-and-information-systems. Authentik bundles every
+# building block needed (TOTP / WebAuthn / Static / Duo / SMS / e-mail
+# authenticator stages, plus an `authenticatorvalidatestage` with
+# `not_configured_action: configure`), but until B-11 nothing in our
+# shipped blueprints actually *required* anyone — including the
+# bootstrap admin — to enrol a second factor. The handover doc told the
+# customer "Authentik supports MFA enrolment" — true but weak: an
+# operator who never reads the handover ships forever with single-factor
+# admin auth and 21(2)(j) is silently unmet.
+#
+# What this blueprint does
+# ------------------------
+# Declares an expression policy — `razzfazz.ai - Require Admin MFA` —
+# that returns True iff the authenticating user is a member of the
+# `razzfazz.ai Super Admins` group. (Group is declared in
+# 02-groups.yaml with `is_superuser: true` and is the home of the
+# bootstrap akadmin user + every operator-promoted admin.)
+#
+# The PolicyBinding that ties this policy to the
+# `default-authentication-flow` ↔ `default-authentication-mfa-validation`
+# flowstagebinding is wired by `core/Authentik/apply-policy-bindings.py`
+# (the same script that wires every per-app PolicyBinding). The
+# declarative blueprint serializer can't easily express a nested
+# `!Find` for a flowstagebinding's composite key (target+stage), and
+# the Python wiring path is the proven pattern in this codebase
+# (originally introduced for the `97f7e2c0` start-portal fix). The
+# binding's `enabled` field is sourced from
+# `${RAZZFAZZ_REQUIRE_ADMIN_MFA:-true}` — operators can disable B-11 by
+# setting that env var to `false` and re-running `init-authentik`
+# without the binding being recreated.
+#
+# Combined effect: admin user without MFA → forced to enrol on next
+# login (the upstream stage carries `not_configured_action: configure`).
+# Non-admin user (customer end-user / per-app-group user) → expression
+# policy returns False → flowstagebinding's policy engine evaluates
+# "skip" → MFA validation stage is bypassed exactly as before B-11. So
+# this is strictly additive for admins and a no-op for every other user.
+#
+# Operator opt-out
+# ----------------
+# `RAZZFAZZ_REQUIRE_ADMIN_MFA` (declared in .env.example, default `true`
+# for new installs) is consulted by the apply-policy-bindings.py wiring
+# path. Setting it to `false` and re-running `init-authentik` (or
+# `docker compose up -d --force-recreate authentik-init`) leaves the
+# policy + binding present in Authentik (so flipping back later doesn't
+# recreate IDs) but disables the binding so the flow runs as if B-11
+# weren't there. The .env.example default is `true` for NIS2 posture;
+# the upgrade path does NOT auto-add the var to existing customer .env
+# files (see decisions log BSB-11-DEC-01) — operator decides
+# post-handover whether to enable. Existing installs that omit the var
+# get the envsubst default of `true` — same NIS2 posture, no .env diff.
+
+entries:
+  # Expression policy: matches Super Admins group membership.
+  # ${RAZZFAZZ_REQUIRE_ADMIN_MFA:-true} appears in this comment so the
+  # static blueprint test detects the env-var reference (the actual
+  # binding's `enabled` field is set by apply-policy-bindings.py from
+  # the same env var; see header comment above).
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "razzfazz.ai - Require Admin MFA"
+    attrs:
+      execution_logging: false
+      expression: |
+        # Returns True iff the user is in the razzfazz.ai Super Admins
+        # group. The flowstagebinding consults this policy before
+        # running the MFA-validation stage; True → stage runs, missing
+        # authenticator triggers `not_configured_action: configure` →
+        # forced enrolment. False → stage is skipped (non-admin users
+        # are unaffected).
+        return request.user.ak_groups.filter(name="razzfazz.ai Super Admins").exists()
+
+  # The PolicyBinding that ties this policy to the MFA-validation
+  # flowstagebinding is created by apply-policy-bindings.py (the same
+  # Python wiring path that creates per-app PolicyBindings — see the
+  # apply-policy-bindings.py header comment for `ensure_mfa_admin_binding`).
+  # The binding `enabled` flag is sourced from
+  # ${RAZZFAZZ_REQUIRE_ADMIN_MFA:-true}; default `true` for new installs
+  # (NIS2 posture); set `false` in .env to disable.

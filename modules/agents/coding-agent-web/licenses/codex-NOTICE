@@ -1,0 +1,16 @@
+OpenAI Codex CLI
+Copyright 2025 OpenAI
+
+This product includes the OpenAI Codex CLI (@openai/codex), a lightweight
+coding agent that runs in the terminal, distributed under the Apache License,
+Version 2.0. See codex-LICENSE in this directory for the full license text.
+
+Upstream: https://github.com/openai/codex
+
+The Codex binary is bundled unmodified in the razzfazz.ai "Codex" coding-agent
+image. razzfazz.ai GmbH — Member of SEQIS Group redistributes it under the
+Apache-2.0 grant; it configures Codex to talk to the local GPUStack endpoint by
+default (~/.codex/config.toml, model_providers.gpustack, wire_api="responses"
+pointing at a local Responses→Chat-Completions translation shim, since Codex
+dropped wire_api="chat" and GPUStack is Chat-Completions-only) but makes no
+source modifications to Codex itself.

@@ -1,0 +1,24 @@
+razzfazz-coding-agent-* — build-recipe NOTICE (third-party upstream)
+==================================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: opencode-ai (pinned, opencode image)  —  MIT
+              https://github.com/sst/opencode
+  Built from: @openai/codex (pinned, codex image)  —  Apache-2.0
+              https://github.com/openai/codex
+
+This image also contains razzfazz.ai's own web-terminal wiring + local-model
+shim, which are licensed Apache-2.0 (NOT BSL) because they ship in the same
+image as the wrapped upstream tools. The user-defined build is BARE — bare
+Apache-2.0 wiring, ships NO third-party CLI; the user installs their own.
+gsd-pi is retired as a baked agent (#36 / PR#84) and is a User Defined install
+suggestion (`npm i -g @opengsd/gsd-pi`, MIT); it is NOT baked into any shipped
+split image.
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

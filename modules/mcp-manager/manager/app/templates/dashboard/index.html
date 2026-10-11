@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Integrations - razzfazz.ai</title>
+  <link rel="icon" type="image/png" href="/branding/razzfazz-ai-favicon.png">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="header-left">
+      <img src="/branding/razzfazz-ai-logo.png" alt="razzfazz.ai" class="logo">
+      <h1>MCP Integrations</h1>
+    </div>
+    <div class="user-info">
+      <span>{{ username }}</span>
+    </div>
+  </header>
+
+  <p class="intro">
+    Connect your own external tools (Moco / SEQITracker, Pipedrive, …) to your AI
+    agents. Your credentials are encrypted at rest and only ever reach your own
+    private proxy — never another user's, never the shared apps.
+  </p>
+
+  <section class="cards">
+    {% for m in catalog %}
+    {% set inst = instances.get(m.id) %}
+    {% set creds = cred_summary.get(m.id) %}
+    <article class="card" data-mcp="{{ m.id }}">
+      <h2>{{ m.display_name }}</h2>
+      <p class="desc">{{ m.description }}</p>
+      <p class="model">
+        Credential model:
+        <strong>{% if m.cred_model.startswith('oauth') %}OAuth ({{ m.cred_model.split(':')[1] }}){% else %}Personal access token{% endif %}</strong>
+      </p>
+
+      <p class="status">
+        Credentials:
+        {% if creds %}<span class="badge ok">stored ({{ creds|map(attribute='cred_type')|join(', ') }})</span>
+        {% else %}<span class="badge none">none yet</span>{% endif %}
+        &middot; Proxy:
+        {% if inst %}<span class="badge state-{{ inst.state }}">{{ inst.state }}</span>
+        {% else %}<span class="badge none">not provisioned</span>{% endif %}
+      </p>
+
+      {% if m.cred_model == 'pat' %}
+      <form class="cred-form" onsubmit="return saveCreds(event, '{{ m.id }}')">
+        {% for f in m.cred_fields %}
+        <label>{{ f.label }}
+          <input name="{{ f.key }}" type="{{ 'password' if f.secret else 'text' }}"
+                 autocomplete="off" {% if f.secret %}placeholder="••••••••"{% endif %}>
+        </label>
+        {% endfor %}
+        <button type="submit" class="btn btn-primary">Save credentials</button>
+      </form>
+      {% else %}
+      <button class="btn btn-primary" onclick="window.location='/oauth/start/{{ m.id }}'">Authorize with {{ m.cred_model.split(':')[1] }}</button>
+      {% endif %}
+
+      <hr class="card-divider">
+
+      <div class="actions">
+        <button class="btn btn-secondary" onclick="provision('{{ m.id }}')">Provision proxy</button>
+        {% if inst %}
+        <button class="btn btn-danger" onclick="del('{{ inst.id }}')">Delete proxy</button>
+        {% endif %}
+        {% if creds %}
+        <button class="btn btn-warn" onclick="revoke('{{ m.id }}')">Revoke credentials</button>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+
+  <footer>
+    <span>Personal MCP Manager</span> &middot;
+    <span>Credentials encrypted at rest · your own private proxy only</span>
+  </footer>
+</div>
+
+{# #61 fix — single reusable status toast. Replaces window.alert() and the
+   old bare orange button-bar. showStatus() ALWAYS writes readable text before
+   revealing it, so a blank colored bar can no longer appear. #}
+<div id="status-toast" class="status-toast" role="status" aria-live="polite"></div>
+
+<script>
+let _toastTimer = null;
+function showStatus(message, ok) {
+  const el = document.getElementById('status-toast');
+  el.textContent = message || (ok ? 'Done.' : 'Something went wrong.');
+  el.classList.remove('ok', 'err');
+  el.classList.add(ok ? 'ok' : 'err', 'show');
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return {ok: r.ok, data: await r.json().catch(() => ({}))};
+}
+async function saveCreds(ev, mcp) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const body = {};
+  fd.forEach((v, k) => { if (v) body[k] = v; });
+  const {ok, data} = await postJSON(`/api/credentials/${mcp}`, body);
+  if (ok) {
+    const types = (data.stored_cred_types || []).join(', ');
+    showStatus(types ? `Credentials saved (${types}), encrypted at rest.` : 'Credentials saved (encrypted).', true);
+    // Reload after a short beat so the success toast is visible.
+    setTimeout(() => location.reload(), 900);
+  } else {
+    showStatus(data.error || 'Could not save credentials.', false);
+  }
+  return false;
+}
+async function provision(mcp) {
+  const {ok, data} = await postJSON(`/api/provision/${mcp}`);
+  showStatus(data.message || data.error || (ok ? 'Proxy provisioned.' : 'Provisioning failed.'), ok);
+  if (ok) setTimeout(() => location.reload(), 900);
+}
+async function del(id) {
+  if (prompt('Type Delete to confirm') !== 'Delete') return;
+  const {ok, data} = await postJSON(`/api/delete/${id}?confirm=Delete`);
+  showStatus(data.message || data.error || (ok ? 'Proxy deleted.' : 'Delete failed.'), ok);
+  if (ok) setTimeout(() => location.reload(), 900);
+}
+async function revoke(mcp) {
+  if (!confirm('Revoke stored credentials for ' + mcp + '?')) return;
+  const {ok, data} = await postJSON(`/api/credentials/${mcp}/revoke`);
+  showStatus(ok ? 'Credentials revoked.' : (data.error || 'Revoke failed.'), ok);
+  if (ok) setTimeout(() => location.reload(), 900);
+}
+</script>
+</body>
+</html>

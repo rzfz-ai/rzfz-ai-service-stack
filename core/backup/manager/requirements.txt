@@ -1,0 +1,4 @@
+Flask
+docker
+apscheduler
+gunicorn

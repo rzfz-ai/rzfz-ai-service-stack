@@ -1,0 +1,440 @@
+{
+  "APScheduler": {
+    "fetched_at": "2026-09-09",
+    "file": "apscheduler.txt",
+    "ref": "master",
+    "sha256": "3b179efba139ec412397ac3ef0f86ffd1cdcef2bcbd3974f9cfa8b47587a4b72",
+    "source": "https://raw.githubusercontent.com/agronholm/apscheduler/master/LICENSE.txt"
+  },
+  "Apache Tika": {
+    "fetched_at": "2026-10-11",
+    "file": "apache_tika.txt",
+    "ref": "3.3.1",
+    "sha256": "54c7b073b78b610382b37351c4171fa3848407f785c13da657486dd110eb48e1",
+    "source": "https://raw.githubusercontent.com/apache/tika/3.3.1/LICENSE.txt"
+  },
+  "Authentik": {
+    "fetched_at": "2026-10-11",
+    "file": "authentik.txt",
+    "ref": "version/2026.5.7",
+    "sha256": "2d82c84e7abd364d761c88a51711fc49d358c8cddafa79ab058f10d0d50b2630",
+    "source": "https://raw.githubusercontent.com/goauthentik/authentik/version/2026.5.7/LICENSE"
+  },
+  "Caddy": {
+    "fetched_at": "2026-10-11",
+    "file": "caddy.txt",
+    "ref": "v2.11.4",
+    "sha256": "494aff50a95dcef6816af68f9c43d5dd8db0935b8cd193046ab3b80f8b108976",
+    "source": "https://raw.githubusercontent.com/caddyserver/caddy/v2.11.4/LICENSE"
+  },
+  "ClickHouse": {
+    "fetched_at": "2026-10-11",
+    "file": "clickhouse.txt",
+    "ref": "v25.8.28.1-lts",
+    "sha256": "22ffddcd3826cab84a50e6949d3781091a395e80f9b489df4fadcf2a63c0fd76",
+    "source": "https://raw.githubusercontent.com/ClickHouse/ClickHouse/v25.8.28.1-lts/LICENSE"
+  },
+  "Cognee": {
+    "fetched_at": "2026-10-11",
+    "file": "cognee.txt",
+    "ref": "v1.5.3",
+    "sha256": "8120a86f44f29f676b4ce153e92c19b5ed181df5f52ad0b38272afb67201c3b5",
+    "source": "https://raw.githubusercontent.com/topoteretes/cognee/v1.5.3/LICENSE"
+  },
+  "Crawl4AI": {
+    "fetched_at": "2026-10-11",
+    "file": "crawl4ai.txt",
+    "ref": "v0.9.3",
+    "sha256": "a4f73a2160800733224ba9a9f56fee40170ebc88efaa71c5f0880ba3394dcab9",
+    "source": "https://raw.githubusercontent.com/unclecode/crawl4ai/v0.9.3/LICENSE"
+  },
+  "Dify": {
+    "fetched_at": "2026-10-11",
+    "file": "dify.txt",
+    "ref": "1.17.1",
+    "sha256": "eb42df1469b2e40622305c853aacdff957d02aebd566bd3ff3993baa7c0c7780",
+    "source": "https://raw.githubusercontent.com/langgenius/dify/1.17.1/LICENSE"
+  },
+  "Docker Compose V2": {
+    "fetched_at": "2026-09-09",
+    "file": "docker_compose_v2.txt",
+    "ref": "main",
+    "sha256": "2b9afb5bd3f61ae0fc629e6f8c05047ae0351ff1f82145e52132b9a7310dfd99",
+    "source": "https://raw.githubusercontent.com/docker/compose/main/LICENSE"
+  },
+  "Docker Runtime": {
+    "fetched_at": "2026-09-09",
+    "file": "docker_runtime.txt",
+    "ref": "master",
+    "sha256": "cb4f6a3e397587336a45ad1b726e67b47aa181ae6470b385a498e1963919dca7",
+    "source": "https://raw.githubusercontent.com/moby/moby/master/LICENSE"
+  },
+  "Docling": {
+    "fetched_at": "2026-10-11",
+    "file": "docling.txt",
+    "ref": "v1.32.0",
+    "sha256": "22b5caca276a946bc8b9b13e2df6be25b67ba3eb1faa14b8a150d7d9e9e37338",
+    "source": "https://raw.githubusercontent.com/docling-project/docling-serve/v1.32.0/LICENSE"
+  },
+  "Element Web": {
+    "fetched_at": "2026-10-11",
+    "file": "element_web.txt",
+    "ref": "v1.12.27",
+    "sha256": "b61a98942eac7033d96547de4adfa41c1fc99d6b5ccb94a6406c8b113f62f65a",
+    "source": "https://raw.githubusercontent.com/element-hq/element-web/v1.12.27/LICENSE-AGPL-3.0"
+  },
+  "FalkorDB": {
+    "fetched_at": "2026-09-09",
+    "file": "falkordb.txt",
+    "ref": "master",
+    "sha256": "56a48f4a087cf87892b339d7d8ece901a6fd2fcb3e7d74f27d9c811b8e58d313",
+    "source": "https://raw.githubusercontent.com/FalkorDB/FalkorDB/master/LICENSE.txt"
+  },
+  "FerretDB": {
+    "fetched_at": "2026-10-11",
+    "file": "ferretdb.txt",
+    "ref": "v2.7.0",
+    "sha256": "896013166fec3cb70596e0f1b7fa9bc3447769181b9ed2d1f88ea82d1526b627",
+    "source": "https://raw.githubusercontent.com/FerretDB/FerretDB/v2.7.0/LICENSE"
+  },
+  "Flask": {
+    "fetched_at": "2026-09-09",
+    "file": "flask.txt",
+    "ref": "main",
+    "sha256": "05fcda77c3db2e46b0a2a41c6844f87db006de5256b7a8aed14f81e3b98d0dac",
+    "source": "https://raw.githubusercontent.com/pallets/flask/main/LICENSE.txt"
+  },
+  "GPUStack": {
+    "fetched_at": "2026-10-11",
+    "file": "gpustack.txt",
+    "ref": "v0.7.1",
+    "sha256": "5b95646f1e418d59d9efc39d3d0c36523ce29f9e03758bb3a5ded733b1367042",
+    "source": "https://raw.githubusercontent.com/gpustack/gpustack/v0.7.1/LICENSE"
+  },
+  "Geist": {
+    "fetched_at": "2026-09-27",
+    "file": "geist.txt",
+    "ref": "main",
+    "sha256": "18d543b31b1619dd260b42cf544a24b2499a347796f2daf6c48c68cd4fe93740",
+    "source": "https://raw.githubusercontent.com/vercel/geist-font/main/LICENSE.txt"
+  },
+  "Geist Mono": {
+    "fetched_at": "2026-09-27",
+    "file": "geist_mono.txt",
+    "ref": "main",
+    "sha256": "10e7fb2606899df5800aeb33747664a721b42dc9e1bfe857bd9ec072ae882d2e",
+    "source": "https://raw.githubusercontent.com/vercel/geist-font/main/LICENSE.txt"
+  },
+  "Gemma 4": {
+    "fetched_at": "2026-09-09",
+    "file": "gemma_4.txt",
+    "ref": "main",
+    "sha256": "edb28ab533aefe8ab0372a77cc6456b57ad5f2e50f3039117d7c37429bff9a61",
+    "source": "https://raw.githubusercontent.com/google-deepmind/gemma/main/LICENSE"
+  },
+  "Gitea": {
+    "fetched_at": "2026-10-11",
+    "file": "gitea.txt",
+    "ref": "v1.27.3",
+    "sha256": "816688f246a6a96bcb9e9b4006c6c1f1085a8c797638b655cb3e492256bb53e5",
+    "source": "https://raw.githubusercontent.com/go-gitea/gitea/v1.27.3/LICENSE"
+  },
+  "Gotenberg": {
+    "fetched_at": "2026-10-11",
+    "file": "gotenberg.txt",
+    "ref": "v8.37.0",
+    "sha256": "a20d5e306a7a30e6d6f9e53de46af1409dd0100594079988d2ede5ffd43edba3",
+    "source": "https://raw.githubusercontent.com/gotenberg/gotenberg/v8.37.0/LICENSE"
+  },
+  "Gunicorn": {
+    "fetched_at": "2026-09-09",
+    "file": "gunicorn.txt",
+    "ref": "master",
+    "sha256": "33d872a45c56467c77365756d92c22a36789a251adc22e1bac3ffbe61fa56b46",
+    "source": "https://raw.githubusercontent.com/benoitc/gunicorn/master/LICENSE"
+  },
+  "Hermes Agent": {
+    "fetched_at": "2026-10-11",
+    "file": "hermes_agent.txt",
+    "ref": "v2026.8.27",
+    "sha256": "cfc463e9d686a2a93afbb6e80cda6981d6d283b90a13094764917ea88f2fc71a",
+    "source": "https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.8.27/LICENSE"
+  },
+  "Infisical": {
+    "fetched_at": "2026-10-11",
+    "file": "infisical.txt",
+    "ref": "v0.162.10",
+    "sha256": "c32c2f339e990d285a47f7aa4cd8aab9e770c63ff99e4e266ed69b228625fd02",
+    "source": "https://raw.githubusercontent.com/Infisical/infisical/v0.162.10/LICENSE"
+  },
+  "Jinja2": {
+    "fetched_at": "2026-09-09",
+    "file": "jinja2.txt",
+    "ref": "main",
+    "sha256": "dc35dc69fef423e1c84b4b6865abd335acd4bdea34fb13c208e00fe5a3f45696",
+    "source": "https://raw.githubusercontent.com/pallets/jinja/main/LICENSE.txt"
+  },
+  "Komodo": {
+    "fetched_at": "2026-10-11",
+    "file": "komodo.txt",
+    "ref": "v2.3.3",
+    "sha256": "2cdbbabf00b9d8e1ec8bd96552c6a47626583262eeb5a54dc681b57e84ab445e",
+    "source": "https://raw.githubusercontent.com/moghtech/komodo/v2.3.3/LICENSE"
+  },
+  "LightRAG": {
+    "fetched_at": "2026-10-11",
+    "file": "lightrag.txt",
+    "ref": "v1.5.7",
+    "sha256": "a434acb4dc2b8fb2268eabdf91181a025633801cbc75dcc8f2fafa244aff7125",
+    "source": "https://raw.githubusercontent.com/HKUDS/LightRAG/v1.5.7/LICENSE"
+  },
+  "Mistral / Mixtral": {
+    "fetched_at": "2026-09-09",
+    "file": "mistral___mixtral.txt",
+    "ref": "main",
+    "sha256": "94d080b4533081e625ad6af075d5a6ffe49712ec7bdb7f30cf38ef36e28abbc4",
+    "source": "https://raw.githubusercontent.com/mistralai/mistral-inference/main/LICENSE"
+  },
+  "Moltis": {
+    "fetched_at": "2026-10-11",
+    "file": "moltis.txt",
+    "ref": "20260827.01",
+    "sha256": "32c020e06e0d491663931b5f03d0c7813524d0e2f6301a8affd7b5dad6a905a5",
+    "source": "https://raw.githubusercontent.com/moltis-org/moltis/20260827.01/LICENSE.md"
+  },
+  "Nomic Embed": {
+    "fetched_at": "2026-09-09",
+    "file": "nomic_embed.txt",
+    "ref": "main",
+    "sha256": "c8fcd105e0a1fbf1aa9c9f3a73e4fc9251cd83e4f3cf2fed606414ffc8345418",
+    "source": "https://raw.githubusercontent.com/nomic-ai/contrastors/main/LICENSE"
+  },
+  "Onyx": {
+    "fetched_at": "2026-10-11",
+    "file": "onyx.txt",
+    "ref": "v4.3.9",
+    "sha256": "7efccd27f83c1d8c5ec28e7e261a8f3aa66bb0aafac47d8819f6a27dca4f5edb",
+    "source": "https://raw.githubusercontent.com/onyx-dot-app/onyx/v4.3.9/LICENSE"
+  },
+  "Open WebUI": {
+    "fetched_at": "2026-10-11",
+    "file": "open_webui.txt",
+    "ref": "v0.11.3",
+    "sha256": "83e947dfb85b1a159fa004ccc0711b5fa5967ec9cc046c5cb164f7c0d6bf9637",
+    "source": "https://raw.githubusercontent.com/open-webui/open-webui/v0.11.3/LICENSE"
+  },
+  "OpenHands": {
+    "fetched_at": "2026-10-11",
+    "file": "openhands.txt",
+    "ref": "1.6.0",
+    "sha256": "2ae44eedbe29e09ee8d66a35aa34696ac76a688a215423e688474f3db4adf50f",
+    "source": "https://raw.githubusercontent.com/All-Hands-AI/OpenHands/1.6.0/LICENSE"
+  },
+  "OpenLIT": {
+    "fetched_at": "2026-10-11",
+    "file": "openlit.txt",
+    "ref": "openlit-1.24.1",
+    "sha256": "518370a12f6f1729689598040183aed553634b0572c6f166a5196efbc4b756ed",
+    "source": "https://raw.githubusercontent.com/openlit/openlit/openlit-1.24.1/LICENSE"
+  },
+  "OpenUEM": {
+    "fetched_at": "2026-10-11",
+    "file": "openuem.txt",
+    "ref": "v0.12.0",
+    "sha256": "d560bd509e2693e9fa8846a6d9c8b6b5f2dcefb78c0a91e5496cb5900ceb3da2",
+    "source": "https://raw.githubusercontent.com/open-uem/openuem-console/v0.12.0/LICENSE"
+  },
+  "Paperclip": {
+    "fetched_at": "2026-10-11",
+    "file": "paperclip.txt",
+    "ref": "v2026.707.0",
+    "sha256": "68669befc0b18a33719e626782a65b26e8f4a09c33d80d4adc28d074ff626d72",
+    "source": "https://raw.githubusercontent.com/paperclipai/paperclip/v2026.707.0/LICENSE"
+  },
+  "Pipelines": {
+    "fetched_at": "2026-10-11",
+    "file": "pipelines.txt",
+    "ref": "039f9c5",
+    "sha256": "7647ad864fd527a81a8d8c783a43aa69e1a860d9079e3c456dad722431ada2d7",
+    "source": "https://raw.githubusercontent.com/open-webui/pipelines/039f9c5/LICENSE"
+  },
+  "PostgreSQL": {
+    "curated": true,
+    "fetched_at": "2026-09-09",
+    "file": "postgresql.txt",
+    "note": "the upstream source is a web page; the licence text was extracted from it verbatim once. Not re-fetched by --refresh \u2014 a page's checksum churns for reasons that are not licensing.",
+    "ref": "www.postgresql.org",
+    "sha256": "187dacce3def7f476bf03082dd361bef81d844c0b67ec1e9c1122a72a96db05e",
+    "source": "https://www.postgresql.org/about/licence/"
+  },
+  "Presidio": {
+    "fetched_at": "2026-10-11",
+    "file": "presidio.txt",
+    "ref": "2.2.362",
+    "sha256": "87e6f15393f908cdfc96ecce53cca8ea90b3b6bfac5c9a079c0134d47a50088a",
+    "source": "https://raw.githubusercontent.com/microsoft/presidio/2.2.362/LICENSE"
+  },
+  "Python": {
+    "fetched_at": "2026-09-09",
+    "file": "python.txt",
+    "ref": "main",
+    "sha256": "8ca4e21d5d5731a69fb7cc8bd4c1cded54e3fe1e11af425775d14524a391bb81",
+    "source": "https://raw.githubusercontent.com/python/cpython/main/LICENSE"
+  },
+  "Qwen": {
+    "fetched_at": "2026-09-09",
+    "file": "qwen.txt",
+    "ref": "main",
+    "sha256": "90e0ff2412aed9800ab1cb1ad22321611279165326bdb50fbbe687e11966ab3c",
+    "source": "https://raw.githubusercontent.com/QwenLM/Qwen/main/LICENSE"
+  },
+  "Requests": {
+    "fetched_at": "2026-09-09",
+    "file": "requests.txt",
+    "ref": "main",
+    "sha256": "d88edf2fe618228a524a3c9792b377d214084d2bd6b9e005bfa152d6cb4a9c84",
+    "source": "https://raw.githubusercontent.com/psf/requests/main/LICENSE"
+  },
+  "SearXNG": {
+    "fetched_at": "2026-10-11",
+    "file": "searxng.txt",
+    "ref": "6da6eee26",
+    "sha256": "fc127b377f96e677b320df3ec96b9e45962aa50becc485d988b45c1d697c24b7",
+    "source": "https://raw.githubusercontent.com/searxng/searxng/6da6eee26/LICENSE"
+  },
+  "Speaches": {
+    "fetched_at": "2026-10-11",
+    "file": "speaches.txt",
+    "ref": "v0.8.3",
+    "sha256": "b3509af605ac27bd0142df03c84e121afb791e120107b53ff5a8120722f8b9fe",
+    "source": "https://raw.githubusercontent.com/speaches-ai/speaches/v0.8.3/LICENSE"
+  },
+  "Stirling-PDF": {
+    "fetched_at": "2026-10-11",
+    "file": "stirling-pdf.txt",
+    "ref": "v2.14.3",
+    "sha256": "beea49f1b35e571f174e54e06948eba4ae6ae7a346f14ff94dcf4d3989366dc0",
+    "source": "https://raw.githubusercontent.com/Stirling-Tools/Stirling-PDF/v2.14.3/LICENSE"
+  },
+  "Synapse": {
+    "fetched_at": "2026-10-11",
+    "file": "synapse.txt",
+    "ref": "v1.158.0",
+    "sha256": "c2eab0f8e84d9b8c6e01cdf5730423d9cc3788f30792c15ac943ab1f141c00a0",
+    "source": "https://raw.githubusercontent.com/element-hq/synapse/v1.158.0/LICENSE-AGPL-3.0"
+  },
+  "Ubuntu Desktop 24.04 LTS": {
+    "curated": true,
+    "fetched_at": "2026-09-09",
+    "file": "ubuntu_desktop_24.04_lts.txt",
+    "note": "a distribution of thousands of packages under many licences; no single licence text exists. This file says so and points at the per-package copyright files and Canonical's policy page.",
+    "ref": "ubuntu.com",
+    "sha256": "99d6f9c75cd930abea931e3f55faa54951bf4f2e896470e66e0db8d949cfb33d",
+    "source": "https://ubuntu.com/licensing"
+  },
+  "Valkey": {
+    "fetched_at": "2026-10-11",
+    "file": "valkey.txt",
+    "ref": "9.1.2",
+    "sha256": "d6ba8f1dd20f433a0fa8eaaf661dd45b6ea95b5df92768c6906d439f582064b1",
+    "source": "https://raw.githubusercontent.com/valkey-io/valkey/9.1.2/COPYING"
+  },
+  "Vaultwarden": {
+    "fetched_at": "2026-10-11",
+    "file": "vaultwarden.txt",
+    "ref": "1.37.2",
+    "sha256": "e795fe1c912d8eea0b4e59b24645d8265911995b6bdb9d7fa527fc7976b7d303",
+    "source": "https://raw.githubusercontent.com/dani-garcia/vaultwarden/1.37.2/LICENSE.txt"
+  },
+  "Vulkan Driver (AMD)": {
+    "fetched_at": "2026-09-09",
+    "file": "vulkan_driver_amd.txt",
+    "ref": "master",
+    "sha256": "50a9b3fbc5762172706c1e2e0229bd35231488a38ec0fc14a5c70c776e778862",
+    "source": "https://raw.githubusercontent.com/GPUOpen-Drivers/AMDVLK/master/LICENSE.txt"
+  },
+  "Wazuh": {
+    "fetched_at": "2026-10-11",
+    "file": "wazuh.txt",
+    "ref": "v4.14.7",
+    "sha256": "571962689baf1a79ac24020a96f03e822718cdc4ceeb25119a105c0ee25ec787",
+    "source": "https://raw.githubusercontent.com/wazuh/wazuh/v4.14.7/LICENSE"
+  },
+  "Wazuh Dashboard": {
+    "fetched_at": "2026-10-11",
+    "file": "wazuh_dashboard.txt",
+    "ref": "v4.14.7",
+    "sha256": "eea1482a2974f6f737fd5281ab9339585178e31f4e61efbd455f42237a5468f3",
+    "source": "https://raw.githubusercontent.com/wazuh/wazuh-dashboard/v4.14.7/LICENSE.txt"
+  },
+  "Wazuh Indexer": {
+    "fetched_at": "2026-10-11",
+    "file": "wazuh_indexer.txt",
+    "ref": "v4.14.7",
+    "sha256": "7d4bda90f5c337f326feb115f441b94be14bc5ce1a898a6b7dfbf9a91620133e",
+    "source": "https://raw.githubusercontent.com/wazuh/wazuh-indexer/v4.14.7/LICENSE.txt"
+  },
+  "Werkzeug": {
+    "fetched_at": "2026-09-09",
+    "file": "werkzeug.txt",
+    "ref": "main",
+    "sha256": "135fb2601ddaf662025f81f88d15ee965e0926492a4127b1b3ceccd374ab63b3",
+    "source": "https://raw.githubusercontent.com/pallets/werkzeug/main/LICENSE.txt"
+  },
+  "docker-py": {
+    "fetched_at": "2026-09-09",
+    "file": "docker-py.txt",
+    "ref": "main",
+    "sha256": "8ee3bad86ddd8e31d6eda603e6269a194ee4f657ee7fd100b8d07a0b419ebd1c",
+    "source": "https://raw.githubusercontent.com/docker/docker-py/main/LICENSE"
+  },
+  "llama.cpp": {
+    "fetched_at": "2026-10-11",
+    "file": "llama.cpp.txt",
+    "ref": "b9851",
+    "sha256": "b26daea82847ec67d01ce748e585d42378ade61eae3b9a1689bda1c35d24d9bf",
+    "source": "https://raw.githubusercontent.com/ggml-org/llama.cpp/b9851/LICENSE"
+  },
+  "opencode": {
+    "fetched_at": "2026-10-11",
+    "file": "opencode.txt",
+    "ref": "v1.18.25",
+    "sha256": "83e23666c93742f036ad1e2b36bbd0cdc0094e7d1e004b42c4a9a8de9ecd9797",
+    "source": "https://raw.githubusercontent.com/sst/opencode/v1.18.25/LICENSE"
+  },
+  "paperless-ngx": {
+    "fetched_at": "2026-10-11",
+    "file": "paperless-ngx.txt",
+    "ref": "v2.20.15",
+    "sha256": "1d6f22d5339c78080c103595409b7a67fddf77d934eb072811ca74b3899a2643",
+    "source": "https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/v2.20.15/LICENSE"
+  },
+  "pgvector": {
+    "fetched_at": "2026-10-11",
+    "file": "pgvector.txt",
+    "ref": "v0.8.2",
+    "sha256": "6e09e5e0de62ea1ea415707daa4709f65e4f7c997ea7c61aa3a974cb7565ecc3",
+    "source": "https://raw.githubusercontent.com/pgvector/pgvector/v0.8.2/LICENSE"
+  },
+  "psycopg2": {
+    "fetched_at": "2026-09-09",
+    "file": "psycopg2.txt",
+    "ref": "master",
+    "sha256": "6878de993f3d73800cbe77554940dd69dcd28781cc46aa8eb47bae064f21be67",
+    "source": "https://raw.githubusercontent.com/psycopg/psycopg2/master/LICENSE"
+  },
+  "razzfazz Community (Apache-2.0)": {
+    "fetched_at": "2026-09-09",
+    "file": "apache-2.0-community.txt",
+    "ref": "first-party",
+    "sha256": "0a2bbf5614743b610da714c282c595f615b9a517128ef2e534faba997cd33964",
+    "source": "first-party (repo root LICENSE-BSL / LICENSE-APACHE)"
+  },
+  "razzfazz Subscription (BSL 1.1)": {
+    "fetched_at": "2026-09-09",
+    "file": "busl-1.1.txt",
+    "ref": "first-party",
+    "sha256": "ec8cde8234e484bee35532de5e178ed9054c0d03505f1d958ce12335d217b0ca",
+    "source": "first-party (repo root LICENSE-BSL / LICENSE-APACHE)"
+  }
+}

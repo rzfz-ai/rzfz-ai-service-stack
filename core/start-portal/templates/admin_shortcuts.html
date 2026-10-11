@@ -1,0 +1,320 @@
+{# razzfazz "App Builder" (#248 rebuild of the #185 razzfazz-shortcuts admin
+   CRUD). Super-Admin only — gated server-side in app.py (admin_shortcuts
+   route) AND behind the #68 source-IP anchor. Redirect kinds only in P1
+   (owui_persona / owui_app / dify_chat / cloud_link); agent_message /
+   cloud_api are shown disabled/badged (P2/P3). All writes carry the
+   per-endpoint CSRF token; since #388 the portal's global CSRF hook
+   verifies them too.
+
+   #248 App Builder rebuild — this template's markup was rebuilt to match
+   the operator-approved clickable prototype (template gallery, icon picker
+   incl. upload, clickable type-cards, visibility buttons, live WYSIWYG
+   preview, who-can-use). Every element id the JS/CRUD flow and the existing
+   test suite (test_shortcuts*, test_redesign, test_227_*) bind to by
+   `document.getElementById` is PRESERVED verbatim — several of them
+   (#sc-kind, #sc-visibility, #sc-icon) are now the "technical" field a
+   friendlier widget drives, the same idiom #227 already established for
+   #sc-model-select -> #sc-model-id. #}
+{% extends "razz_base.html" %}
+
+{% block title %}App Builder - rzfz.ai{% endblock %}
+
+{% block favicon %}/static/favicon.png{% endblock %}
+
+{% block extra_head %}
+{# The JS reads the CSRF token from here and sends it as X-CSRF-Token. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/start-portal-overrides.css">
+<link rel="stylesheet" href="/static/app-builder.css">
+<style>
+  /* #248 App Builder rebuild — legacy-compat shim ONLY. The page's real
+     styling lives in the dedicated static/app-builder.css (this page's own
+     file — NOT start-portal-overrides.css, which the parallel #299
+     portal-home reskin owns). This tiny inline rule exists solely so the
+     pre-existing "editor columns keep their own readable background over
+     the signature bg" regression guards
+     (tests/ui/razzfazz-start-portal/test_redesign.py::
+     test_shortcuts_editor_reskinned_and_ids_intact and
+     tests/api/razzfazz-start-portal/test_227_shortcuts_deeplinks.py::
+     test_the_editor_columns_have_their_own_background, both of which
+     inspect THIS inline <style> block / .sc-col rule specifically) keep
+     passing unchanged across the rebuild. .ab-list / .ab-cfg / .ab-preview
+     in app-builder.css carry the same "opaque card surface" property for
+     the new layout's own panels — this is the equivalent compatibility
+     hook for the two panels that also carry it (sidebar + config pane). #}
+  .sc-col { background: var(--bg-card); }
+</style>
+{% endblock %}
+
+{% block layout %}
+{# #1054 — the App Builder wears the SAME dark icon-rail + plain content as
+   the portal home (one identity across the rzfz.ai apps). Only the chrome
+   changed: the builder's own topbar / two-pane form below is untouched.
+   `rail_account` is false here — this page ships neither the #54 password
+   modal nor the #299 profile dialog (nor their JS), so the rail foot shows
+   who is signed in instead of controls that would do nothing. #}
+<div class="portal-app" id="portal-app">
+  <div class="rail-scrim" id="rail-scrim" hidden></div>
+  {% with rail_active = 'builder', rail_account = false %}
+    {% include "_rail.html" %}
+  {% endwith %}
+  <div class="portal-main">
+  <div class="ab-app">
+    <div class="ab-topbar">
+      <div class="ab-brand">
+        <button class="rail-burger" id="rail-burger" type="button"
+                aria-controls="rail" aria-expanded="false"
+                title="Open navigation" aria-label="Open navigation">&#9776;</button>
+        <span class="ab-bn">rzfz.ai</span><span class="ab-sub">App Builder</span>
+      </div>
+      <a class="ab-back" href="/">&larr; Back to portal</a>
+    </div>
+
+    <div class="ab-shell">
+      {# ── "Your apps" sidebar (existing shortcuts + New app) ──────────── #}
+      <aside class="ab-list sc-col">
+        <h2>Your apps</h2>
+        <button type="button" id="sc-new" class="ab-newbtn">＋ New app</button>
+        <ul id="sc-list" class="ab-applist"><li class="ab-empty">Loading…</li></ul>
+      </aside>
+
+      <div class="ab-builder">
+        {# ── Config pane (steps 1-4 + actions) ──────────────────────────── #}
+        <div class="ab-cfg sc-col">
+          <h1 id="sc-form-title">New app</h1>
+          <p class="ab-lede">Configure it once — your users get a one-click tile.</p>
+
+          <form id="sc-form" autocomplete="off">
+            <input type="hidden" id="sc-id" value="">
+            <input type="hidden" id="sc-category" value="1 Workspace">
+            <input type="hidden" id="sc-sort" value="100">
+
+            {# ── Step 1: template gallery ──────────────────────────────── #}
+            <div class="ab-step">
+              <div class="ab-sh"><span class="ab-sn">1</span><span class="ab-st">Start from a template</span><span class="ab-stsub">or build blank</span></div>
+              <div id="sc-template-gallery" class="ab-gallery">
+                {% for tmpl in templates %}
+                <button type="button" class="ab-tpl sc-tmpl-btn" data-template="{{ tmpl.id }}" title="{{ tmpl.description }}">
+                  <span class="ab-ti">{{ tmpl.icon }}</span>
+                  <span class="ab-tt">{{ tmpl.title }}</span>
+                  <span class="ab-td">{{ tmpl.description }}</span>
+                </button>
+                {% endfor %}
+                <button type="button" class="ab-tpl ab-blank" data-template="__blank__" title="Start with an empty form">
+                  <span class="ab-ti">＋</span><span class="ab-tt">Blank app</span>
+                </button>
+              </div>
+            </div>
+            <script type="application/json" id="sc-templates-data">{{ templates | tojson }}</script>
+
+            {# ── Step 2: basics + icon picker ──────────────────────────── #}
+            <div class="ab-step">
+              <div class="ab-sh"><span class="ab-sn">2</span><span class="ab-st">Basics</span></div>
+              <div class="ab-field">
+                <label for="sc-title">Title</label>
+                <input type="text" id="sc-title" required maxlength="120">
+              </div>
+              <div class="ab-field">
+                <label for="sc-description">Description <span class="ab-hint">— shown on the tile</span></label>
+                <textarea id="sc-description" maxlength="240"></textarea>
+              </div>
+              <div class="ab-field">
+                <label>Icon</label>
+                {# The technical field every save reads — see the file-level
+                   comment on the "friendly widget drives it" idiom. #}
+                <input type="hidden" id="sc-icon" value="✨">
+                <div class="ab-iconpick">
+                  <div class="ab-iconprev" id="ab-icon-preview">✨</div>
+                  <div class="ab-iconpanel">
+                    <div class="ab-icontabs">
+                      <button type="button" class="on" data-itab="emoji">Emoji</button>
+                      <button type="button" data-itab="curated">rzfz set</button>
+                      <button type="button" data-itab="upload">Upload</button>
+                    </div>
+                    <div id="ab-itab-emoji" class="ab-emojigrid"></div>
+                    <div id="ab-itab-curated" class="ab-curated" hidden></div>
+                    <div id="ab-itab-upload" hidden>
+                      <label class="ab-upload">
+                        <b>Click to upload</b> a PNG or SVG<br>
+                        <span class="ab-uploadhint">square works best · auto-resized · max 128 KB</span>
+                        <input type="file" id="ab-icon-upload-input" accept="image/*" hidden>
+                      </label>
+                      <p class="ab-hint ab-error" id="ab-icon-error" hidden></p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {# ── Step 3: what it does (type cards + kind-specific fields) ─ #}
+            <div class="ab-step">
+              <div class="ab-sh"><span class="ab-sn">3</span><span class="ab-st">What it does</span></div>
+              {# The technical select the type-cards below drive. #}
+              <select id="sc-kind">
+                <option value="owui_persona">Open WebUI persona (redirect)</option>
+                <option value="owui_app">Open WebUI scenario app (redirect)</option>
+                <option value="dify_chat">Dify workflow chat (redirect)</option>
+                <option value="cloud_link">Cloud AI deep-link (redirect)</option>
+              </select>
+              <div class="ab-types" id="ab-types">
+                <div class="ab-type" data-type="owui_app">
+                  <span class="ab-tn">Extraction / OWUI app</span>
+                  <span class="ab-tsd">A tuned OWUI custom-model (prompt + knowledge baked).</span>
+                </div>
+                <div class="ab-type" data-type="owui_persona">
+                  <span class="ab-tn">Chat persona</span>
+                  <span class="ab-tsd">A named OWUI model + system prompt.</span>
+                </div>
+                <div class="ab-type" data-type="dify_chat">
+                  <span class="ab-tn">Dify chat</span>
+                  <span class="ab-tsd">A published Dify chat app.</span>
+                </div>
+                <div class="ab-type" data-type="cloud_link">
+                  <span class="ab-tn">Cloud link</span>
+                  <span class="ab-tsd">External deep link + optional prompt.</span>
+                </div>
+                <div class="ab-type ab-disabled" data-type="agent" aria-disabled="true">
+                  <span class="ab-tn">Agent message <span class="ab-badge">P2</span></span>
+                  <span class="ab-tsd">Send input to a provisioned agent.</span>
+                </div>
+                <div class="ab-type ab-disabled" data-type="cloud_api" aria-disabled="true">
+                  <span class="ab-tn">Cloud API <span class="ab-badge">P3</span></span>
+                  <span class="ab-tsd">Call an external API via the SSRF proxy.</span>
+                </div>
+              </div>
+
+              <div id="typefields">
+                <div class="sc-kind-fields" data-kind="owui_persona">
+                  <label for="sc-model-select">Model (from Open WebUI)</label>
+                  <select id="sc-model-select" hidden></select>
+                  <p class="sc-hint sc-model-hint" hidden>OWUI unavailable — enter the model id manually below.</p>
+                  <label for="sc-model-id">Model / pipe id</label>
+                  <input type="text" id="sc-model-id" placeholder="qwen3.6">
+                </div>
+                <div class="sc-kind-fields" data-kind="owui_app" hidden>
+                  {# #248 P3: owui_app references an OWUI WORKSPACE model (custom
+                     model baking in a system prompt + knowledge collections) —
+                     same #227 picker pattern as owui_persona, but its OWN ids:
+                     reusing sc-model-id here would mean two form fields sharing
+                     one id, so getElementById would silently return only one of
+                     them and the other kind's edits would leak/vanish. #}
+                  <label for="sc-app-model-select">Model (from Open WebUI)</label>
+                  <select id="sc-app-model-select" hidden></select>
+                  <p class="sc-hint sc-app-model-hint" hidden>OWUI unavailable — enter the model id manually below.</p>
+                  <label for="sc-app-model-id">Model / custom-model id</label>
+                  <input type="text" id="sc-app-model-id" placeholder="sales-helper">
+                  <label for="sc-app-prompt-tmpl">Prompt template (optional)</label>
+                  <textarea id="sc-app-prompt-tmpl" placeholder="Summarise this for {{ '{{user.name}}' }}: "></textarea>
+                  <p class="sc-hint">Sent as the first message: the portal creates the chat on the
+                    model and opens it with the answer already on its way (one click = one
+                    chat). Without a template the tile just opens the model. Whitelisted
+                    variables: {{ '{{user.name}}' }}, {{ '{{user.email}}' }},
+                    {{ '{{user.username}}' }}, {{ '{{user.groups}}' }}, {{ '{{date}}' }},
+                    {{ '{{domain}}' }}, {{ '{{input}}' }}.</p>
+                </div>
+                <div class="sc-kind-fields" data-kind="dify_chat" hidden>
+                  <label for="sc-app-path">Dify app path</label>
+                  <input type="text" id="sc-app-path" placeholder="chat/AbC123">
+                </div>
+                <div class="sc-kind-fields" data-kind="cloud_link" hidden>
+                  <label for="sc-provider">Provider</label>
+                  <select id="sc-provider">
+                    <option value="claude">Claude</option>
+                    <option value="chatgpt">ChatGPT</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                  <label for="sc-prompt-tmpl">Prompt template</label>
+                  <textarea id="sc-prompt-tmpl" placeholder="Summarise this for {{ '{{user.name}}' }}: "></textarea>
+                  <p class="sc-hint">Whitelisted variables: {{ '{{user.name}}' }}, {{ '{{user.email}}' }},
+                    {{ '{{user.username}}' }}, {{ '{{user.groups}}' }}, {{ '{{date}}' }},
+                    {{ '{{domain}}' }}, {{ '{{input}}' }}.</p>
+                </div>
+              </div>
+            </div>
+
+            {# ── Step 4: access ─────────────────────────────────────────── #}
+            <div class="ab-step">
+              <div class="ab-sh"><span class="ab-sn">4</span><span class="ab-st">Who can use it</span></div>
+              {# The technical select the visibility buttons below drive. #}
+              <select id="sc-visibility">
+                <option value="private">Private (only me)</option>
+                <option value="group">Group (allowed groups below)</option>
+                <option value="company">Company-wide (every signed-in user)</option>
+              </select>
+              <div class="ab-field">
+                <label>Visibility</label>
+                <div class="ab-vis" id="ab-vis">
+                  <button type="button" data-vis="private">Private (only me)</button>
+                  <button type="button" data-vis="group">Specific groups</button>
+                  <button type="button" data-vis="company">Everyone (company-wide)</button>
+                </div>
+                <span class="ab-hint">Company-wide requires admin or the Shortcut-Authors group — the server re-checks on save.</span>
+              </div>
+
+              <div id="sc-groups-wrap">
+                <label>Allowed groups</label>
+                {# #185 fix: many Authentik groups → the list is long; filter it. #}
+                <input type="text" id="sc-groups-filter" placeholder="Filter groups…" autocomplete="off">
+                <div id="sc-groups" class="ab-groups"><em>Loading groups…</em></div>
+                <p class="ab-hint">Tick <strong>any</strong> to allow every signed-in user.</p>
+                {# #248 App Builder — who-can-use preview (Authentik-resolved
+                   count + avatar initials; degrades gracefully, see
+                   refreshWhoCanUse() in admin-shortcuts.js). Hidden until a
+                   real group is selected / the resolve succeeds. #}
+                <div class="ab-who" id="ab-who" hidden>
+                  Can use this app right now: <b><span id="ab-who-count">0</span> people</b>
+                  <div class="ab-avs" id="ab-who-avatars"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="ab-actions">
+              <button type="submit" class="ab-btn ab-primary">Save app</button>
+              <button type="button" id="sc-test" class="ab-btn">Test as me</button>
+              <button type="button" id="sc-cancel" class="ab-btn ab-ghost">Cancel</button>
+              <label class="ab-chk"><input type="checkbox" id="sc-enabled" checked> Enabled</label>
+            </div>
+          </form>
+
+          <div id="sc-members" class="ab-members" hidden></div>
+          <div id="sc-test-result" class="ab-test" hidden></div>
+        </div>
+
+        {# ── Live preview (right pane) — WYSIWYG tile + in-portal run mock ─ #}
+        <aside class="ab-preview sc-col">
+          <h3>Live preview</h3>
+          <div class="ab-pnote">Exactly how your users see the tile.</div>
+          <div class="ab-tile">
+            <span class="ab-ico" id="ab-pv-icon">✨</span>
+            <span class="ab-tname" id="ab-pv-name">New app</span>
+            <span class="ab-tdesc" id="ab-pv-desc">Describe what this app does…</span>
+            <div class="ab-tfoot">
+              <span class="ab-chip" id="ab-pv-chip">app</span>
+              <span class="ab-open">Open →</span>
+            </div>
+          </div>
+          {# In-portal run is a visual mock only — P1 shortcuts are
+             redirect-only (build_redirect_url); real in-portal execution is
+             P2/P3, so this card is decorative/disabled, exactly like the
+             signed-off prototype. #}
+          <div class="ab-prun">
+            <div class="ab-rh">In-portal run</div>
+            <input type="text" placeholder="Paste text or attach a file…" disabled>
+            <button type="button" class="ab-rb" disabled>Run →</button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>{# /.ab-app #}
+  </div>{# /.portal-main #}
+</div>{# /.portal-app #}
+{% endblock %}
+
+{% block extra_js %}
+{# #1054 — shared rail chrome (wide/narrow toggle + mobile drawer). #}
+<script src="/static/start-portal-rail.js"></script>
+<script src="/static/admin-shortcuts.js"></script>
+{% endblock %}

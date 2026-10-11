@@ -1,0 +1,32 @@
+version: 1
+metadata:
+  name: "Entra - Policies"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "Entra - Domain Restriction"
+    attrs:
+      execution_logging: true
+      expression: |
+        # Optional domain restriction — blocks guest accounts whose email/UPN
+        # does not match ENTRA_OAUTH_DOMAIN. If the domain is empty, all users
+        # from the configured tenant are allowed through.
+        domain = "${ENTRA_OAUTH_DOMAIN}"
+        if not domain:
+            return True
+
+        userinfo = context.get("oauth_userinfo", {})
+        email = userinfo.get("email", "")
+        upn   = userinfo.get("preferred_username", "")
+
+        for candidate in (email, upn):
+            if candidate.lower().endswith("@" + domain.lower()):
+                return True
+
+        ak_logger.warning(
+            f"Entra domain policy: rejected email={email!r} upn={upn!r} "
+            f"(required domain: @{domain})"
+        )
+        return False

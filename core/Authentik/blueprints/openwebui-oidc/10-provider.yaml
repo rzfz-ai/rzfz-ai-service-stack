@@ -1,0 +1,61 @@
+version: 1
+metadata:
+  name: "Module - Open WebUI Native OIDC"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2/OIDC Provider for Open WebUI
+  # ==========================================
+  # Enables native OIDC login and user auto-provisioning in Open WebUI.
+  # Caddy forward-auth is retained as a defense-in-depth outer layer.
+  #
+  # Open WebUI OIDC env vars (in chat/compose.yml) point to this provider.
+  # Redirect URI must match exactly what Open WebUI sends after login.
+  #
+  # Applied by init-authentik.sh when ENABLE_OPENWEBUI_OIDC=true.
+  # ==========================================
+  - model: authentik_providers_oauth2.oauth2provider
+    identifiers:
+      name: "Open WebUI OIDC Provider"
+    attrs:
+      client_id: "${OPENWEBUI_OIDC_CLIENT_ID}"
+      client_secret: "${OPENWEBUI_OIDC_CLIENT_SECRET}"
+      client_type: confidential
+      # ga.10 (#OIDC-grant-types): Authentik 2026.5.x requires grant_types to be
+      # set explicitly. An empty list rejects EVERY authorize with
+      # "invalid_request / request is otherwise malformed" BEFORE the app policy
+      # check — silently breaking SSO login for this provider. Must be present.
+      grant_types:
+        - authorization_code
+        - refresh_token
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      redirect_uris:
+        - matching_mode: strict
+          url: "https://${OPENWEBUI_DOMAIN}/oauth/oidc/callback"
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      access_code_validity: "minutes=1"
+      access_token_validity: "hours=24"
+      refresh_token_validity: "days=30"
+      include_claims_in_id_token: true
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'openid'"]]
+        # True SSO group->role mapping (#33): emit the `groups` claim so Open WebUI
+        # can map the SSO admin group -> owui admin (ENABLE_OAUTH_ROLE_MANAGEMENT).
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: groups"]]
+
+  # Application entry — not shown in user portal (Caddy already proxies this via forward-auth)
+  # Required to link the OIDC provider to an Authentik application object.
+  - model: authentik_core.application
+    identifiers:
+      slug: openwebui-oidc
+    attrs:
+      name: Open WebUI (OIDC)
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, "Open WebUI OIDC Provider"]]
+      meta_description: "Open WebUI native OIDC authentication provider (internal)"
+      policy_engine_mode: any
+      open_in_new_tab: false
+      group: ""

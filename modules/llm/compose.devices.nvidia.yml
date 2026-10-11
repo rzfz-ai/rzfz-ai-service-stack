@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# Hardware overlay: NVIDIA GPU (CUDA).
+# Used by the `llm-legacy` profile when HARDWARE=nvidia in .env (it served the
+# retired `llm` 2.x profile too until #1447 / cutover C7a). Activated via
+# COMPOSE_FILE=compose.yml:modules/llm/compose.devices.nvidia.yml.
+#
+# The paragraph that stood here described GPUStack 2.x auto-pulling
+# `gpustack/runner:cuda12.X-vllm0.X.X` for its built-in vLLM backend. Both ends
+# of that sentence are gone: 2.x with #1447, and vLLM with #1518 (operator
+# decision E5 — GGUF is the only model architecture, and the CUDA llama.cpp
+# runners are chosen by compute capability, #1517). What NVIDIA needs from this
+# overlay is the runtime and the device reservation below.
+#
+# Requires nvidia-container-toolkit installed on the host (apt-get install
+# nvidia-container-toolkit; systemctl restart docker).
+#
+# #946's Blackwell path (RTX PRO 6000) is measured; the GB10 line runs as a thin
+# node (#1517), not through this overlay.
+
+services:
+  # #1448 (cutover C8, decision D4): the NVIDIA half of the merged GPUStack
+  # 0.7.1 module — everything the retired `gpustack-cuda` service (profile
+  # `llm-cuda`) carried beyond the shared 0.7.1 control plane. #946's proven
+  # Blackwell path is unchanged: same image, same runtime, same env.
+  gpustack-legacy:
+    # #270 (operator decision 2026-09-04, landed on main while this branch was
+    # open): the private SEQIS GitLab registry is retired and the host is gone
+    # from the image name. This is a BARE LOCAL name — `pull_policy: never` in
+    # the base service means it is only ever produced by a local build or a
+    # `docker load` from an offline package, never fetched.
+    image: razzfazz-gpustack:cuda
+    build:
+      dockerfile: Dockerfile.cuda
+    platform: linux/amd64
+    # NVIDIA GPU access via the nvidia container runtime (nvidia-container-toolkit
+    # on the host). libcuda is injected at run time — the image ships none.
+    runtime: nvidia
+    # #536 — NVIDIA STAYS ROOT, and C8 is exactly where that could have been
+    # lost. The base gpustack-legacy carries `user: ${GPUSTACK_UID:-1000}:…`
+    # since the 2026.09 fleet flip, but that de-root was verified on AMD/Vulkan
+    # hardware only; the retired `gpustack-cuda` service was deliberately left
+    # root for that reason. Folding the two services into one would have handed
+    # every NVIDIA box an UNVERIFIED de-root — and the failure mode of that is
+    # not a clean error but a HANG at ready_replicas:0 with every health signal
+    # green (#858, PermissionError in tools_manager._link_llama_box_rpc_server).
+    # Dockerfile.cuda also does no build-time chown of the gpustack tree, so the
+    # image is not prepared for it. Undo the flip here until an NVIDIA box has
+    # run the same verification 0.91 ran for AMD.
+    user: "0:0"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      # Unlike the AMD line this is a discrete GPU with no amdgpu kworker
+      # storm, so retries stay at 5 (the base sets AMD's 10).
+      retries: 5

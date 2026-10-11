@@ -1,0 +1,29 @@
+# OAuth provider registry for personal MCP integrations (#36, P3).
+#
+# Client SECRETS are NOT stored here — only the public client_id, the
+# auth/token endpoints, requested scopes, and the .env key that carries the
+# secret server-side (client_secret_env). The redirect_uri is built at runtime
+# as https://mcp.<MAIN_DOMAIN>/oauth/callback/<provider>.
+#
+# To enable a provider on a box, the operator registers an OAuth app with the
+# provider (using the redirect URI above), sets client_id here, and puts the
+# secret in .env under the named key. Until then the integration's "Authorize"
+# button surfaces a "not configured" message (the real handshake needs the
+# operator's real credentials — see PR note).
+version: 1
+providers:
+  github:
+    auth_url: https://github.com/login/oauth/authorize
+    token_url: https://github.com/login/oauth/access_token
+    client_id: ""                       # operator sets per box
+    client_secret_env: OAUTH_GITHUB_CLIENT_SECRET
+    scopes: [repo, read:user]
+
+  google:
+    auth_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    client_id: ""                       # operator sets per box
+    client_secret_env: OAUTH_GOOGLE_CLIENT_SECRET
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/drive.readonly
