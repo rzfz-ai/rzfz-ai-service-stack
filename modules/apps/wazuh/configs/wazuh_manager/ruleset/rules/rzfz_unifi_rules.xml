@@ -1,0 +1,43 @@
+<!-- #2526: UniFi Network and UniFi OS, rule ids 100300-100399. 100300 is the base every
+     UniFi event reaches; the children classify by the CEF event name. A
+     routine event (a WiFi client connecting) stays at the base level. -->
+<group name="unifi,network,">
+  <rule id="100300" level="3">
+    <decoded_as>rzfz-unifi-cef</decoded_as>
+    <description>UniFi: $(unifi.name)</description>
+  </rule>
+
+  <rule id="100301" level="10">
+    <if_sid>100300</if_sid>
+    <field name="unifi.name" type="pcre2">(?i)^admin (accessed|logged in)</field>
+    <description>UniFi: admin login by $(dstuser) from $(srcip)</description>
+    <group>authentication_success,pci_dss_10.2.5,gdpr_IV_32.2,</group>
+  </rule>
+
+  <rule id="100302" level="5">
+    <if_sid>100300</if_sid>
+    <field name="unifi.name" type="pcre2">(?i)blocked by firewall|firewall.*(block|drop|deny)</field>
+    <description>UniFi: firewall block from $(srcip)</description>
+    <group>firewall_drop,</group>
+  </rule>
+
+  <rule id="100303" level="12">
+    <if_sid>100300</if_sid>
+    <field name="unifi.name" type="pcre2">(?i)threat|intrusion|\bips\b|\bids\b</field>
+    <description>UniFi: IDS/IPS - $(unifi.name) from $(srcip)</description>
+    <group>ids,attack,</group>
+  </rule>
+
+  <rule id="100304" level="6">
+    <if_sid>100300</if_sid>
+    <field name="unifi.name" type="pcre2">(?i)\badopt</field>
+    <description>UniFi: device adopted</description>
+  </rule>
+
+  <rule id="100310" level="10" frequency="20" timeframe="120">
+    <if_matched_sid>100302</if_matched_sid>
+    <same_srcip />
+    <description>UniFi: 20 firewall blocks from $(srcip) within 2 minutes</description>
+    <group>firewall_drop,recon,</group>
+  </rule>
+</group>

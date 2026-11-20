@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# OPT-IN overlay: run the STILL-ROOT gpustack variants as a NON-ROOT user (#536)
+# ==============================================================================
+# 2026.09 changed what this file is for. The fleet flip landed in the BASE
+# compose: `modules/llm/compose.yml` gives the AMD/Vulkan variant
+# (`gpustack-legacy`, profile llm-legacy — the supported AMD default)
+#   user: "${GPUSTACK_UID:-1000}:${GPUSTACK_GID:-1000}"
+# by default, because that variant is live-verified de-rooted on 0.91 and its
+# image is ours to prepare at build time. This overlay stays for the variants
+# that are NOT verified and therefore still run as root:
+#
+# Since #1447 part b there is only ONE GPUStack service (`gpustack-legacy`), so
+# the list below has one entry — and the variants that stay root are no longer
+# separate services but separate DEVICE OVERLAYS that set `user: "0:0"`:
+#
+#   modules/llm/compose.devices.nvidia.yml   (#1513: unverified on NVIDIA)
+#   modules/llm/compose.devices.cpu.yml      (#1447: upstream pulled image,
+#                                             no build-time chown)
+#
+# Composing THIS overlay after one of those puts the de-root back for that
+# hardware line, at your own risk, because compose applies files in order.
+#
+# Composing it de-roots them AT YOUR OWN RISK. It also re-states the base
+# value for gpustack-legacy, so the overlay is safe to compose on any box —
+# and NODE-12 (below) requires it to name every variant.
+#
+# THREE prerequisites. On gpustack-legacy the stack now handles all three; for
+# the variants above they are YOUR job before composing this file:
+#
+#   1. GPU access. Root bypasses group permissions on /dev/kfd + /dev/dri;
+#      a non-root gpustack reaches them ONLY via the render gid. The base
+#      compose and the AMD device overlay both carry
+#      `group_add: [video, "${RENDER_GID:-992}"]` for exactly this — and
+#      supplementary groups from group_add apply regardless of `user:`.
+#      If RENDER_GID is wrong for the host, the failure is rc6.7 #63:
+#      `amdgpu_query_info(ACCEL_WORKING) failed (-13)` and every model
+#      deploy hangs at ready_replicas:0 — a hang, not a crash.
+#
+#   2. Volume ownership. gpustack-data (and the model cache inside it) was
+#      written by root on every existing box. Before first start with this
+#      overlay, re-own it or gpustack fails to write:
+#        docker run --rm -v gpustack-data:/d alpine \
+#            chown -R ${GPUSTACK_UID:-1000}:${GPUSTACK_GID:-1000} /d
+#      (`rzfz upgrade` does this once, for gpustack-legacy only — Step 7c,
+#      cli/upgrade.sh::gpustack_nonroot_ownership_migration.)
+#
+#   3. In-image runner-tree ownership. At worker startup gpustack's
+#      tools_manager._link_llama_box_rpc_server() creates a symlink INSIDE
+#      third_party/bin/llama-box/<ver>/ — root-owned in the image, so a non-root
+#      uid hits `PermissionError: [Errno 13]` there and the worker hangs at
+#      ready_replicas:0. This is NOT the RENDER_GID/GPU failure in (1) — measured
+#      on 0.91 the GPU path is fine and the ONLY blocker is this write. The
+#      Vulkan image chowns its gpustack tree AND /var/lib/gpustack to
+#      GPUSTACK_UID at BUILD time (Dockerfile.vulkan steps 9-10) and stamps the
+#      label `ai.razzfazz.gpustack.nonroot-uid`; the upstream PULLED images
+#      cannot be fixed that way, which is why they are not flipped. For a
+#      pre-#536 image, re-own the tree once before a non-root start:
+#        docker exec -u 0 gpustack chown -R ${GPUSTACK_UID:-1000}:${GPUSTACK_GID:-1000} \
+#            "$(docker exec gpustack python3 -c 'import gpustack,os;print(os.path.dirname(gpustack.__file__))')"
+#
+# Activate (after the chowns) by appending to COMPOSE_FILE in .env:
+#   COMPOSE_FILE=compose.yml:modules/llm/compose.devices.amd.yml:modules/llm/compose.nonroot.yml
+# and recreating gpustack. Optionally set GPUSTACK_UID / GPUSTACK_GID in .env
+# (they now ship uncommented, defaulting to 1000).
+#
+# OPT-OUT of the fleet flip (gpustack-legacy): you do NOT need to edit
+# COMPOSE_FILE — set GPUSTACK_UID=0 and GPUSTACK_GID=0 in .env and recreate.
+#
+# cap_add: LINUX_IMMUTABLE in the base file is uid-independent and unaffected.
+# Non-root operation is VERIFIED on an AMD box (0.91, gpustack v0.7.1-vulkan,
+# #536): with prereqs (1)-(3) met, a de-rooted gpustack (uid 1000) reaches
+# ready_replicas:1 and serves rerank on GPU. The wider root-container sweep is
+# M025.
+# ==============================================================================
+
+#
+# NODE-12: this list must name EVERY service in modules/llm/compose.yml that
+# carries `container_name: gpustack` — the header presents the overlay as the
+# complete opt-in switch, and a missing entry does not fail: the overlay reports
+# success and silently leaves that variant running as root. `gpustack-cuda`
+# (profile llm-cuda, `runtime: nvidia` + `security_opt: seccomp:unconfined`) was
+# added without one, so an operator activating this overlay on an NVIDIA box
+# de-rooted nothing at all. tests/unit/llm-node-agent/test_1037_medium_wave.py
+# cross-checks the two files so the next variant cannot repeat it.
+# #1448 (cutover C8): `gpustack-cuda` is gone — the NVIDIA line is the merged
+# `gpustack-legacy` service plus modules/llm/compose.devices.nvidia.yml, so the
+# entry below covers it (that overlay puts NVIDIA back to root; the de-root is
+# verified on AMD/Vulkan only).
+# #1447 part a: the `gpustack` entry is gone with the 2.x service.
+# #1447 part b: `llm-cpu` is folded in, and the CPU overlay pins `user: "0:0"`
+# for exactly the reason this file's prerequisite (3) describes — the upstream
+# image's runner tree is root-owned and nothing chowns it at build time, so a
+# de-rooted CPU box HANGS at ready_replicas:0 with every health signal green
+# (#858). Prerequisite (1), the GPU/render-gid one, does NOT apply on CPU;
+# (2) and (3) do.
+services:
+  gpustack-legacy:
+    user: "${GPUSTACK_UID:-1000}:${GPUSTACK_GID:-1000}"

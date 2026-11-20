@@ -1,0 +1,194 @@
+{# #959 Task A3: per-agent Settings on the shared dark-rail shell
+   (base_shell.html, Task A1).
+
+   2026.09-ga.4 (#2517 §5): the sections live in ONE partial,
+   dashboard/_instance_settings.html, which the portal's Settings tab renders
+   too (GET /instance/<id>/fragment). This page includes it with
+   `embedded=False`, so it keeps the Terminal and Logs sections, and wires it
+   with static/portal/settings.js (AmSettings.wire) — the same action registry
+   and the same type-the-name Delete dialog as the portal. No native
+   prompt/confirm/alert (tests/unit/agent-manager/test_2517_no_native_dialogs.py). #}
+{% extends "base_shell.html" %}
+
+{% block page_title %}{{ display_name }} - Settings{% endblock %}
+{% block crumb %} · <span class="sub">{{ display_name }}</span>{% endblock %}
+
+{% block am_extra_css %}
+    {# #244-Q3: xterm is VENDORED, not pulled from jsdelivr. The appliance ships
+       air-gapped (RAZZFAZZ_NETWORK_MODE=offline) and customer boxes sit behind
+       corporate proxies — on either, the CDN <script> silently failed, leaving
+       `window.Terminal` undefined and this terminal permanently blank with no
+       error the operator could act on. Same files the coding-agent web UI
+       already vendors (xterm 5.3.0 + addon-fit 0.8.0; the `Terminal` and
+       `FitAddon.FitAddon` globals are identical to the 5.5.0 build this
+       replaced). #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm.min.css') }}?v={{ stack_version|default('0') }}">
+    {# 2026.09-ga.4 (#2517): the portal's dialog styles (AmUi.dialog). #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='portal/portal.css') }}?v={{ stack_version|default('0') }}">
+{% endblock %}
+
+{% block am_content %}
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        {# #1986: back where the user came FROM, not always the overview. The
+           origin is an explicit allow-listed token, never request.referrer (absent
+           under some privacy settings, forgeable, and a silent behaviour change
+           later) and never a free `next=` URL (open redirect). #}
+        <a href="{{ back_url }}" style="color: var(--text-dim); text-decoration: none; font-size: 0.85rem;">&larr; {{ back_label }}</a>
+        <h1 style="font-size:1.2rem;">{{ display_name }}</h1>
+        <span class="badge {{ instance.state }}">{{ instance.state }}</span>
+    </div>
+
+    {% with embedded=False %}{% include 'dashboard/_instance_settings.html' %}{% endwith %}
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='vendor/xterm.min.js') }}?v={{ stack_version|default('0') }}"></script>
+<script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}?v={{ stack_version|default('0') }}"></script>
+<script src="{{ url_for('static', filename='portal/actions.js') }}?v={{ stack_version|default('0') }}"></script>
+<script src="{{ url_for('static', filename='portal/ui.js') }}?v={{ stack_version|default('0') }}"></script>
+<script src="{{ url_for('static', filename='portal/settings.js') }}?v={{ stack_version|default('0') }}"></script>
+<script>
+// 2026.09-ga.4 (#2517 §5): this page runs the settings partial through the
+// same wiring as the portal's Settings tab. PAGE_CTX is the page's side of the
+// PortalCtx contract: there are no panes here, so opening one goes to the
+// Workspace, and a refresh reloads the page (or, after a delete, leaves it).
+// A toast is kept across that reload, so a failure is still readable after
+// it (E1: a failed recreate/upgrade must show its error, never success).
+const NODE = {{ node|tojson }};
+const FLASH_KEY = 'rzfz.settings.flash';
+let pageDeleted = false;
+// One navigation per action: the registry refreshes, then settings.js asks
+// for a settings reload; a second reload would abort the first.
+let leaving = false;
+function leave(url) {
+    if (leaving) return;
+    leaving = true;
+    if (url) location.href = url; else location.reload();
+}
+function pageToast(text) {
+    try { sessionStorage.setItem(FLASH_KEY, String(text)); } catch (e) {}
+    AmUi.toast(text);
+}
+(function () {
+    let t = null;
+    try { t = sessionStorage.getItem(FLASH_KEY); sessionStorage.removeItem(FLASH_KEY); } catch (e) {}
+    if (t) AmUi.toast(t);
+})();
+const PAGE_CTX = {
+    api: (m, u, b) => AmUi.api(m, u, b),
+    toast: (t) => pageToast(t),
+    refresh() {
+        if (pageDeleted) {
+            try { sessionStorage.removeItem(FLASH_KEY); } catch (e) {}
+            leave({{ back_url|tojson }});
+        } else {
+            leave();
+        }
+        return Promise.resolve();
+    },
+    reloadSettings: () => leave(),
+    openPane: () => leave({{ url_for("dashboard.portal")|tojson }}),
+    closePanesOf: () => { pageDeleted = true; },
+    confirm: (o) => AmUi.dialog.confirm(o),
+    confirmDelete: (node) => AmSettings.confirmDeleteDialog(AmUi, node),
+    rename: () => {
+        const inp = document.querySelector('[data-am-form="rename"] input[name="name"]');
+        if (inp) { inp.focus(); inp.select(); }
+    },
+    moveTo: () => {},
+    newFolderAndMove: () => Promise.resolve(),
+};
+AmSettings.wire(document.querySelector('[data-am-settings]'), NODE, PAGE_CTX);
+
+let term = null;
+let ws = null;
+let termOpen = false;
+
+function toggleTerminal() {
+    const container = document.querySelector('[data-am-terminal]');
+    const btn = document.querySelector('[data-am-terminal-toggle]');
+    if (termOpen) {
+        container.style.display = 'none';
+        termOpen = false;
+        btn.textContent = 'Open Terminal';
+        if (ws) { ws.close(); ws = null; }
+        if (term) { term.dispose(); term = null; }
+    } else {
+        container.style.display = 'block';
+        container.style.height = '400px';
+        termOpen = true;
+        btn.textContent = 'Close Terminal';
+        initTerminal();
+    }
+}
+
+{
+    const tb = document.querySelector('[data-am-terminal-toggle]');
+    if (tb) tb.addEventListener('click', toggleTerminal);
+}
+
+function initTerminal() {
+    const container = document.querySelector('[data-am-terminal]');
+    container.innerHTML = '';
+
+    term = new Terminal({
+        theme: {
+            background: '#1a1a1a',
+            foreground: '#e0e0e0',
+            cursor: '#CD1719',
+            selectionBackground: '#CD171940',
+        },
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 13,
+        cursorBlink: true,
+        scrollback: 2000,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    fitAddon.fit();
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws/terminal/' + encodeURIComponent(NODE.instance_id));
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+    };
+    ws.onmessage = (e) => {
+        term.write(typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data));
+    };
+    ws.onclose = () => {
+        term.write('\r\n\x1b[33m[session ended — click "Open Terminal" to reconnect]\x1b[0m\r\n');
+    };
+    ws.onerror = () => {
+        term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n');
+    };
+
+    term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'input', data}));
+        }
+    });
+
+    // Resize
+    const ro = new ResizeObserver(() => {
+        fitAddon.fit();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+        }
+    });
+    ro.observe(container);
+
+    // Keepalive
+    const keepalive = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({type: 'ping'}));
+        } else {
+            clearInterval(keepalive);
+        }
+    }, 45000);
+    ws.addEventListener('close', () => clearInterval(keepalive));
+}
+</script>
+{% endblock %}

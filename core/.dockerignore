@@ -1,0 +1,15 @@
+# M026 S04: build context for the 5 internal Flask UI containers
+# (licenses, help, config, backup-management, setup) is now ./core/
+# instead of ./core/<container>/. Each Dockerfile only needs its own
+# subdir + common/ — sibling subdirs would just bloat the build context
+# and trigger needless cache invalidations.
+#
+# Note: we deliberately do NOT exclude sibling subdirs here, because
+# Docker still has to resolve the per-container `COPY <subdir>/...`
+# lines from the context. Excluding them would break the build. We
+# only filter the obvious churn (caches, build artifacts, .git).
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.git/

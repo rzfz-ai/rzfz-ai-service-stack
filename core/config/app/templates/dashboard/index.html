@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_content %}
+
+{# Entire dashboard live area — health banner, updates summary, 6-card
+   resource row, three-column grid (Container Memory by Profile / Backup
+   + Image Updates + LLM Models / Recent Activity), and the container
+   status matrix. Refreshed every 15s by HTMX (outerHTML swap on the
+   wrapper) so the page stays fresh without a full reload — modals,
+   scroll position, and form state are preserved.
+
+   CFG-4: the #dashboard-live wrapper (with hx-get/hx-trigger/hx-swap)
+   is emitted by the fragment template itself, so the polled response
+   re-arms the trigger it just replaced. It used to live here, which made
+   the poll a one-shot. Do not re-add a wrapper around this include. #}
+{% include "dashboard/_live_fragment.html" %}
+
+{# Action buttons stay outside the live fragment so they're stable. #}
+<div style="display:flex;gap:0.5rem;margin-top:1rem">
+    <a href="{{ url_for('modules.overview') }}" class="btn ghost">All Modules</a>
+    <a href="{{ url_for('settings.domain') }}" class="btn ghost">Settings</a>
+    <a href="{{ url_for('backup.index') }}" class="btn ghost">Backup</a>
+    <a href="{{ url_for('governance.index') }}" class="btn ghost">Audit Log</a>
+    <a href="{{ url_for('logs.index') }}" class="btn ghost">Log Snapshots</a>
+</div>
+{% endblock %}

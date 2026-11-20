@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: BUSL-1.1
+     #2559: the Mac worker's agent (app.native_runtime from the RUNNING bundle,
+     {{ROOT}}/current), a system LaunchDaemon as the installing user. The
+     interpreter is the running release's own venv (current/venv): a flip or
+     a rollback by agent-upgrade.sh moves code and interpreter together. It reads
+     its keys from {{ROOT}}/.env.node (0600) at start; nothing secret is in
+     this file. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.razzfazz.worker-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ROOT}}/current/venv/bin/python</string>
+    <string>-m</string>
+    <string>app.native_runtime</string>
+  </array>
+  <key>UserName</key><string>{{USER}}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>WorkingDirectory</key><string>{{ROOT}}/current</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RZFZ_WORKER_DIR</key><string>{{ROOT}}</string>
+    <key>PYTHONPATH</key><string>{{ROOT}}/current</string>
+    <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
+    <key>HOME</key><string>{{ROOT}}</string>
+  </dict>
+  <key>StandardOutPath</key><string>{{ROOT}}/logs/worker-agent.log</string>
+  <key>StandardErrorPath</key><string>{{ROOT}}/logs/worker-agent.log</string>
+</dict>
+</plist>

@@ -1,0 +1,80 @@
+<!-- Host auditd keys (#2526): the audit rules written by the host hardening and
+     the stack's own watch rules tag their events with a key. Wazuh's built-in
+     auditd decoding already extracts the key (audit.key), but no built-in rule
+     raises an alert for these keys, so the events only reached the archives.
+     Every rule here is a child of the built-in "Audit: Messages grouped" rule
+     80700 (decoder auditd) and matches the key only. The built-in siblings of
+     80700 key on the audit record type or on Wazuh's own audit-wazuh-* keys.
+     A key may carry several values joined by a separator, hence the boundary
+     match. Static fields are never matched with <field name>. IDs 100750-100769.
+     80700 ships with the manager and loads before any file of ours. -->
+<group name="rzfz,auditd,rzfz_auditd,">
+  <!-- commands run by a logged-in person: the stack's exec watch (rzfz_exec) and
+       the host hardening's root_commands. Only a set login uid (>= 1000, not
+       4294967295 = unset) alerts: hosts hardened before the auid filter record
+       every daemon and container exec under root_commands with auid unset,
+       about 143k events/h, which must stay in the archives only. -->
+  <rule id="100750" level="3">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])(?:rzfz_exec|root_commands)(?:$|[^A-Za-z0-9_])</field>
+    <field name="audit.auid" type="pcre2">^(?!4294967295$)[1-9][0-9]{3,9}$</field>
+    <description>auditd: command executed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_exec,</group>
+  </rule>
+
+  <!-- accounts and privileges: /etc/passwd, group, shadow, sudoers -->
+  <rule id="100751" level="8">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])identity(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: account database changed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_identity,account_changed,</group>
+  </rule>
+  <rule id="100752" level="8">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])(?:sudoers|sudo_changes)(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: sudoers changed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_identity,privilege_escalation,</group>
+  </rule>
+
+  <!-- remote access and scheduled execution -->
+  <rule id="100753" level="7">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])(?:sshd|sshd_config)(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: SSH daemon configuration changed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_config,config_changed,</group>
+  </rule>
+  <rule id="100757" level="7">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])cron(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: cron definition changed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_config,config_changed,</group>
+  </rule>
+
+  <!-- system time and kernel modules -->
+  <rule id="100754" level="7">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])time(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: system time changed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_system,</group>
+  </rule>
+  <rule id="100755" level="7">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])modules(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: kernel module loaded or removed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_system,</group>
+  </rule>
+
+  <!-- container runtime and the stack's own secrets file -->
+  <rule id="100756" level="8">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])(?:docker_config|docker_socket_perms)(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: container runtime configuration or socket changed ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_config,config_changed,</group>
+  </rule>
+  <rule id="100758" level="8">
+    <if_sid>80700</if_sid>
+    <field name="audit.key" type="pcre2">(?:^|[^A-Za-z0-9_])stack_env(?:$|[^A-Za-z0-9_])</field>
+    <description>auditd: the stack environment file was written ($(audit.exe), key $(audit.key))</description>
+    <group>rzfz_auditd_config,config_changed,</group>
+  </rule>
+</group>

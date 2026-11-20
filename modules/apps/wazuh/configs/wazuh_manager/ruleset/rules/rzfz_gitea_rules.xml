@@ -1,0 +1,67 @@
+<!-- #2526: Gitea access-log events (rzfz.container=gitea, Gitea's default access
+     template) on top of the container-log base rule 100400. 100650-100699.
+     Sibling order matters: the first matching sibling wins, so the specific
+     rules come before the 401/403 counter. -->
+<group name="rzfz,gitea,">
+  <rule id="100650" level="0">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^gitea$</field>
+    <field name="log" type="pcre2">^\S+ - \S+ \[[^\]]+\] "[A-Z]+ \S+ HTTP/[\d.]+" \d{3} </field>
+    <description>Gitea: access log line</description>
+  </rule>
+
+  <!-- user / organisation created or deleted through the API -->
+  <rule id="100657" level="8">
+    <if_sid>100650</if_sid>
+    <field name="log" type="pcre2">"(POST /api/v1/(admin/users(/[^/\s?]+/orgs)?|orgs)|DELETE /api/v1/(admin/users|orgs)/[^/\s?]+)[ ?]</field>
+    <description>Gitea: user or organisation created or deleted via the API</description>
+    <group>admin_action,</group>
+  </rule>
+
+  <!-- access tokens and applications -->
+  <rule id="100655" level="8">
+    <if_sid>100650</if_sid>
+    <field name="log" type="pcre2">"(POST /user/settings/applications|(POST|DELETE) /api/v1/users/[^/\s?]+/tokens)[/? ]</field>
+    <description>Gitea: access token or application created or removed</description>
+    <group>admin_action,</group>
+  </rule>
+
+  <!-- repository settings, collaborators, deploy keys -->
+  <rule id="100656" level="6">
+    <if_sid>100650</if_sid>
+    <field name="log" type="pcre2">"(POST /[^/\s]+/[^/\s]+/settings|PATCH /api/v1/repos/[^/\s?]+/[^/\s?]+|(PUT|POST|DELETE) /api/v1/repos/[^/\s?]+/[^/\s?]+/(collaborators|keys))[/? ]</field>
+    <description>Gitea: repository settings, collaborators or deploy keys changed</description>
+    <group>admin_action,</group>
+  </rule>
+
+  <!-- git push -->
+  <rule id="100651" level="3">
+    <if_sid>100650</if_sid>
+    <field name="log" type="pcre2">"POST \S+/git-receive-pack HTTP/[\d.]+" 200 </field>
+    <description>Gitea: git push</description>
+    <group>rzfz_gitea_push,</group>
+  </rule>
+
+  <!-- any request to an admin path, whatever the answer -->
+  <rule id="100654" level="8">
+    <if_sid>100650</if_sid>
+    <field name="log" type="pcre2">"[A-Z]+ (/-/admin|/api/v1/admin)[/? ]</field>
+    <description>Gitea: admin path requested</description>
+    <group>admin_action,</group>
+  </rule>
+
+  <!-- 401/403 on the API or on git over HTTP. Below log_alert_level (3) on
+       purpose: git answers every fetch and push with a 401 challenge before the
+       200, so ONE of these is normal. Only the burst below alerts. -->
+  <rule id="100652" level="2">
+    <if_sid>100650</if_sid>
+    <field name="log" type="pcre2">"[A-Z]+ (/api/v1/\S*|\S+\.git/\S*) HTTP/[\d.]+" (401|403) </field>
+    <description>Gitea: 401/403 answer (counted, not alerted)</description>
+    <group>rzfz_gitea_refused,</group>
+  </rule>
+  <rule id="100653" level="8" frequency="10" timeframe="120">
+    <if_matched_sid>100652</if_matched_sid>
+    <description>Gitea: 10 refused (401/403) requests from any source within 2 minutes</description>
+    <group>authentication_failures,</group>
+  </rule>
+</group>

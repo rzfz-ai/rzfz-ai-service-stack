@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# docling-egress — Docling MCP's egress proxy and the gateway's relay (#2086)
+# ==============================================================================
+# Design record docs/superpowers/specs/2026-10-mcp-rework-design.md §7
+# (rulings I3, R2-1; #2571). Run by the stack's own Caddy build (forwardproxy
+# pinned by commit in core/Caddy/Dockerfile) through ./entrypoint.sh, which
+# resolves the box's own addresses into DOCLING_EGRESS_DENY_EXTRA first.
+#
+# Holds no secret in plain text: ./entrypoint.sh turns DOCLING_RELAY_SECRET
+# into a bcrypt hash (read from stdin, never on a command line), hands caddy
+# only DOCLING_RELAY_HASH and unsets the secret before exec. Guarded by
+# tests/unit/consistency/test_2086_docling_egress_layout.py (no literal secret,
+# admin off) and tests/unit/caddy/test_2086_docling_egress_denies.py (runs
+# this file: every listed range is refused, the relay admits only the secret).
+# ==============================================================================
+{
+	# No admin listener at all: Caddy's admin API is unauthenticated (#2571).
+	admin off
+	persist_config off
+	auto_https off
+}
+
+# docling-mcp's ONLY way out (HTTP_PROXY / HTTPS_PROXY). Destinations are
+# checked after DNS resolution, so every stack hostname resolves into a denied
+# range. Every range is spelled out: the plugin's built-in list lacks
+# 0.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, ::/128 (Linux connects the
+# unspecified address to the local host, like 0.0.0.0), fc00::/7 and the NAT64
+# prefix 64:ff9b::/96 (on a NAT64 box it reaches any IPv4 address, private
+# ones included). #2674 adds the special-purpose ranges no document is
+# fetched from: IETF protocol assignments 192.0.0.0/24, benchmarking
+# 198.18.0.0/15, multicast 224.0.0.0/4 and ff00::/8, reserved 240.0.0.0/4
+# (broadcast included), the local-use NAT64 prefix 64:ff9b:1::/48, the 6to4
+# 2002::/16 and Teredo tunnel prefixes (they embed an IPv4 address,
+# private ones included), discard-only 100::/64, the IPv4-compatible ::/96 and
+# the deprecated site-local fec0::/10. #2675 adds the rest of IANA's
+# special-purpose ranges that are not globally reachable, as the stack's SSRF
+# proxy denies them: documentation 192.0.2.0/24, 198.51.100.0/24,
+# 203.0.113.0/24, 2001:db8::/32 and 3fff::/20, the deprecated 6to4 relay
+# anycast 192.88.99.0/24, the dummy prefix 100:0:0:1::/64, the IETF protocol
+# assignments 2001::/23 (Teredo 2001::/32 and benchmarking included) and
+# SRv6 SIDs 5f00::/16. (::ffff:0:0/96 is not listed: Go's net.IPNet.Contains
+# treats it as 0.0.0.0/0, so it would deny every IPv4 address, while a mapped
+# address is already matched against the IPv4 ranges.) No allow-list
+# exception. The last deny line is the box's own addresses (HOST_IP and what
+# MAIN_DOMAIN resolves to in the container), the Docker host and the sidecar's
+# own connected subnets, collected at start by ./entrypoint.sh. It refuses to
+# start when no valid box address survives into that list, and an empty value
+# would not parse: fail closed either way.
+:3128 {
+	route {
+		request_header -X-Authentik-*
+		request_header -X-Rzfz-*
+		forward_proxy {
+			hide_ip
+			hide_via
+			acl {
+				deny 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16
+				deny 192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4
+				deny ::/128 ::1/128 fc00::/7 fe80::/10 64:ff9b::/96
+				deny 64:ff9b:1::/48 2002::/16 100::/64 ff00::/8 ::/96 fec0::/10
+				deny 192.0.2.0/24 198.51.100.0/24 203.0.113.0/24 192.88.99.0/24
+				deny 100:0:0:1::/64 2001::/23 2001:db8::/32 3fff::/20 5f00::/16
+				deny {$DOCLING_EGRESS_DENY_EXTRA}
+				allow all
+			}
+		}
+		# Anything that is not a proxy request.
+		respond 403
+	}
+}
+
+# The gateway's ONLY path to docling-mcp (mcp-manager reaches this site on
+# docling-edge; the registry URL is http://docling-egress:8080/mcp). Admitted
+# only with HTTP Basic `mcp-gateway:<DOCLING_RELAY_SECRET>`, checked by
+# basic_auth against the bcrypt hash — a comparison whose time does not depend
+# on how much of the secret a caller guessed right (this listener is also on
+# docling-mcp-net, so docling-mcp can probe it). The header regexp comes first:
+# any other user name, or a credential longer than a relay secret (32..72
+# characters: bcrypt reads only the first 72 bytes) can encode to, is a 401
+# without a bcrypt check, so neither the
+# check's CPU nor Caddy's hash cache can be driven by a caller. bcrypt cost 4:
+# the secret is 32 random bytes, stretching adds nothing. The header is
+# stripped before proxying, so docling-mcp never sees it. Everything else: 401.
+# #3282: retry a failed DIAL (Docker DNS lookup or connect timeout) for up to
+# 5 s instead of a 502 at once; nothing else is retried, so an MCP request
+# docling-mcp already received is never sent twice. Same snippet as
+# core/Caddy/Caddyfile (snippets do not cross files).
+(upstream_retry) {
+	lb_try_duration 5s
+	lb_try_interval 250ms
+	lb_retry_match {
+		expression false
+	}
+}
+
+:8080 {
+	@relay {
+		path /mcp /mcp/
+		header_regexp Authorization "^Basic bWNwLWdhdGV3YXk6[A-Za-z0-9+/]{40,96}={0,2}$"
+	}
+	handle @relay {
+		basic_auth {
+			mcp-gateway {$DOCLING_RELAY_HASH}
+		}
+		reverse_proxy docling-mcp:8000 {
+			import upstream_retry
+			header_up -Authorization
+			header_up Host {upstream_hostport}
+		}
+	}
+	handle {
+		respond 401
+	}
+}

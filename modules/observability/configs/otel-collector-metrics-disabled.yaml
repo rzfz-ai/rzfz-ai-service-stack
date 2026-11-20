@@ -1,0 +1,8 @@
+# ==============================================================================
+# OTel Collector metrics overlay — DISABLED (default, #253 X5)
+# ==============================================================================
+# The no-op counterpart of otel-collector-metrics-remotewrite.yaml, mounted
+# when OTEL_COLLECTOR_METRICS_OVERLAY is unset — an unset remote_write target
+# can NEVER break boot (same boot-safety contract as the logs overlays).
+# Deliberately empty of any config keys.
+{}

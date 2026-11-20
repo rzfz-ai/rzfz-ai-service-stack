@@ -1,0 +1,12 @@
+{
+  "ollama": {
+    "version": "0.35.0",
+    "url": "https://github.com/ollama/ollama/releases/download/v0.35.0/ollama-darwin.tgz",
+    "sha256": "2608dbb0a0f0136a198db9d48b4f74ece55f452314a39452fca35b7cf20c2589"
+  },
+  "uv": {
+    "version": "0.12.21",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.12.21/uv-aarch64-apple-darwin.tar.gz",
+    "sha256": "b88bda573e566ef9bced66b155fe0408626fbbc053aee1c30ba686f0728c9447"
+  }
+}

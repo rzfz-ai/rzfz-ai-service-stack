@@ -1,0 +1,9 @@
+[Unit]
+Description=razzfazz.ai time source change requested in the Settings portal
+
+[Path]
+PathExists=@STACK_DIR@/.probe-queue/time-source.pending
+Unit=razzfazz-time-source.service
+
+[Install]
+WantedBy=multi-user.target

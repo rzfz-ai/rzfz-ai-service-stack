@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block page_title %}Diff #{{ data.set_a.set_id }} vs #{{ data.set_b.set_id }}{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Checksum Diff</h1>
+    <p class="lede">#{{ data.set_a.set_id }} ({{ data.set_a.timestamp }}) vs #{{ data.set_b.set_id }} ({{ data.set_b.timestamp }})</p>
+</div>
+<a href="{{ url_for('governance.index', tab='checksums') }}" class="btn ghost sm" style="margin-bottom:1rem;display:inline-block">Back to history</a>
+
+<div class="card" style="margin-bottom:1rem;border-left:4px solid {% if data.overall_changed %}var(--warn){% else %}var(--success){% endif %}">
+    <div class="card-body" style="font-size:0.8125rem">
+        {% if data.overall_changed %}
+        <span class="badge warn">{{ data.total_changes }} file{{ 's' if data.total_changes != 1 else '' }} changed</span>
+        {% else %}
+        <span class="badge ok">No changes — snapshots are identical</span>
+        {% endif %}
+        {% if data.set_a.git_head or data.set_b.git_head %}
+        <span class="diff-meta">git HEAD: <code>{{ (data.set_a.git_head or '—')[:12] }}</code> → <code>{{ (data.set_b.git_head or '—')[:12] }}</code></span>
+        {% endif %}
+        <p class="diff-note">
+            <code>.env</code> / <code>.env.dify</code> are compared at key level — values are masked and never stored
+            (only a keyed hash per key). Git-tracked files are rendered from the repository's object store.
+            Snapshots taken before this view existed show the hash-only comparison.
+        </p>
+    </div>
+</div>
+
+{% if data.changes %}
+<div class="card">
+    <div class="card-body" style="font-family:var(--mono);padding:0">
+    <div class="table-wrap">
+        <table class="rz">
+            <thead><tr><th>File</th><th>Status</th><th>SHA256 (before)</th><th>SHA256 (after)</th></tr></thead>
+            <tbody>
+                {% for c in data.changes %}
+                <tr>
+                    <td><a href="#change-{{ loop.index }}">{{ c.filepath }}</a></td>
+                    <td>
+                        {% if c.status == 'changed' %}<span class="badge warn">changed</span>
+                        {% elif c.status == 'added' %}<span class="badge ok">added</span>
+                        {% elif c.status == 'removed' %}<span class="badge err">removed</span>{% endif %}
+                    </td>
+                    <td>{{ (c.hash_a or '—')[:16] }}{% if c.hash_a and c.hash_a|length > 16 %}...{% endif %}</td>
+                    <td>{{ (c.hash_b or '—')[:16] }}{% if c.hash_b and c.hash_b|length > 16 %}...{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    </div>
+</div>
+
+<h2 class="section">What changed</h2>
+{% for c in data.changes %}
+{% set d = c.detail or {} %}
+<div class="card diff-card" id="change-{{ loop.index }}">
+    <div class="card-body">
+        <div class="diff-head">
+            <code class="diff-file">{{ c.filepath }}</code>
+            {% if c.status == 'changed' %}<span class="badge warn">changed</span>
+            {% elif c.status == 'added' %}<span class="badge ok">added</span>
+            {% elif c.status == 'removed' %}<span class="badge err">removed</span>{% endif %}
+            {% if d.kind == 'env-keys' %}<span class="badge muted">key level · values masked</span>
+            {% elif d.kind == 'content' %}<span class="badge muted">content · #{{ data.set_a.set_id }} from {{ d.source_a }} · #{{ data.set_b.set_id }} from {{ d.source_b }}</span>
+            {% else %}<span class="badge muted">hash only</span>{% endif %}
+        </div>
+
+        {% if d.kind == 'env-keys' %}
+        <div class="env-keys">
+            {% if d.added %}
+            <div class="env-keys-group"><span class="badge ok">added</span>
+                {% for k in d.added %}<code class="env-key">{{ k }}</code>{% endfor %}</div>
+            {% endif %}
+            {% if d.removed %}
+            <div class="env-keys-group"><span class="badge err">removed</span>
+                {% for k in d.removed %}<code class="env-key">{{ k }}</code>{% endfor %}</div>
+            {% endif %}
+            {% if d.changed %}
+            <div class="env-keys-group"><span class="badge warn">value changed</span>
+                {% for k in d.changed %}<code class="env-key">{{ k }}</code>{% endfor %}</div>
+            {% endif %}
+            {% if not d.added and not d.removed and not d.changed %}
+            <p class="diff-note">The file content changed but no key value did (comments, ordering or quoting only).</p>
+            {% endif %}
+            <p class="diff-note">{{ d.unchanged }} key{{ 's' if d.unchanged != 1 else '' }} unchanged. Values are masked — the snapshot holds a keyed hash per key, never the value.</p>
+        </div>
+
+        {% elif d.kind == 'content' %}
+        <pre class="diff-block">{% for l in d.lines %}<span class="diff-line {{ l.cls }}">{{ l.text }}</span>
+{% endfor %}</pre>
+        {% if d.truncated %}<p class="diff-note">Diff truncated — compare the two revisions on the host for the full output.</p>{% endif %}
+
+        {% else %}
+        <p class="diff-note">Hash-only view: {{ d.reason or 'no detail available for this file' }}</p>
+        <div class="diff-hashes">
+            <div><span class="detail-row-label">before</span> <code>{{ c.hash_a or '—' }}</code></div>
+            <div><span class="detail-row-label">after</span> <code>{{ c.hash_b or '—' }}</code></div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

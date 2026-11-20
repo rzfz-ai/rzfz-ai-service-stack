@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+#
+# The role catalogue (#2473, decision record D2/D3). One definition of which
+# Authentik groups hold which permission in the stack's OWN components.
+# Mounted read-only at /etc/razzfazz/rbac/roles.yaml; read by
+# core/common/razzfazz_common/rbac.py. Module ACCESS (which group may open an
+# app at all) stays in the Authentik bindings (apply-policy-bindings.py); this
+# file answers what a user may do INSIDE our components.
+schema_version: 1
+
+roles:
+  platform-admin:
+    description: Administers the box and every own component (razzfazz.ai Super Admins only; decision record D3).
+    groups: ["razzfazz.ai Super Admins"]
+  authentik-admin:
+    description: >-
+      Authentik's built-in admin group. Listed only where it was admitted before
+      #2473 (start portal, LLM Manager superadmin, agent manager, MCP manager),
+      so the catalogue changes nobody's access; never the config portal, help or backup.
+    groups: ["authentik Admins"]
+  user-admin:
+    description: Manages users and group membership in Authentik.
+    groups: ["razzfazz.ai User Admins"]
+  auditor:
+    description: Reads configuration, audit trails and backup state; changes nothing.
+    groups: ["razzfazz.ai Auditors"]
+  llm-admin:
+    description: Administers the LLM Manager console (deployments, keys).
+    groups: ["razzfazz.ai LLM Admins"]
+  llm-user:
+    description: Uses the LLM Manager console (own keys, usage).
+    groups: ["razzfazz.ai LLM Users"]
+  agents-user:
+    description: Runs personal agents.
+    groups: ["razzfazz.ai AI Agents Users"]
+  agent-tier-admin:
+    description: Agent quota tier "admin" (catalog.py SEED_TIERS).
+    groups: ["agent-admin"]
+
+components:
+  config-portal: {admin: [platform-admin]}
+  start-portal:  {admin: [platform-admin, authentik-admin]}
+  help:          {admin: [platform-admin]}
+  backup:        {admin: [platform-admin], view: [platform-admin, auditor]}
+  llm-manager:   {superadmin: [platform-admin, authentik-admin], admin: [llm-admin], user: [llm-user]}
+  agent-manager: {admin: [platform-admin, authentik-admin], unlimited: [platform-admin, authentik-admin]}
+  mcp-manager:   {admin: [platform-admin, authentik-admin]}
+  openbao:       {admin: [platform-admin], user: [agents-user, llm-user]}
+
+knowledge_scopes:
+  group_prefix: "KB: "
+
+# Apps without claim-based roles (decision record D5): `rzfz provision-sso-users
+# --reconcile-roles` sets their app role from this table and disables (never
+# deletes) an account whose owner left the module-access group.
+downstream:
+  # app -> {catalogue role: app role}; the first matching role (in this order) wins.
+  # The module-access group (module_access below) decides whether the account is active at all.
+  dify:    {platform-admin: admin, user-admin: editor, "*": normal}
+  cognee:  {platform-admin: superuser, "*": user}
+  synapse: {platform-admin: admin, "*": user}
+module_access:
+  dify: "razzfazz.ai Workflow Automation Users"
+  cognee: "razzfazz.ai Cognee Users"
+  synapse: "razzfazz.ai Matrix Users"

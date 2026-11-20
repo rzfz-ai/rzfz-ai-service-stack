@@ -1,0 +1,69 @@
+<!-- #2476 / #2526: OpenBao's audit log (container "openbao", 100500-100549).
+     OpenBao writes one JSON audit entry per request ("type":"request") and per
+     answer ("type":"response") with auth.policies, request.operation,
+     request.path, request.remote_address and, on a refusal, a top-level error.
+     Secrets in the entry are HMAC'd by the audit device (never turn that off).
+     Every pattern keys on an UNESCAPED key of the inner JSON: a client-controlled
+     string (the request path) has its quotes escaped and cannot forge a key.
+     A refusal is raised from the answer only, so a request is not counted twice. -->
+<group name="rzfz,stack,openbao,">
+  <rule id="100500" level="0">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^openbao$</field>
+    <field name="log" type="pcre2">^\{"time":"[^"]*","type":"(request|response)"</field>
+    <description>OpenBao audit entry</description>
+  </rule>
+
+  <rule id="100501" level="5">
+    <if_sid>100500</if_sid>
+    <field name="log" type="pcre2">^\{"time":"[^"]*","type":"response".*"error":"[^"]*(permission denied|invalid role or secret ID|invalid credentials|invalid username or password|missing client token|invalid token)</field>
+    <description>OpenBao: authentication failure or permission denied</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100502" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>100501</if_matched_sid>
+    <description>OpenBao: 5 refused requests from any source within 2 minutes</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100503" level="12">
+    <if_sid>100500</if_sid>
+    <field name="log" type="pcre2">^\{"time":"[^"]*","type":"request","auth":\{[^}]*[,{]"policies":\[[^\]]*"root"</field>
+    <description>OpenBao: root token used</description>
+    <group>privilege_escalation,</group>
+  </rule>
+
+  <rule id="100504" level="8">
+    <if_sid>100500</if_sid>
+    <field name="log" type="pcre2">^\{"time":"[^"]*","type":"request".*[,{]"operation":"(create|update|delete)".*[,{]"path":"sys/(policy|policies|auth|audit|mounts)[/"]</field>
+    <description>OpenBao: policy, auth method, audit device or mount changed</description>
+    <group>config_changed,</group>
+  </rule>
+
+  <rule id="100505" level="12">
+    <if_sid>100504</if_sid>
+    <field name="log" type="pcre2">[,{]"operation":"delete".*[,{]"path":"sys/audit[/"]</field>
+    <description>OpenBao: audit device disabled</description>
+    <group>config_changed,audit_disabled,</group>
+  </rule>
+
+  <!-- The request body is HMAC'd, so the new token's policies are read from the
+       ANSWER: response.auth.policies. -->
+  <rule id="100506" level="12">
+    <if_sid>100500</if_sid>
+    <field name="log" type="pcre2">^\{"time":"[^"]*","type":"response".*[,{]"path":"auth/token/create[/"].*[,{]"response":\{.*[,{]"auth":\{[^}]*[,{]"policies":\[[^\]]*"root"</field>
+    <description>OpenBao: token created with the root policy</description>
+    <group>privilege_escalation,</group>
+  </rule>
+
+  <!-- An agent token carries the rzfz-user policy, which grants only
+       secret/users/&lt;its own sub&gt;/*: a read of any other secret is refused, and the
+       refusal is the event. -->
+  <rule id="100507" level="7">
+    <if_sid>100501</if_sid>
+    <field name="log" type="pcre2">^\{"time":"[^"]*","type":"response","auth":\{[^}]*[,{]"policies":\[[^\]]*"rzfz-user".*[,{]"path":"secret/(data|metadata)/</field>
+    <description>OpenBao: agent identity refused outside its own secret path</description>
+    <group>authentication_failed,</group>
+  </rule>
+</group>

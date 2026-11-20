@@ -1,0 +1,60 @@
+version: 1
+metadata:
+  name: "Module - Gitea Native OIDC"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2/OIDC Provider for Gitea
+  # ==========================================
+  # Enables native OIDC login and user auto-provisioning in Gitea.
+  # Caddy forward-auth is retained as a defense-in-depth outer layer.
+  #
+  # Redirect URI must match the Gitea OAuth source name exactly:
+  #   /user/oauth2/<name>/callback  where name = "Authentik" (set in init-gitea.sh)
+  #
+  # Applied by init-authentik.sh when ENABLE_GITEA_AUTHENTIK_OIDC=true.
+  # ==========================================
+  - model: authentik_providers_oauth2.oauth2provider
+    identifiers:
+      name: "Gitea OIDC Provider"
+    attrs:
+      client_id: "${GITEA_OIDC_CLIENT_ID}"
+      client_secret: "${GITEA_OIDC_CLIENT_SECRET}"
+      client_type: confidential
+      # ga.10 (#OIDC-grant-types): Authentik 2026.5.x requires grant_types to be
+      # set explicitly. An empty list rejects EVERY authorize with
+      # "invalid_request / request is otherwise malformed" BEFORE the app policy
+      # check — silently breaking SSO login for this provider. Must be present.
+      grant_types:
+        - authorization_code
+        - refresh_token
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      redirect_uris:
+        - matching_mode: strict
+          url: "https://${GITEA_DOMAIN}/user/oauth2/Authentik/callback"
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      access_code_validity: "minutes=1"
+      access_token_validity: "hours=24"
+      refresh_token_validity: "days=30"
+      include_claims_in_id_token: true
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'email'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'profile'"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "authentik default OAuth Mapping: OpenID 'openid'"]]
+        # True SSO group->role mapping (#33): emit the `groups` claim so Gitea can
+        # map the SSO admin group -> Gitea admin (add-oauth --admin-group).
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "razzfazz.ai OAuth Mapping: groups"]]
+
+  # Application entry — not shown in user portal
+  - model: authentik_core.application
+    identifiers:
+      slug: gitea-oidc
+    attrs:
+      name: Gitea (OIDC)
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, "Gitea OIDC Provider"]]
+      meta_description: "Gitea native OIDC authentication provider (internal)"
+      policy_engine_mode: any
+      open_in_new_tab: false
+      group: ""

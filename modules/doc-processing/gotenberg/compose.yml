@@ -1,0 +1,39 @@
+# ==============================================================================
+# DOCUMENT CONVERSION MODULE (Gotenberg)
+# ==============================================================================
+# Profile: gotenberg
+# API for converting documents (PDF, HTML, etc).
+# ==============================================================================
+# 8.32.0 reverted the strict-by-default SSRF guard that 8.31.0 introduced
+# (private-IP fetches by Chromium during HTML→PDF). We explicitly opt back
+# IN to the strict default by passing --chromium-deny-private-ips so a
+# malicious URL embedded in a Dify-pipeline doc can't hit our internal
+# subnets via Gotenberg's Chromium. Routed-through-SSRF-proxy traffic
+# (Dify → ssrf_proxy → gotenberg → external) keeps working; only
+# Gotenberg's own outbound private-IP fetches are blocked.
+# The guard is opt-in PER FEATURE (#2651): downloadFrom, webhooks and
+# LibreOffice's linked-content fetches get it too, otherwise any container on
+# the default network can use Gotenberg to reach internal endpoints. Every
+# stack consumer uploads its files directly, so there is no allow-list (a
+# match on one would bypass the guard).
+services:
+  gotenberg:
+    image: gotenberg/gotenberg:${GOTENBERG_VERSION:-8.40.0}
+    profiles: ["gotenberg"]
+    container_name: gotenberg
+    restart: unless-stopped
+    command:
+      - "gotenberg"
+      - "--chromium-deny-private-ips"
+      - "--api-download-from-deny-private-ips"
+      - "--webhook-deny-private-ips"
+      - "--libreoffice-deny-private-ips"
+      # Chromium opens Google's push channel (mtalk.google.com:5228) on its own;
+      # PDF rendering never needs it, so the deny list refuses it (#2912). Not
+      # --chromium-host-resolver-rules: any resolver rule switches off Gotenberg's
+      # DNS-rebinding pinning proxy. Setting --chromium-deny-list REPLACES the
+      # default list, so its file: entry (everything outside /tmp) is repeated.
+      - "--chromium-deny-list=^file:(?!//\\/tmp/).*"
+      - "--chromium-deny-list=^https?://mtalk\\.google\\.com(:|/|$)"
+    ports:
+      - "127.0.0.1:${GOTENBERG_PORT:-3005}:3000"

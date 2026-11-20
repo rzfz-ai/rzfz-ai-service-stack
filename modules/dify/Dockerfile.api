@@ -1,0 +1,245 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# =============================================================================
+# razzfazz-dify-api — upstream dify-api plus the `unstructured` extras (#1981)
+# =============================================================================
+# Dify registers `.msg` (Outlook) in its document extractor and calls
+# `unstructured.partition.msg.partition_msg` — but the upstream image installs
+# `unstructured` WITHOUT its extras. partition_msg then SKIPS every PDF, image,
+# Office attachment with a warning (ImportError counts as an expected
+# attachment error) and returns the mail body alone, so a workflow runs on with
+# a fraction of the text and reports partial-succeeded instead of failed
+# (measured on a test box, Dify 1.17.0/1.17.1, 2026-09). The attachments need
+# parsers upstream ships only via extras:
+#
+#     partition_pdf   -> extra `pdf`    (pdfminer, pdf2image -> poppler-utils)
+#     partition_image -> extra `image`  (unstructured-inference -> tesseract)
+#     msoffcrypto     -> extra `xlsx`   (also in `all-docs`, `local-inference`)
+#     partition_pptx / partition_docx -> extras `pptx` / `docx`
+#
+# So this image is upstream's dify-api, same tag, with those extras added into
+# upstream's own virtualenv at the SAME unstructured version upstream pinned.
+# dify-api, dify-worker, dify-worker-dataset and dify-worker-beat run it.
+#
+# SIZE / TIME of the first recipe (full extras, PyPI torch), measured on a test
+# box 2026-09-13: 2.96 GB -> 11.57 GB (+8.61 GB, 3.9x), build 150 s; narrowing
+# the extras ARG to `pdf,xlsx` saved nothing, because `unstructured[pdf]`
+# already pulls unstructured-inference + torch + opencv. Delivered: two sample
+# mails went from 4 to 73 and from 6 to 82 elements.
+#
+# 2026.11: CPU torch + headless opencv, no wholesale chown (#1981, H1). The
+# +8.61 GB above had three parts, measured in py3.12 venvs on 2026-10-05:
+#   * PyPI's torch is the CUDA build: the extras on a bare venv add 5.9 GB
+#     (nvidia-* 3.2 GB, torch 1.1 GB, triton 0.9 GB); on PyTorch's CPU wheels
+#     the same extras add 0.9 GB. unstructured[pdf] cannot drop torch:
+#     partition_pdf imports unstructured_inference at module import.
+#   * `chown -R dify:dify /app/api/.venv` re-owned upstream's 2.3 GB venv,
+#     which upstream already COPYs --chown=dify:dify; any chown copies the file
+#     up into the new layer, so the image held that venv twice. Only the files
+#     the extras added (owned by root) are chowned now.
+#   * libgl1 for GUI opencv; opencv-python-headless needs no libGL.
+# GUI opencv without libGL is a silent failure, not only a size one: `import
+# cv2` raises ImportError, which partition_msg treats as an expected
+# attachment error and SKIPS the attachment with a warning.
+# verify-api-extras.py refuses all three at build time.
+#
+# Two runtime patches (razzfazz_unstructured_patches.py, loaded lazily by a
+# .pth; decided 2026-10-05): str(element) is "" when hi_res left
+# Image.text None (otherwise Dify's WORKFLOW Document Extractor, graphon's
+# "\n".join(str(e) ...), fails the whole .msg with a TypeError; knowledge-base
+# indexing via chunk_by_title tolerated it), and one attachment failing with a
+# non-ImportError is skipped with a warning instead of aborting the message.
+#
+# Air-gapped .msg extraction (#2073): unstructured downloads two models on
+# first use - en_core_web_sm from GitHub when it splits the body text into
+# sentences (nlp/tokenize.py; every .msg), and the YOLOX layout model from
+# Hugging Face for an image attachment (hi_res, the #1981 extras). With no
+# network the first raises "Failed to download spaCy model", the second
+# raised OSError into upstream's non-existent HOME. Both are baked below at
+# pinned versions (+15 MB spaCy model, +207 MiB yolox_l0.05.onnx with its
+# Apache-2.0 LICENSE.txt), HOME and HF_HOME are image paths owned by dify, and
+# HF_HUB_OFFLINE=1 makes the baked commit the one that loads on every box
+# (online boxes included: a live hub would follow a moved `main`). It also
+# means NO other hub model can load at run time. The one other hub model on
+# this path - unstructured's table-transformer for TIFF/BMP table inference -
+# is turned off by patch 3 in razzfazz_unstructured_patches.py (images go
+# hi_res with YOLOX + tesseract, as JPG/PNG already do upstream). The guard
+# loads both baked models with the network cut.
+#
+# The venv layout (uv, /app/api/.venv, user `dify`) mirrors upstream's
+# api/Dockerfile at the pinned tag — re-check on a Dify minor bump.
+#
+# 1.17.1 -> 1.18.0 (api/Dockerfile diffed): the base moves from python:3.12 to
+# python:3.13-slim-bookworm, so the venv is a 3.13 one (the layout, user and uv
+# are unchanged); unstructured stays at 0.27.5, upstream's lock moves pillow
+# and pypdf only. Upstream now also bakes the spaCy model (en_core_web_sm) into
+# its image; step 3b re-installs the same sha256-checked wheel over it, which
+# changes nothing. The constraints file below was resolved on 3.12 - regenerate
+# it on a build box (procedure in its header) before the first build of 1.18.0.
+ARG DIFY_VERSION=1.18.0
+FROM langgenius/dify-api:${DIFY_VERSION}
+
+ARG UNSTRUCTURED_EXTRAS=pdf,image,xlsx,pptx,docx
+ARG TORCH_VERSION=2.10.0
+ARG TORCHVISION_VERSION=0.25.0
+# 1 = regenerate api-extras.constraints.txt: resolve without its pins and
+# leave the result in /opt/razzfazz/api-extras.resolved.txt (procedure in
+# that file's header). Never 1 for a build that ships.
+ARG API_EXTRAS_REGEN=0
+# #2073: unstructured's own pin of the spaCy model (nlp/tokenize.py:
+# _SPACY_MODEL_VERSION/_SPACY_MODEL_SHA256); the guard fails the build when a
+# Dify bump moves it. The layout model: unstructured_inference's `yolox`, by
+# Hugging Face commit and the file's sha256 (its LFS oid).
+ARG SPACY_MODEL_VERSION=3.8.0
+ARG SPACY_MODEL_SHA256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
+ARG YOLOX_REPO=unstructuredio/yolo_x_layout
+ARG YOLOX_FILE=yolox_l0.05.onnx
+ARG YOLOX_REVISION=7680d6f857780bcf8d49916aa2e8881bd49dee3e
+ARG YOLOX_SHA256=134301ca94fb0df8027be9a6dad1908fe6218af8ffa4d34f0819c7c2226195f3
+# LICENSE.txt (Apache-2.0) of the same commit ships next to the weights.
+ARG YOLOX_LICENSE_SHA256=a512bedc7cd5c7e1a65879930634f8914482f9cf11aa6a3b218652c6845ed6d0
+
+USER root
+
+# System tools the parsers shell out to. libmagic1 is already in upstream's
+# image; poppler (pdf2image) and tesseract (OCR for image attachments) are not.
+# libglib2.0-0 stays for opencv-python-headless; libgl1 is NOT needed by the
+# headless build.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        poppler-utils \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-deu \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv is upstream's own installer, already at /usr/local/bin/uv in the base
+# (api/Dockerfile: pip install uv==${UV_VERSION}); no second copy is pulled.
+# The build context is modules/dify/, shared with dify-web: an edit to any
+# tracked file there (compose.yml included) marks both images stale.
+# A change to these three files re-runs the RUN below (it is one layer).
+COPY verify-api-extras.py razzfazz_unstructured_patches.py api-extras.constraints.txt /opt/razzfazz/
+
+# #2073: a HOME that exists (upstream's /home/dify does not), the hub cache
+# inside the image, and no hub lookups at run time.
+# NUMBA_CACHE_DIR: unstructured's xycut uses numba @njit(cache=True); with
+# site-packages root-owned and no writable locator, importing it as dify dies
+# ("cannot cache function 'projection_by_bboxes'"). A dify-owned cache dir in
+# the image gives numba a locator; the guard's dify run warms it.
+ENV HOME=/app/api/.home \
+    HF_HOME=/app/api/.cache/huggingface \
+    HF_HUB_OFFLINE=1 \
+    NUMBA_CACHE_DIR=/app/api/.cache/numba
+
+# 0) upstream's lock becomes a constraint: nothing upstream installed may move,
+#    except the three the extras cannot do without (measured against Dify
+#    1.17.1's uv.lock, 2026-10-05): pandas 3.0.2 -> 2.x (the xlsx extra pins
+#    pandas<3), protobuf 5.29 -> 6.33 (onnx, google-cloud-vision; leaves
+#    aliyun-log-python-sdk, tablestore and grpcio-tools outside their declared
+#    range - none is used with the stack's pgvector store), onnxruntime
+#    1.23 -> 1.30 (unstructured-inference). Anything else that would move
+#    fails the build instead of shipping.
+# 1) CPU torch first, from PyTorch's CPU index (download.pytorch.org - a
+#    proxied or allow-listed box must let it through). `+cpu` satisfies
+#    unstructured-inference's `torch>=2.10.0` (PEP 440 ignores the local
+#    label); its pins are then added to the lock, so no later step can swap
+#    in PyPI's CUDA build.
+# 2) the extras at upstream's own unstructured version (read, never written),
+#    every package they add held to api-extras.constraints.txt.
+# 3) swap GUI opencv for the headless wheel of the SAME version.
+# 3b) #2073: the spaCy model wheel, checked against unstructured's sha256 and
+#    installed from that file only (--no-index); pinned like the extras.
+# 4) every package the build added must be pinned in the constraints file.
+# 4b) #2073: the layout model and its LICENSE.txt into the hub cache at the
+#    pinned commit, both sha256 checked; refs/main -> that commit (a download by commit writes no
+#    ref, and unstructured_inference asks for main); hf_xet's logs dropped.
+# 5) the #1981 patches (razzfazz_unstructured_patches.py) via a .pth.
+# 6) chown only what steps 1-5 added; upstream's files are dify-owned already.
+# 7) the effect guard: a CUDA torch, any nvidia-*/triton dist, GUI opencv, a
+#    parser that does not import, a missing tesseract/poppler tool or language,
+#    an inactive patch, or a model that needs the network fails the BUILD.
+RUN set -eu; \
+    export UV_CACHE_DIR=/tmp/razzfazz-uv-cache; \
+    PY=/app/api/.venv/bin/python; \
+    LOCK=/tmp/upstream-lock.txt; \
+    PINS=/opt/razzfazz/api-extras.constraints.txt; \
+    if [ "$API_EXTRAS_REGEN" = 1 ]; then PINS=/dev/null; fi; \
+    uv pip freeze --python "$PY" > "$LOCK.all"; \
+    grep '==' "$LOCK.all" | grep -v -i -E '^(pandas|protobuf|onnxruntime)==' > "$LOCK"; \
+    [ "$(wc -l < "$LOCK")" -gt 100 ] || { echo "FATAL(#1981): upstream lock not captured" >&2; exit 1; }; \
+    uv pip install --python "$PY" --no-cache -c "$LOCK" \
+        --index-url https://download.pytorch.org/whl/cpu \
+        "torch==${TORCH_VERSION}+cpu" "torchvision==${TORCHVISION_VERSION}+cpu"; \
+    echo "torch==${TORCH_VERSION}+cpu" >> "$LOCK"; \
+    echo "torchvision==${TORCHVISION_VERSION}+cpu" >> "$LOCK"; \
+    ver="$("$PY" -c 'import importlib.metadata as m; print(m.version("unstructured"))')"; \
+    echo "unstructured ${ver} -> adding extras [${UNSTRUCTURED_EXTRAS}]"; \
+    uv pip install --python "$PY" --no-cache -c "$LOCK" -c "$PINS" "unstructured[${UNSTRUCTURED_EXTRAS}]==${ver}"; \
+    cv="$("$PY" -c 'import importlib.metadata as m; print(m.version("opencv-python"))' 2>/dev/null || true)"; \
+    if [ -n "$cv" ]; then \
+        uv pip uninstall --python "$PY" opencv-python opencv-python-headless; \
+        uv pip install --python "$PY" --no-cache -c "$LOCK" -c "$PINS" "opencv-python-headless==${cv}"; \
+    fi; \
+    mtmp="$(mktemp -d)"; \
+    whl="en_core_web_sm-${SPACY_MODEL_VERSION}-py3-none-any.whl"; \
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$mtmp/$whl" \
+        "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-${SPACY_MODEL_VERSION}/$whl"; \
+    echo "${SPACY_MODEL_SHA256}  $mtmp/$whl" | sha256sum -c -; \
+    printf 'SPACY_MODEL_VERSION=%s\nSPACY_MODEL_SHA256=%s\n' "$SPACY_MODEL_VERSION" "$SPACY_MODEL_SHA256" > /opt/razzfazz/models.env; \
+    uv pip install --python "$PY" --no-cache --no-index --find-links "$mtmp" -c "$LOCK" -c "$PINS" "en-core-web-sm==${SPACY_MODEL_VERSION}"; \
+    uv pip freeze --python "$PY" | grep '==' | grep -v -E '^(torch|torchvision)==' | sort > "$LOCK.post"; \
+    { sort "$LOCK.all" | comm -13 - "$LOCK.post"; [ -z "$cv" ] || echo "opencv-python==${cv}"; } | sort > /opt/razzfazz/api-extras.resolved.txt; \
+    unpinned="$(grep -v -x -F -f "$PINS" /opt/razzfazz/api-extras.resolved.txt || true)"; \
+    if [ -n "$unpinned" ] && [ "$API_EXTRAS_REGEN" != 1 ]; then \
+        echo "FATAL(#1981): added but not pinned in api-extras.constraints.txt:" >&2; echo "$unpinned" >&2; exit 1; \
+    fi; \
+    rm -f "$LOCK" "$LOCK.all" "$LOCK.post"; \
+    rm -rf "$UV_CACHE_DIR"; \
+    mkdir -p "$HOME" "$HF_HOME" "$NUMBA_CACHE_DIR"; \
+    HF_HUB_OFFLINE=0 "$PY" -c 'import sys; from huggingface_hub import hf_hub_download as d; open(sys.argv[4], "w").write(d(sys.argv[1], sys.argv[2], revision=sys.argv[3]))' \
+        "$YOLOX_REPO" "$YOLOX_FILE" "$YOLOX_REVISION" "$mtmp/yolox.path"; \
+    echo "${YOLOX_SHA256}  $(cat "$mtmp/yolox.path")" | sha256sum -c -; \
+    HF_HUB_OFFLINE=0 "$PY" -c 'import sys; from huggingface_hub import hf_hub_download as d; open(sys.argv[4], "w").write(d(sys.argv[1], sys.argv[2], revision=sys.argv[3]))' \
+        "$YOLOX_REPO" LICENSE.txt "$YOLOX_REVISION" "$mtmp/license.path"; \
+    echo "${YOLOX_LICENSE_SHA256}  $(cat "$mtmp/license.path")" | sha256sum -c -; \
+    mkdir -p "$HF_HOME/hub/models--${YOLOX_REPO%%/*}--${YOLOX_REPO#*/}/refs"; \
+    printf %s "$YOLOX_REVISION" > "$HF_HOME/hub/models--${YOLOX_REPO%%/*}--${YOLOX_REPO#*/}/refs/main"; \
+    rm -rf "$HF_HOME/xet" "$mtmp"; \
+    SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"; \
+    install -m 0644 /opt/razzfazz/razzfazz_unstructured_patches.py "$SP/razzfazz_unstructured_patches.py"; \
+    echo 'import razzfazz_unstructured_patches' > "$SP/razzfazz_unstructured_patches.pth"; \
+    find /app/api/.venv /app/api/.home /app/api/.cache \( ! -user dify -o ! -group dify \) -exec chown -h dify:dify {} +; \
+    "$PY" /opt/razzfazz/verify-api-extras.py; \
+    chown -R dify:dify "$NUMBA_CACHE_DIR"; \
+    if [ -n "$(ls -A "$HOME")" ]; then \
+        echo "FATAL(#2073): the image's HOME is not empty after the build:" >&2; ls -A "$HOME" >&2; exit 1; \
+    fi
+
+USER dify
+
+USER root
+# #2336: security floor. (1) setuptools in /app/api/.venv: the exact pin in
+# requirements-security-pins.txt (CVE-2025-47273) is installed over the venv,
+# wheels only, with a check that it took. (2) The base image's SYSTEM pip is
+# removed: pip vendors setuptools 70.3.0 (pip/_vendor/pkg_resources) and msgpack
+# 1.1.2, which the rc2 scan reported as High (CVE-2025-47273, GHSA-6v7p-g79w-8964).
+# Nothing at run time needs pip: uv is a standalone binary (/usr/local/bin/uv)
+# and the venv has no pip. A step of its own AFTER the extras RUN, so nothing
+# that RUN installs can move the pin back; the removal comes after the last uv
+# call. The build fails if pip or any vendor.txt is left under /usr/local/lib.
+USER root
+COPY requirements-security-pins.txt /tmp/requirements-security-pins.txt
+RUN set -e; \
+    PY=/app/api/.venv/bin/python; \
+    uv pip install --python "$PY" --no-cache --only-binary :all: -r /tmp/requirements-security-pins.txt; \
+    "$PY" -c "import importlib.metadata as m, sys; bad=[l for l in open('/tmp/requirements-security-pins.txt').read().splitlines() if l and not l.startswith('#') and m.version(l.split('==')[0])!=l.split('==')[1]]; sys.exit('pins did not take: %s' % bad if bad else 0)"; \
+    find /app/api/.venv \( ! -user dify -o ! -group dify \) -exec chown -h dify:dify {} +; \
+    /usr/local/bin/python3 -m pip uninstall -y pip; \
+    rm -rf /usr/local/lib/python3.13/site-packages/pip /usr/local/lib/python3.13/site-packages/pip-*.dist-info /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13; \
+    ! /usr/local/bin/python3 -m pip --version >/dev/null 2>&1 || { echo "FATAL(#2336): system pip is still installed" >&2; exit 1; }; \
+    [ -z "$(find /usr/local/lib -path '*pip/_vendor/vendor.txt' -print)" ] || { echo "FATAL(#2336): a pip vendor.txt is left under /usr/local/lib" >&2; exit 1; }; \
+    /usr/local/bin/uv --version >/dev/null; \
+    rm -f /tmp/requirements-security-pins.txt
+USER dify

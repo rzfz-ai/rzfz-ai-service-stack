@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# MONITORING MODULE (Komodo)
+# ==============================================================================
+# Profile: monitor
+# Infrastructure monitoring and alerting.
+# ==============================================================================
+services:
+  postgres-komodo:
+    image: ghcr.io/ferretdb/postgres-documentdb:${KOMODO_DB_VERSION:-17-0.107.0-ferretdb-2.7.0}
+    profiles: ["monitor"]
+    container_name: postgres-komodo
+    restart: unless-stopped
+    environment:
+      # #3309: Komodo's own cluster has its own password (applied at first init;
+      # postgres-komodo-reconcile moves an existing cluster to it). The role keeps
+      # the stack's superuser NAME, which is not a credential.
+      - POSTGRES_USER=${POSTGRES_USER:-docker}
+      - POSTGRES_PASSWORD=${KOMODO_PG_PASSWORD:-}
+      - POSTGRES_DB=postgres
+      # F-018: Removed POSTGRES_HOST_AUTH_METHOD=trust — password auth is enforced
+      # via POSTGRES_PASSWORD (default scram-sha-256 when password is set)
+    volumes:
+      - postgres-komodo-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docker} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      # #182: DO NOT stop komodo's postgres during the volume archive. Like the
+      # core postgres, postgres-komodo-data is now EXCLUDED from the tar by the
+      # default BACKUP_EXCLUDE_REGEXP and captured LOGICALLY instead — the
+      # archive-pre hook runs `pg_dumpall` on postgres-komodo →
+      # databases/postgres_komodo.sql. offen therefore never tars the live
+      # komodo pgdata, so it can't hit the pg_wal-recycle race that failed the
+      # nightly backup (#157) and there's no need to stop it (no monitoring
+      # blip). HARD INVARIANT: only safe while postgres-komodo-data stays out of
+      # the tar — if it's re-included, restore this label to `true`. See the
+      # #182 note in core/compose.yml postgres + config/.env.example.
+      - "docker-volume-backup.stop-during-backup=false"
+
+  # #3309: moves an existing Komodo cluster from the stack's main superuser
+  # password to KOMODO_PG_PASSWORD (see the script). It is the only Komodo
+  # container that holds the old password, and only to log in once to change
+  # it; ferretdb starts after it succeeded.
+  postgres-komodo-reconcile:
+    image: ghcr.io/ferretdb/postgres-documentdb:${KOMODO_DB_VERSION:-17-0.107.0-ferretdb-2.7.0}
+    profiles: ["monitor"]
+    container_name: postgres-komodo-reconcile
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    environment:
+      - KOMODO_PG_HOST=postgres-komodo
+      - POSTGRES_USER=${POSTGRES_USER:-docker}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - KOMODO_PG_PASSWORD=${KOMODO_PG_PASSWORD:-}
+    volumes:
+      - ./komodo-pg-reconcile.sh:/komodo-pg-reconcile.sh:ro
+    entrypoint: ["bash", "/komodo-pg-reconcile.sh"]
+    depends_on:
+      postgres-komodo:
+        condition: service_healthy
+
+  ferretdb:
+    image: ghcr.io/ferretdb/ferretdb:${FERRETDB_VERSION:-2.7.0}
+    profiles: ["monitor"]
+    container_name: ferretdb
+    restart: unless-stopped
+    environment:
+      - FERRETDB_POSTGRESQL_URL=postgres://${POSTGRES_USER:-docker}:${KOMODO_PG_PASSWORD:-}@postgres-komodo:5432/postgres?sslmode=disable
+      # #2267: FerretDB phones its telemetry beacon on start (measured: 9 packets
+      # to an Azure address from an air-gapped box). Off on every box, not only
+      # offline ones — nothing in this stack consumes it. DO_NOT_TRACK is the
+      # universal switch FerretDB also honours.
+      - FERRETDB_TELEMETRY=disable
+      - DO_NOT_TRACK=1
+      # #2652: the image listens for pprof, expvar and metrics on :8088 (all
+      # interfaces), so every container on the default network could read heap
+      # and goroutine profiles. Nothing in the stack uses it (the health check is
+      # `/ferretdb ping`), so it stays inside the container.
+      - FERRETDB_DEBUG_ADDR=127.0.0.1:8088
+    depends_on:
+      postgres-komodo:
+        condition: service_healthy
+      postgres-komodo-reconcile:
+        condition: service_completed_successfully
+
+  komodo-core:
+    image: ghcr.io/moghtech/komodo-core:${KOMODO_VERSION:-2.3.4}
+    profiles: ["monitor"]
+    container_name: komodo-core
+    restart: unless-stopped
+    environment:
+      # #252: Komodo v2.2.0 core reads KOMODO_PASSKEYS (plural); the .env holds
+      # KOMODO_PASSKEY (singular, generated at init + backfilled on upgrade).
+      # Map it so core authenticates to periphery with the SHARED passkey instead
+      # of falling back to per-host ed25519 keys ("invalid public key").
+      - KOMODO_PASSKEYS=${KOMODO_PASSKEY}
+      # #3309: built here, not taken from .env by name. The .env line is
+      # `...:${KOMODO_PG_PASSWORD}@ferretdb...`, and on an upgraded box
+      # KOMODO_PG_PASSWORD is appended AFTER it; compose resolves ${...} inside a
+      # .env value only from keys defined earlier, so komodo-core got an empty
+      # password and could not log in. The compose file sees the whole .env.
+      - KOMODO_DATABASE_URI=mongodb://${POSTGRES_USER:-docker}:${KOMODO_PG_PASSWORD:-}@ferretdb:27017/komodo?authSource=admin
+      # #2598: stack .env keys this service reads (Komodo core's KOMODO_* config),
+      # by name only: compose takes the value from the stack .env and leaves
+      # the variable unset when the key is absent, as env_file did.
+      - KOMODO_FIRST_SERVER
+      - KOMODO_FIRST_SERVER_NAME
+      - KOMODO_HOST
+      - KOMODO_INIT_ADMIN_PASSWORD
+      - KOMODO_INIT_ADMIN_USERNAME
+      - KOMODO_LOCAL_AUTH
+      - KOMODO_PASSKEY
+      - KOMODO_PORT
+      - KOMODO_TITLE
+      - TZ
+    ports:
+      - "127.0.0.1:${KOMODO_PORT:-8180}:8180"
+    depends_on:
+      - ferretdb
+    networks:
+      - default
+      # #3019: the only way to reach komodo-periphery
+      - komodo-agent
+
+  komodo-periphery:
+    image: ghcr.io/moghtech/komodo-periphery:${KOMODO_VERSION:-2.3.4}
+    profiles: ["monitor"]
+    container_name: komodo-periphery
+    restart: unless-stopped
+    environment:
+      # #252: periphery reads PERIPHERY_PASSKEYS — accept the same shared passkey
+      # as komodo-core (${KOMODO_PASSKEY} from .env) so core authenticates via
+      # passkey instead of the ed25519 key-based fallback.
+      - PERIPHERY_PASSKEYS=${KOMODO_PASSKEY}
+      # #2598: no stack .env key beyond the block above is read; TZ for libc time,
+      # by name only: compose takes the value from the stack .env and leaves
+      # the variable unset when the key is absent, as env_file did.
+      - TZ
+    # #3019: periphery resolves the host's "public IP" at every start by asking
+    # the OpenDNS resolvers (208.67.222.222/220.220, udp/53) DIRECTLY — the
+    # addresses are hard-coded in Komodo 2.3.x with no setting to turn it off.
+    # On an offline box that is egress a firewall/SIEM flags; online it tells a
+    # third-party resolver the appliance exists. Periphery needs no egress (it
+    # reads the docker socket), so it sits ONLY on an internal network that it
+    # shares with komodo-core: no route off the bridge, the lookup fails locally.
+    # No host port either (F-007 kept it on 127.0.0.1; nothing on the host used
+    # it, and docker does not publish ports of an internal-only container).
+    networks:
+      - komodo-agent
+    volumes:
+      # SECURITY: ro — Komodo periphery reads container state for monitoring display.
+      # If Komodo needs to manage containers (start/stop/restart), this must be changed to rw.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+networks:
+  # #3019: komodo-core <-> komodo-periphery only. `internal: true` — periphery's
+  # hard-coded OpenDNS lookup has no route off the box.
+  komodo-agent:
+    name: komodo-agent
+    driver: bridge
+    internal: true

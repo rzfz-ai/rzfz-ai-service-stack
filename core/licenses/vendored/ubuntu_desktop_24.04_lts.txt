@@ -1,0 +1,26 @@
+Ubuntu Desktop 24.04 LTS — no single licence text applies
+
+Written by the razzfazz.ai maintainers on 2026-09-09. Curated: this entry is
+not re-fetched by `--refresh`. See provenance.json.
+
+Ubuntu Desktop is a DISTRIBUTION of several thousand separate packages, each
+under its own licence — GPL-2.0, GPL-3.0, LGPL, MIT, BSD, Apache-2.0 and
+others, plus a small set of packages with restricted redistribution terms.
+There is no one document that is "the licence of Ubuntu Desktop", and any
+single page presented as such would be a summary, not a licence.
+
+What actually governs the software on a given machine is the per-package
+licence, and every Ubuntu system carries those texts itself:
+
+    /usr/share/doc/<package>/copyright
+
+Canonical's own licensing policy — which covers the trademark, the archive and
+the terms for the restricted components — is published at:
+
+    https://ubuntu.com/licensing
+
+Why this file exists instead of that page: an earlier revision vendored the
+rendered page (6904 lines of navigation, scripts and marketing copy) as if it
+were a licence text. It was not one, and its checksum would have changed on
+every refresh for reasons that have nothing to do with licensing — which would
+have trained every reviewer to wave the diff through.
