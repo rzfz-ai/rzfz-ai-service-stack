@@ -1,0 +1,304 @@
+/* razzfazz-base.css — shared baseline styling for the 5 Flask UI containers
+ *
+ * M026 S06: consolidates CSS that was previously inlined (or duplicated in
+ * per-container styles.css) across razzfazz-licenses, razzfazz-help,
+ * razzfazz-setup, razzfazz-backup-management, razzfazz-config.
+ *
+ * Served via the `razzfazz_common.flask_app.create_base_app` factory at the
+ * URL prefix /static/razzfazz-common/razzfazz-base.css. Each container's
+ * own /static/ namespace is untouched.
+ *
+ * Class naming uses the `razz-*` prefix to avoid collision with existing
+ * per-container classes (.panel, .button, .card, .badge, ...). S07 will
+ * migrate those one container at a time; until then, both old and new
+ * classes can coexist.
+ *
+ * NOTE on divergence resolved in this file:
+ *   - border-radius: containers used 4px / 6px / 8px / 12px in different
+ *     places. We standardise on 8px for cards/panels (matches help, setup,
+ *     backup-management, config) and 6px for buttons/inputs (matches
+ *     config). Licenses' 12px is intentional emphasis only on the very
+ *     outer license-card and stays container-local.
+ *   - text colour: containers split between #333 (licenses, help, setup,
+ *     backup) and #1a1a1a (config). We pick #1a1a1a as the new primary
+ *     so the design lines up with the M026 config rewrite; the lighter
+ *     #555/#777 stay available as muted/secondary tokens.
+ *   - brand-hover red: licenses/help use #a00f11–#a01214, config uses
+ *     #b01416. Picking #b01416 (config) — the others are <2% darker and
+ *     visually indistinguishable; consistency wins.
+ */
+
+
+/* ============================================================ */
+/* 1. Custom Properties                                          */
+/* ============================================================ */
+:root {
+    /* Brand */
+    --razz-red:          #CD1719;
+    --razz-red-hover:    #b01416;
+    --razz-red-soft:     rgba(205, 23, 25, 0.08);
+    --razz-red-tint:     rgba(205, 23, 25, 0.03);
+
+    /* Surfaces */
+    --razz-bg-dark:      #1a1a1a;
+    --razz-bg-card:      rgba(255, 255, 255, 0.95);
+    --razz-bg-sidebar:   rgba(255, 255, 255, 0.90);
+    --razz-bg-soft:      #f8f9fa;
+    --razz-bg-muted:     #f3f4f6;
+
+    /* Text */
+    --razz-text:         #1a1a1a;
+    --razz-text-secondary: #555;
+    --razz-text-muted:   #777;
+
+    /* Borders */
+    --razz-border:       rgba(0, 0, 0, 0.10);
+    --razz-border-strong: rgba(0, 0, 0, 0.15);
+    --razz-border-soft:  #e5e7eb;
+
+    /* Shape */
+    --razz-radius:       8px;       /* cards, panels */
+    --razz-radius-sm:    6px;       /* buttons, inputs */
+    --razz-radius-pill:  999px;     /* pills */
+
+    /* Spacing */
+    --razz-spacing-xs:   0.25rem;
+    --razz-spacing-sm:   0.5rem;
+    --razz-spacing-md:   1rem;
+    --razz-spacing-lg:   1.5rem;
+    --razz-spacing-xl:   2rem;
+
+    /* Status */
+    --razz-success:      #22c55e;
+    --razz-success-bg:   #dcfce7;
+    --razz-success-fg:   #166534;
+    --razz-warn:         #eab308;
+    --razz-warn-bg:      #fef3c7;
+    --razz-warn-fg:      #92400e;
+    --razz-error:        #ef4444;
+    --razz-error-bg:     #fee2e2;
+    --razz-error-fg:     #991b1b;
+    --razz-info-bg:      #dbeafe;
+    --razz-info-fg:      #1e40af;
+}
+
+
+/* ============================================================ */
+/* 2. Typography                                                 */
+/* ============================================================ */
+.razz-font-base {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 Helvetica, Arial, sans-serif;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--razz-text);
+}
+
+.razz-h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--razz-red);
+    margin: 0;
+    letter-spacing: -0.5px;
+}
+
+.razz-h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--razz-red);
+    border-bottom: 2px solid var(--razz-red);
+    padding-bottom: 0.3rem;
+    margin: 0 0 var(--razz-spacing-md);
+}
+
+.razz-h3 {
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: var(--razz-red);
+    margin: var(--razz-spacing-md) 0 var(--razz-spacing-sm);
+}
+
+
+/* ============================================================ */
+/* 3. Layout primitives                                          */
+/* ============================================================ */
+.razz-header {
+    background-color: rgba(255, 255, 255, 0.95);
+    padding: 15px 20px;
+    display: flex;
+    align-items: center;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+.razz-header img { height: 48px; margin-right: 15px; }
+.razz-header h1 { color: var(--razz-red); font-size: 24px; margin: 0; flex: 1; }
+
+.razz-container {
+    max-width: 1100px;
+    margin: 20px auto;
+    padding: 20px;
+}
+
+.razz-sidebar {
+    background: var(--razz-bg-sidebar);
+    backdrop-filter: blur(8px);
+    position: fixed;
+    top: 0; left: 0;
+    width: 240px;
+    height: 100vh;
+    padding: 1rem 0;
+    border-right: 1px solid var(--razz-border);
+    overflow-y: auto;
+}
+
+.razz-card {
+    background: var(--razz-bg-card);
+    border: 1px solid var(--razz-border);
+    border-radius: var(--razz-radius);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    overflow: hidden;
+}
+
+.razz-panel {
+    background: var(--razz-bg-card);
+    border-radius: var(--razz-radius);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    padding: var(--razz-spacing-md) 1.25rem;
+    margin-bottom: var(--razz-spacing-md);
+}
+
+
+/* ============================================================ */
+/* 4. Form elements                                              */
+/* ============================================================ */
+.razz-button {
+    background-color: var(--razz-red);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: var(--razz-radius-sm);
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+.razz-button:hover { background-color: var(--razz-red-hover); }
+.razz-button:disabled { background-color: #ccc; cursor: not-allowed; }
+
+.razz-button-secondary {
+    background-color: #666;
+    color: #fff;
+}
+.razz-button-secondary:hover { background-color: #444; }
+
+.razz-button-small {
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
+.razz-button-danger {
+    background-color: #dc3545;
+}
+.razz-button-danger:hover { background-color: #c82333; }
+
+.razz-input,
+.razz-select,
+.razz-textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--razz-border-soft);
+    border-radius: var(--razz-radius-sm);
+    box-sizing: border-box;
+    font-size: 14px;
+    font-family: inherit;
+    transition: border-color 0.2s;
+}
+.razz-input:focus,
+.razz-select:focus,
+.razz-textarea:focus {
+    border-color: var(--razz-red);
+    outline: none;
+}
+.razz-textarea { min-height: 6em; resize: vertical; }
+
+
+/* ============================================================ */
+/* 5. Tables                                                     */
+/* ============================================================ */
+.razz-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.razz-table th,
+.razz-table td {
+    text-align: left;
+    padding: 12px;
+    border-bottom: 1px solid #ddd;
+    vertical-align: middle;
+}
+.razz-table th {
+    background-color: var(--razz-red);
+    color: #fff;
+    font-weight: 600;
+}
+.razz-table tr:last-child td { border-bottom: none; }
+.razz-table tr:hover { background-color: var(--razz-red-tint); }
+
+.razz-table-striped tbody tr:nth-child(even) {
+    background-color: var(--razz-bg-soft);
+}
+
+
+/* ============================================================ */
+/* 6. Utilities                                                  */
+/* ============================================================ */
+.razz-text-muted   { color: var(--razz-text-muted); }
+.razz-text-success { color: var(--razz-success-fg); }
+.razz-text-error   { color: var(--razz-error-fg); }
+.razz-text-warn    { color: var(--razz-warn-fg); }
+
+.razz-badge {
+    display: inline-block;
+    background: #eee;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-weight: 500;
+}
+.razz-badge-success { background: var(--razz-success-bg); color: var(--razz-success-fg); }
+.razz-badge-warning { background: var(--razz-warn-bg);    color: var(--razz-warn-fg); }
+.razz-badge-error   { background: var(--razz-error-bg);   color: var(--razz-error-fg); }
+.razz-badge-info    { background: var(--razz-info-bg);    color: var(--razz-info-fg); }
+
+.razz-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: var(--razz-radius-pill);
+    background: var(--razz-bg-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--razz-text-secondary);
+}
+
+.razz-flash {
+    padding: 15px 20px;
+    border-radius: var(--razz-radius);
+    margin-bottom: var(--razz-spacing-md);
+}
+.razz-flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+.razz-flash-error   { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+
+/* ============================================================ */
+/* 7. Responsive (mobile breakpoint ~768px)                      */
+/* ============================================================ */
+@media (max-width: 768px) {
+    .razz-container { padding: var(--razz-spacing-md); margin: var(--razz-spacing-sm) auto; }
+    .razz-sidebar   { position: static; width: 100%; height: auto; }
+    .razz-header    { padding: 12px 15px; }
+    .razz-header h1 { font-size: 18px; }
+}

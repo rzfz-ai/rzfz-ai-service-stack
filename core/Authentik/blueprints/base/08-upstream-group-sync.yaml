@@ -1,0 +1,223 @@
+version: 1
+metadata:
+  name: "Base - Upstream group sync (#2473)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+# #2473 decision record D4. The Entra/Google source property mappings return the
+# user's upstream group ids as attributes.rzfz_upstream_ids at every source
+# login. On Authentik 2026.8.3 an existing user's re-login puts that result only
+# into the flow's prompt_data (core/sources/flow_manager.py handle_auth); no stage
+# of default-source-authentication writes it to the user. So THIS policy, bound
+# on the source login stage (evaluated when the stage is reached, so the user
+# exists), reads the fresh ids from prompt_data, saves them itself (REPLACING the
+# stored list: no union, no update_attributes, whose list merge never shrinks),
+# stamps rzfz_upstream_ok_at, and adds/removes membership in every group that
+# carries attributes.rzfz_upstream_ids (the admin-editable mapping). Groups
+# without that attribute are never touched. Always returns True (it gates nothing).
+#
+# Fail-closed rules (privilege-sensitive: a mapped group can carry admin rights):
+# - The policy acts only on a login through the Entra or Google source (flow
+#   context "source", by slug). Any other source (a later SAML/LDAP/OAuth source
+#   whose mappings could also emit rzfz_upstream_ids) changes nothing.
+# - The policy removes ONLY a membership it added itself. Every group it adds a
+#   user to is recorded (by group pk) in the user attribute rzfz_upstream_owned,
+#   and that record is saved BEFORE the membership is created. A membership an
+#   admin assigned by hand is never removed, even in a mapped group.
+# - "razzfazz.ai Super Admins", "authentik Admins", the operator's app-admin
+#   group(s) (SSO_ADMIN_GROUP, OWUI_OAUTH_ADMIN_ROLES, each split on ","; read at
+#   evaluation from the Authentik process environment, which loads .env, as data
+#   and never templated into the code; unset = nothing), any group with
+#   is_superuser, and any group below one
+#   of those are never a target, whatever their mapping says. Names compare
+#   case-insensitively with whitespace collapsed. The admin MFA stage (D11) runs
+#   BEFORE this login stage, so an admin right granted here would skip that
+#   login's MFA check. A membership the sync added to a group that has since
+#   become such a group is removed.
+# - No fresh ids (the mapping returned {} on an outage, a refused call or a
+#   missing scope): the stored ids are used while the last successful lookup is
+#   at most MAX_STALE_HOURS old. After that, or with no successful lookup on
+#   record, every membership the sync added is dropped (logged as a warning):
+#   a failing lookup loses sync-granted groups, it never keeps them forever.
+#   [] is a successful "no groups" answer.
+# - A malformed claim or ownership record changes nothing (a malformed fresh
+#   claim counts as a failed lookup), a malformed group mapping skips that group,
+#   each with a warning. The policy never raises: a failing policy on this
+#   binding would drop the login stage and lock the user out, and the binding's
+#   failure_result is true for the same reason.
+entries:
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "razzfazz.ai - Reconcile upstream groups"
+    attrs:
+      execution_logging: false
+      expression: |
+        import os
+        import time
+        # N3: the sources this sync ships; any other source's login changes nothing.
+        SOURCES = ("entra", "google")
+        KEY, OWNED, OK_AT = "rzfz_upstream_ids", "rzfz_upstream_owned", "rzfz_upstream_ok_at"
+        # Hours without a successful upstream lookup after which the sync-added
+        # memberships are dropped.
+        MAX_STALE_HOURS = 24
+
+        def _norm(name):
+            return " ".join(str(name).split()).casefold()
+
+        # The operator's app-admin groups are read from the process environment
+        # (authentik-server/-worker load ../.env) as DATA: no templating into this
+        # code, so no .env value can break or inject it. Each value is refused
+        # whole AND split on "," (Open WebUI splits its roles; a group name may
+        # itself contain a comma): refusing too much is the safe direction.
+        _admin_env = [os.environ.get(k, "") for k in ("SSO_ADMIN_GROUP", "OWUI_OAUTH_ADMIN_ROLES")]
+        REFUSED = {_norm(n) for n in ["razzfazz.ai Super Admins", "authentik Admins"]
+                   + _admin_env + [p for v in _admin_env for p in v.split(",")]
+                   if _norm(n)}
+
+        def _ids(value):
+            # A list of non-empty strings, normalised; anything else is None (malformed).
+            if not isinstance(value, (list, tuple)):
+                return None
+            out = set()
+            for v in value:
+                if not isinstance(v, str) or not v.strip():
+                    return None
+                out.add(v.strip().lower())
+            return out
+
+        def _refused(group):
+            # An admin group, a superuser group, or a group below one. Unknown = refused.
+            try:
+                seen, todo = set(), [group]
+                while todo:
+                    cur = todo.pop()
+                    if cur is None:
+                        continue
+                    key = str(getattr(cur, "pk", id(cur)))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if len(seen) > 64:
+                        return True
+                    if _norm(getattr(cur, "name", "")) in REFUSED or getattr(cur, "is_superuser", False) is not False:
+                        return True
+                    todo.append(getattr(cur, "parent", None))
+                    parents = getattr(cur, "parents", None)
+                    if parents is not None:
+                        todo.extend(list(parents.all()))
+                return False
+            except Exception:
+                return True
+
+        who = None
+        try:
+            from authentik.core.models import Group
+            source = request.context.get("source")
+            if getattr(source, "slug", None) not in SOURCES:
+                ak_logger.debug("rzfz-upstream-sync: not an Entra/Google source login, nothing changed",
+                                source=getattr(source, "slug", None))
+                return True
+            user = request.context.get("pending_user") or request.user
+            if user is None or not getattr(user, "pk", None):
+                return True
+            who = getattr(user, "username", None)
+            attrs = getattr(user, "attributes", None)
+            if not isinstance(attrs, dict):
+                return True
+            owned = _ids(attrs.get(OWNED, []))
+            if owned is None:
+                ak_logger.warning("rzfz-upstream-sync: malformed ownership record, nothing changed", user=who)
+                return True
+            now = time.time()
+            prompt = request.context.get("prompt_data")
+            prompt = prompt.get("attributes") if isinstance(prompt, dict) else None
+            raw = prompt.get(KEY) if isinstance(prompt, dict) else None
+            fresh = _ids(raw) if raw is not None else None
+            if raw is not None and fresh is None:
+                ak_logger.warning("rzfz-upstream-sync: malformed fresh ids, counted as a failed lookup", user=who)
+            persist = {}
+            if fresh is not None:
+                ids = fresh
+                persist = {KEY: sorted(fresh), OK_AT: now}
+            else:
+                ok_at = attrs.get(OK_AT)
+                recent = isinstance(ok_at, (int, float)) and -300 <= now - ok_at <= MAX_STALE_HOURS * 3600
+                stored = _ids(attrs.get(KEY)) if KEY in attrs else None
+                if recent and stored is not None:
+                    ids = stored
+                elif recent:
+                    if KEY in attrs:
+                        ak_logger.warning("rzfz-upstream-sync: malformed stored ids, nothing changed", user=who)
+                    return True
+                else:
+                    if not owned:
+                        return True
+                    ak_logger.warning("rzfz-upstream-sync: no successful upstream lookup within the limit, "
+                                      "dropping sync-added groups", user=who, hours=MAX_STALE_HOURS)
+                    ids = set()
+            adds, removes, dropped = [], [], set()
+            for g in Group.objects.filter(attributes__has_key=KEY):
+                gkey = str(g.pk).lower()
+                mapped = _ids((g.attributes or {}).get(KEY))
+                if mapped is None:
+                    ak_logger.warning("rzfz-upstream-sync: malformed group mapping, group skipped", group=g.name)
+                    continue
+                member = g.users.filter(pk=user.pk).exists()
+                if _refused(g):
+                    ak_logger.warning("rzfz-upstream-sync: refused target, an admin group is never synced", group=g.name)
+                    if gkey in owned:
+                        if member:
+                            removes.append(g)
+                        dropped.add(gkey)
+                    continue
+                wanted = bool(mapped & ids)
+                if wanted and not member:
+                    adds.append(g)
+                elif not wanted and gkey in owned:
+                    if member:
+                        removes.append(g)
+                    dropped.add(gkey)
+            if not adds and not removes and not dropped and not persist:
+                return True
+            claimed = owned | {str(g.pk).lower() for g in adds}
+            if claimed != owned or persist:
+                attrs.update(persist)
+                attrs[OWNED] = sorted(claimed)
+                user.save(update_fields=["attributes"])
+            for g in adds:
+                g.users.add(user)
+                ak_logger.info("rzfz-upstream-sync add", group=g.name, user=who)
+            for g in removes:
+                g.users.remove(user)
+                ak_logger.info("rzfz-upstream-sync remove", group=g.name, user=who)
+            attrs[OWNED] = sorted(claimed - dropped)
+            user.save(update_fields=["attributes"])
+        except Exception as exc:
+            ak_logger.warning("rzfz-upstream-sync: reconcile failed, login continues", user=who, error=repr(exc)[:300])
+        return True
+
+  - model: authentik_flows.flowstagebinding
+    id: source-login-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-source-authentication]]
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, default-source-authentication-login]]
+    attrs:
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf source-login-binding
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, "razzfazz.ai - Reconcile upstream groups"]]
+      order: 0
+    attrs:
+      enabled: true
+      timeout: 30
+      # A timeout or an error must never drop the login stage (a lock-out).
+      failure_result: true
+
+  # D4: a removal upstream takes effect at the next login; cap source sessions at 8 h.
+  - model: authentik_stages_user_login.userloginstage
+    identifiers:
+      name: default-source-authentication-login
+    attrs:
+      session_duration: "hours=8"

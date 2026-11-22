@@ -1,0 +1,124 @@
+<!-- #2526 / #2527: the stack's own security events, by container name
+     (the rzfz.container label written by scripts/install-wazuh-agent.sh). 100400-100499. -->
+<group name="rzfz,stack,">
+  <rule id="100400" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="rzfz.container" type="pcre2">.+</field>
+    <description>rzfz.ai container $(rzfz.container)</description>
+  </rule>
+
+  <rule id="100401" level="5">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <!-- Real Authentik writes the failure as "action": "login_failed" with
+         "event": "Created Event" (measured 2026-10-14); key on action. -->
+    <field name="log" type="pcre2">"action": ?"login_failed"</field>
+    <description>Authentik: failed login</description>
+    <group>authentication_failed,</group>
+  </rule>
+  <rule id="100402" level="10" frequency="8" timeframe="120">
+    <if_matched_sid>100401</if_matched_sid>
+    <description>Authentik: 8 failed logins within 2 minutes</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <!-- Caddy, two sources with one rule pair each. Neither matches text a
+       client controls: inside every JSON string a quote is escaped, so an
+       unescaped `,"status":` (or `{"status":`) is only ever the real key -
+       a request for /x"status":500 cannot raise these (#2526 review).
+       100403/100404: the container's stdout, the access log nested in the
+       docker "log" string (today only the :8195 SSRF proxy logs there). -->
+  <rule id="100403" level="4">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^caddy$</field>
+    <field name="log" type="pcre2">[,{]"logger":"http\.log\.access[^"]*".*[,{]"status":5\d\d[,}]</field>
+    <description>Caddy: 5xx answer</description>
+    <group>rzfz_caddy_5xx,</group>
+  </rule>
+  <rule id="100404" level="3">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^caddy$</field>
+    <field name="log" type="pcre2">[,{]"logger":"http\.log\.access[^"]*".*[,{]"status":40[13][,}]</field>
+    <description>Caddy: 401/403 answer</description>
+    <group>rzfz_caddy_refused,</group>
+  </rule>
+  <!-- 100413/100414: the minimal access-log file of the stack sites
+       (data/caddy-access/access.log, plain JSON), on the DECODED top-level
+       fields, which the JSON encoder alone writes. -->
+  <rule id="100413" level="4">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^caddy$</field>
+    <field name="logger" type="pcre2">^http\.log\.access</field>
+    <status type="pcre2">^5\d\d$</status>
+    <description>Caddy: 5xx answer on $(request.host)</description>
+    <group>rzfz_caddy_5xx,</group>
+  </rule>
+  <rule id="100414" level="3">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^caddy$</field>
+    <field name="logger" type="pcre2">^http\.log\.access</field>
+    <status type="pcre2">^40[13]$</status>
+    <description>Caddy: 401/403 answer on $(request.host)</description>
+    <group>rzfz_caddy_refused,</group>
+  </rule>
+  <rule id="100405" level="8" frequency="50" timeframe="60">
+    <!-- either source: both pairs carry the rzfz_caddy_refused group -->
+    <if_matched_group>rzfz_caddy_refused</if_matched_group>
+    <description>Caddy: 50 refused requests within a minute</description>
+    <group>recon,</group>
+  </rule>
+
+  <rule id="100406" level="8">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^gitea$</field>
+    <field name="log" type="pcre2">completed (POST|PUT|PATCH|DELETE) /(api/v1/admin/|-/admin/)</field>
+    <description>Gitea: admin action</description>
+    <group>admin_action,</group>
+  </rule>
+
+  <rule id="100407" level="5">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^vaultwarden$</field>
+    <field name="log" type="pcre2">Username or password is incorrect</field>
+    <description>Vaultwarden: failed login</description>
+    <group>authentication_failed,</group>
+  </rule>
+  <rule id="100408" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>100407</if_matched_sid>
+    <description>Vaultwarden: 6 failed logins within 2 minutes</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100409" level="6">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^llm-manager$</field>
+    <!-- Admin changes only. The node agents' own calls are not: registration
+         (POST /api/workers, every report cycle), /api/workers/enroll and the
+         per-worker heartbeats /metrics, /commands/claim and /relay (about 44
+         a minute per worker, measured 2026-10-14). -->
+    <field name="log" type="pcre2">"(POST|PUT|PATCH|DELETE) /api/(deployments|keys|workers/(?!enroll[ ?"]|[^/ ?"]+/(metrics|commands/claim|relay)[ ?"]))</field>
+    <description>LLM Manager: admin API change</description>
+    <group>admin_action,</group>
+  </rule>
+
+  <rule id="100410" level="3">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^openuem-</field>
+    <description>OpenUEM: $(rzfz.container) event</description>
+  </rule>
+  <rule id="100411" level="7">
+    <if_sid>100410</if_sid>
+    <field name="log" type="pcre2">\[(ERROR|FATAL)\]</field>
+    <description>OpenUEM: error in $(rzfz.container)</description>
+  </rule>
+  <!-- The console's downloads fail by design on a box without internet access
+       (docs/enterprise/how-to/openuem.md, "One outbound connection"): the
+       release check (every two minutes), the winget index.db and the
+       flatpak.db (measured 2026-10-14). Level 0 keeps them out of the alerts;
+       every other OpenUEM error still raises 100411. -->
+  <rule id="100412" level="0">
+    <if_sid>100411</if_sid>
+    <field name="log" type="pcre2">could not get (latest agent releases|index\.db|flatpak\.db)\b</field>
+    <description>OpenUEM: download failed (expected on an offline box)</description>
+  </rule>
+</group>

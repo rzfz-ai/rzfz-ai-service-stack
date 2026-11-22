@@ -1,0 +1,311 @@
+#!/bin/bash
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# #2559: install this Mac (Apple silicon) as a managed thin worker of
+# @@RZFZ_MASTER_URL@@.
+#
+# Run the line from Fleet → Add worker → macOS. It authenticates the master's CA
+# against the pin, then fetches this script, rendered, from the master's
+# /install-mac-worker route — the ONLY place this script is served. The body
+# carries no secret; the enrolment token arrives in RZFZ_ENROLL_TOKEN at run time.
+#
+#   … | RZFZ_ENROLL_TOKEN=<token> bash -s -- [--ca-pin sha256:<hex>] [--name <worker>] [--advertise <addr>]
+#
+# What it does, in order (nothing changes before step 3):
+#   1. checks: Apple-silicon macOS, not root, the tools it needs
+#   2. into a private temp dir: the master's CA (pinned) and the agent bundle
+#      (sha256). The bundle names the worker's own Ollama port
+#      (mac-agent/ollama-port.conf); the installer refuses when anything but the
+#      managed ai.razzfazz.ollama daemon listens on THAT port — it names the
+#      process, never kills. An Ollama the Mac already runs on Ollama's default
+#      port (Ollama.app, a brew service) is on another port and stays untouched.
+#   3. /opt/rzfz-worker: the CA, releases/<digest>/ with `current` pointing at it
+#   4. uv and Ollama at the bundle's pins (sha256), the release's own venv
+#   5. enrols in Python (the token goes in on stdin), writes .env.node (0600)
+#      with the worker's Ollama port
+#   6. two LaunchDaemons as THIS account, a sudoers drop-in for exactly their two
+#      restarts, and starts both
+#
+# Exit: 0 installed; 2 usage/platform; 3 a verification failed (CA pin, bundle
+# or pinned asset sha256); 4 the worker's Ollama port is held by something
+# else; 1 anything else.
+# bash 3.2-safe (macOS ships 3.2): no arrays, no ${v,,}, no mapfile, no |&.
+set -euo pipefail
+
+MASTER="@@RZFZ_MASTER_URL@@"
+RENDERED_CA_PIN="@@RZFZ_CA_PIN@@"
+ROOT="${RZFZ_WORKER_DIR:-/opt/rzfz-worker}"
+LAUNCHD_DIR="/Library/LaunchDaemons"
+SUDOERS_FILE="/etc/sudoers.d/rzfz-worker"
+OLLAMA_LABEL="ai.razzfazz.ollama"
+AGENT_LABEL="ai.razzfazz.worker-agent"
+SYSTEM_ROOTS="/etc/ssl/cert.pem"
+
+die() { local rc="$1"; shift; echo "install-mac-worker: $*" >&2; exit "$rc"; }
+note() { echo "  ok  $*"; }
+
+TOKEN="${RZFZ_ENROLL_TOKEN:-}"; NAME=""; CA_PIN=""; ADVERTISE=""   # #2608: env, not argv
+unset RZFZ_ENROLL_TOKEN
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --token)     [ $# -ge 2 ] || die 2 "--token needs a value"; TOKEN="$2"; shift 2 ;;
+        --name)      [ $# -ge 2 ] || die 2 "--name needs a value"; NAME="$2"; shift 2 ;;
+        --ca-pin)    [ $# -ge 2 ] || die 2 "--ca-pin needs a value"; CA_PIN="$2"; shift 2 ;;
+        --advertise) [ $# -ge 2 ] || die 2 "--advertise needs a value"; ADVERTISE="$2"; shift 2 ;;
+        -h|--help)   sed -n '2,32p' "$0" 2>/dev/null || true; exit 0 ;;
+        *)           die 2 "unknown option: $1" ;;
+    esac
+done
+
+# ── 1. checks (nothing changes yet) ──────────────────────────────────────────
+case "$MASTER" in
+    https://*) MASTER="${MASTER%/}" ;;
+    http://*)
+        # plain http only on loopback (a local test master): elsewhere the CA
+        # pin and the bundle sha256 mean nothing, and agent-upgrade.sh refuses
+        # an http master — this Mac could never upgrade itself
+        hostport="${MASTER#http://}"; hostport="${hostport%%/*}"
+        case "$hostport" in
+            127.0.0.1|127.0.0.1:*|localhost|localhost:*|"[::1]"|"[::1]:"*) MASTER="${MASTER%/}" ;;
+            *) die 2 "the master URL $MASTER is plain http — a Mac worker installs only from an https:// master (set its advertise URL to https)" ;;
+        esac ;;
+    *) die 2 "this copy was not rendered by a master — run the line from Fleet → Add worker (it fetches <master>/install-mac-worker)" ;;
+esac
+pin_re='^sha256:[0-9a-f]{64}$'
+name_re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$'
+# the account goes into a sudoers rule and a plist: a macOS short name
+# (letters, digits, '.', '_', '-'; not starting with '-'; at most 255) —
+# `first.last` and uppercase included — but never a sudoers word: not ALL, and
+# not an all-uppercase name, which sudoers reads as a User_Alias. Checked
+# before anything is written.
+account_re='^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254}$'
+alias_re='^[A-Z][A-Z0-9_]*$'
+# sudoers keywords: at the start of a rule line they open a Defaults entry or
+# an alias definition instead of naming a user
+keyword_re='^(Defaults|User_Alias|Runas_Alias|Host_Alias|Cmnd_Alias|Cmd_Alias)$'
+addr_re='^[A-Za-z0-9_.:-]{1,253}$'
+root_re='^/[A-Za-z0-9/_.-]+$'
+# the console's pin (out of band) wins; the rendered one is the fallback
+[ -n "$CA_PIN" ] || CA_PIN="$RENDERED_CA_PIN"
+if [ -n "$CA_PIN" ] && ! [[ $CA_PIN =~ $pin_re ]]; then
+    die 2 "--ca-pin must look like sha256:<64 lowercase hex>"
+fi
+[ -n "$TOKEN" ] || die 2 "--token is required (Fleet → Add worker mints one)"
+[ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die 2 "this installer is for Apple-silicon macOS only"
+[ "$(id -u)" != 0 ] || die 2 "run it as the account the worker should run as, not as root (it calls sudo where it must)"
+SVC_USER="$(id -un)"
+if ! [[ $SVC_USER =~ $account_re ]]; then
+    die 2 "unsupported account name '$SVC_USER' (a macOS short name: letters, digits, '.', '_', '-', not starting with '-', at most 255)"
+fi
+if [[ $SVC_USER =~ $alias_re ]] || [[ $SVC_USER =~ $keyword_re ]]; then
+    die 2 "unsupported account name '$SVC_USER': it goes into a sudoers rule, where ALL and any all-uppercase name are read as an alias, and Defaults/*_Alias open a sudoers keyword instead of naming a user — run the installer as an account with another short name"
+fi
+[ -n "$NAME" ] || NAME="mac-$(hostname -s)"
+[[ $NAME =~ $name_re ]] || die 2 "--name may use letters, digits, '.', '_' and '-' only"
+if [ -n "$ADVERTISE" ] && ! [[ $ADVERTISE =~ $addr_re ]]; then die 2 "--advertise is not a host[:port]"; fi
+[[ $ROOT =~ $root_re ]] || die 2 "RZFZ_WORKER_DIR must be a plain absolute path"
+for tool in curl openssl shasum tar awk sed lsof launchctl sudo hostname; do
+    command -v "$tool" >/dev/null 2>&1 || die 2 "'$tool' is not available on this Mac"
+done
+
+# ── 2. the CA and the bundle, verified, into a private temp dir ──────────────
+# Nothing under $ROOT yet: the port check below decides whether this Mac gets a
+# worker at all, and the port it checks comes from the verified bundle.
+sudo -v || die 2 "this installer needs sudo (it installs two LaunchDaemons and a sudoers drop-in)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/rzfz-install.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+if [ -n "$CA_PIN" ]; then
+    # the fingerprint formula of install-worker.sh.tmpl and the console line (#1421)
+    curl -fsSk --max-time 30 "$MASTER/api/workers/ca.pem" -o "$WORK/ca.pem" \
+        || die 1 "the master did not serve its CA at $MASTER/api/workers/ca.pem"
+    grep -q 'BEGIN CERTIFICATE' "$WORK/ca.pem" || die 3 "the master's CA endpoint did not return a certificate"
+    fp="sha256:$(openssl x509 -in "$WORK/ca.pem" -outform DER 2>/dev/null \
+                 | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+    [ "$fp" = "$CA_PIN" ] || die 3 "PIN MISMATCH — refusing to install (expected $CA_PIN, served $fp)"
+    # the master's CA FOLLOWED BY the public roots (as worker-join, #585): one
+    # anchor file for the agent's Python, which has no access to the Keychain
+    cp "$WORK/ca.pem" "$WORK/bundle.pem"
+    if [ -f "$SYSTEM_ROOTS" ]; then cat "$SYSTEM_ROOTS" >> "$WORK/bundle.pem"; fi
+    note "master verified: its CA matches the pin"
+else
+    curl -fsS --max-time 30 -o /dev/null "$MASTER/healthz" \
+        || die 3 "cannot verify $MASTER against this Mac's trust store and no --ca-pin was given"
+    [ -f "$SYSTEM_ROOTS" ] || die 1 "$SYSTEM_ROOTS is missing"
+    cp "$SYSTEM_ROOTS" "$WORK/bundle.pem"
+    note "master verified against the system trust store"
+fi
+
+mget() { curl -fsSL --cacert "$WORK/bundle.pem" --max-time 900 "$@"; }
+mget "$MASTER/worker-bundle/generated/mac-agent.tar.gz" -o "$WORK/mac-agent.tar.gz" \
+    || die 1 "could not fetch the agent bundle from $MASTER/worker-bundle/generated/"
+mget "$MASTER/worker-bundle/generated/mac-agent.tar.gz.sha256" -o "$WORK/mac-agent.sha256" \
+    || die 1 "could not fetch the agent bundle's sha256"
+want="$(awk '{ print $1; exit }' "$WORK/mac-agent.sha256")"
+got="$(shasum -a 256 "$WORK/mac-agent.tar.gz" | awk '{ print $1 }')"
+hex_re='^[0-9a-f]{64}$'
+[[ $want =~ $hex_re ]] || die 3 "the master's bundle sha256 is malformed"
+[ "$got" = "$want" ] || die 3 "bundle sha256 mismatch (got $got, the master says $want)"
+mkdir "$WORK/rel"
+tar -xzf "$WORK/mac-agent.tar.gz" -C "$WORK/rel"
+for need in app/native_runtime.py mac-agent/bin/ollama-switch.sh \
+            mac-agent/ollama-port.conf mac-agent/lib/ollama-port.sh; do
+    [ -f "$WORK/rel/$need" ] || die 3 "the bundle is not a Mac agent bundle (it has no $need)"
+done
+# shellcheck source=lib/ollama-port.sh
+. "$WORK/rel/mac-agent/lib/ollama-port.sh"
+OLLAMA_PORT="$(rzfz_ollama_conf "$WORK/rel/mac-agent/ollama-port.conf" RZFZ_OLLAMA_PORT)" \
+    || die 3 "the bundle's ollama-port.conf names no valid RZFZ_OLLAMA_PORT"
+LEGACY_PORT="$(rzfz_ollama_conf "$WORK/rel/mac-agent/ollama-port.conf" RZFZ_OLLAMA_LEGACY_PORT)" \
+    || die 3 "the bundle's ollama-port.conf names no valid RZFZ_OLLAMA_LEGACY_PORT"
+
+# ── the worker's Ollama port belongs to the managed daemon or to nobody (D27) ─
+# lsof via sudo: unprivileged, it lists only this account's sockets.
+port_listeners() { sudo lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true; }
+listener_pids() { printf '%s\n' "$1" | awk 'NR > 1 { print $2 }' | sort -u; }
+managed_pid() {
+    sudo launchctl print "system/$OLLAMA_LABEL" 2>/dev/null \
+        | awk '$1 == "pid" && $2 == "=" { print $3; exit }' || true
+}
+check_managed_port() {
+    local out managed pid foreign=""
+    out="$(port_listeners "$OLLAMA_PORT")"
+    [ -n "$out" ] || return 0
+    managed="$(managed_pid)"
+    for pid in $(listener_pids "$out"); do
+        if [ -n "$managed" ] && [ "$pid" = "$managed" ]; then continue; fi
+        foreign="$foreign $pid"
+    done
+    [ -n "$foreign" ] || return 0
+    {
+        echo "install-mac-worker: port $OLLAMA_PORT — the port this worker's own Ollama runs on — is held by a process that is not the managed $OLLAMA_LABEL daemon:"
+        printf '%s\n' "$out" | sed 's/^/    /'
+        echo "  Nothing was changed, and that process was left running."
+        echo "  Stop whatever listens on port $OLLAMA_PORT, then run this line again."
+    } >&2
+    exit 4
+}
+check_managed_port
+# Ollama's default port: an Ollama of this Mac's own is told about and left
+# alone. The managed daemon of an earlier install sits there too — this
+# re-install moves it (the models directory stays where it is).
+legacy="$(port_listeners "$LEGACY_PORT")"
+if [ -n "$legacy" ]; then
+    mpid="$(managed_pid)"
+    lpids=" $(listener_pids "$legacy" | tr '\n' ' ')"
+    case "$lpids" in
+        *" ${mpid:-none} "*)
+            note "the managed Ollama of an earlier install runs on port $LEGACY_PORT — it moves to port $OLLAMA_PORT, its models stay" ;;
+        *)
+            echo "  info found an Ollama on $LEGACY_PORT; it stays untouched (this worker's Ollama uses port $OLLAMA_PORT)" ;;
+    esac
+fi
+
+# ── 3. the root, the master's CA, the release ────────────────────────────────
+sudo mkdir -p "$ROOT"
+sudo chown "$SVC_USER" "$ROOT"
+chmod 0755 "$ROOT"
+mkdir -p "$ROOT/logs" "$ROOT/ollama" "$ROOT/ollama-models" "$ROOT/releases" "$ROOT/certs"
+CA_BUNDLE="$ROOT/certs/master-ca.pem"
+cp "$WORK/bundle.pem" "$CA_BUNDLE"
+chmod 0644 "$CA_BUNDLE"
+REL="$ROOT/releases/$(printf '%s' "$got" | cut -c1-12)"
+if [ "$(cat "$REL/.digest" 2>/dev/null || true)" != "sha256:$got" ]; then
+    echo "sha256:$got" > "$WORK/rel/.digest"
+    chmod -R go-w "$WORK/rel"
+    rm -rf "$REL"
+    mv "$WORK/rel" "$REL"
+fi
+note "agent bundle sha256:$(printf '%s' "$got" | cut -c1-12) unpacked to $REL"
+
+# ── 4. uv, the release's venv, then the flip, then Ollama — at the bundle's
+#       OWN pins (finding 16) ─────────────────────────────────────────────────
+PINS="$REL/mac-agent/pins.json"   # read in place; never copied out of the bundle
+# shellcheck source=lib/pins.sh
+. "$REL/mac-agent/lib/pins.sh"
+uv_url="$(rzfz_pin "$PINS" uv url)"; uv_sha="$(rzfz_pin "$PINS" uv sha256)"
+[ -n "$uv_url" ] && [ -n "$uv_sha" ] || die 1 "the bundle's pins.json has no uv pin"
+if [ ! -x "$ROOT/uv/uv" ] || [ "$(cat "$ROOT/uv/.sha256" 2>/dev/null || true)" != "$uv_sha" ]; then
+    curl -fsSL --max-time 900 -o "$WORK/uv.tgz" "$uv_url" || die 1 "could not download $uv_url"
+    [ "$(shasum -a 256 "$WORK/uv.tgz" | awk '{ print $1 }')" = "$uv_sha" ] || die 3 "uv sha256 does not match the pin"
+    rm -rf "$ROOT/uv"; mkdir -p "$ROOT/uv"
+    tar -xzf "$WORK/uv.tgz" -C "$ROOT/uv" --strip-components 1
+    echo "$uv_sha" > "$ROOT/uv/.sha256"
+fi
+# the release's OWN venv (D33): the LaunchDaemon runs current/venv/bin/python,
+# so agent-upgrade.sh's flip and rollback move the interpreter with the code
+UV_PYTHON_INSTALL_DIR="$ROOT/python" UV_CACHE_DIR="$ROOT/.uv-cache" \
+    "$ROOT/uv/uv" venv --allow-existing --managed-python --python 3.12 "$REL/venv" \
+    || die 1 "the release's venv did not build — current was not changed"
+UV_PYTHON_INSTALL_DIR="$ROOT/python" UV_CACHE_DIR="$ROOT/.uv-cache" \
+    "$ROOT/uv/uv" pip install --python "$REL/venv/bin/python" -r "$REL/mac-agent/requirements-macos.txt" \
+    || die 1 "the agent's requirements did not install into $REL/venv — current was not changed"
+# the venv is built after the bundle's go-w pass, under the caller's umask: a
+# 002 umask left the interpreter the LaunchDaemon runs group-writable
+chmod -R go-w "$REL/venv"
+note "Python venv at $REL/venv"
+# only now does `current` move (review n3): a venv that did not build leaves
+# a re-installed Mac on the release it was running
+ln -sfn "$REL" "$ROOT/current"
+note "current → $REL"
+ollama_version="$(rzfz_pin "$PINS" ollama version)"
+RZFZ_WORKER_DIR="$ROOT" RZFZ_SWITCH_INSTALL_ONLY=1 /bin/bash "$ROOT/current/mac-agent/bin/ollama-switch.sh" "$ollama_version"
+note "Ollama $ollama_version at $ROOT/ollama/current"
+
+# ── 5. enrolment — the token on stdin, never on argv or on disk ──────────────
+printf '%s\n' "$TOKEN" | (
+    cd "$ROOT/current"
+    PYTHONPATH="$ROOT/current" PYTHONDONTWRITEBYTECODE=1 "$ROOT/current/venv/bin/python" -m app.native_runtime enroll \
+        --manager "$MASTER" --name "$NAME" --ca-file "$CA_BUNDLE" --env-file "$ROOT/.env.node" \
+        ${ADVERTISE:+--advertise "$ADVERTISE"}
+) || die 1 "enrolment failed (see above) — nothing was started"
+TOKEN=""
+chmod 0600 "$ROOT/.env.node"
+# the port this worker's Ollama runs on: the agent (app/ollama_port.py),
+# ollama-switch.sh and agent-upgrade.sh read it from here
+printf 'RZFZ_OLLAMA_PORT=%s\n' "$OLLAMA_PORT" >> "$ROOT/.env.node"
+
+# ── 6. services ──────────────────────────────────────────────────────────────
+for label in "$OLLAMA_LABEL" "$AGENT_LABEL"; do
+    sed -e "s#{{USER}}#$SVC_USER#g" -e "s#{{ROOT}}#$ROOT#g" -e "s#{{OLLAMA_PORT}}#$OLLAMA_PORT#g" \
+        "$ROOT/current/mac-agent/launchd/$label.plist.tmpl" > "$WORK/$label.plist"
+    if command -v plutil >/dev/null 2>&1; then
+        plutil -lint -s "$WORK/$label.plist" || die 1 "$label.plist does not parse"
+    fi
+done
+# exactly the two restarts the agent and ollama-switch.sh need — nothing else
+{
+    echo "# #2559 rzfz Mac worker (install-mac-worker): $SVC_USER may restart its two services."
+    echo "$SVC_USER ALL=(root) NOPASSWD: /bin/launchctl kickstart -k system/$OLLAMA_LABEL"
+    echo "$SVC_USER ALL=(root) NOPASSWD: /bin/launchctl kickstart -k system/$AGENT_LABEL"
+} > "$WORK/sudoers"
+sudo visudo -cf "$WORK/sudoers" >/dev/null || die 1 "the sudoers drop-in did not validate — nothing installed"
+# copied next to it, then renamed: sudo never reads a half-written drop-in
+# (it skips dot-names in includedir)
+sudo install -m 0440 -o root -g wheel "$WORK/sudoers" "$(dirname "$SUDOERS_FILE")/.rzfz-worker.tmp"
+sudo mv -f "$(dirname "$SUDOERS_FILE")/.rzfz-worker.tmp" "$SUDOERS_FILE"
+for label in "$OLLAMA_LABEL" "$AGENT_LABEL"; do
+    sudo install -m 0644 -o root -g wheel "$WORK/$label.plist" "$LAUNCHD_DIR/$label.plist"
+done
+for label in "$OLLAMA_LABEL" "$AGENT_LABEL"; do
+    sudo launchctl bootout "system/$label" >/dev/null 2>&1 || true
+    sudo launchctl enable "system/$label"
+    tries=0
+    until sudo launchctl bootstrap system "$LAUNCHD_DIR/$label.plist"; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 5 ] || die 1 "launchctl could not start $label — see $ROOT/logs/"
+        sleep 1
+    done
+done
+
+# the PINNED version must answer on the worker's port — anything else there is
+# not ours. Loopback never goes through the shell's http_proxy.
+waited=0
+until case "$(curl -fsS --noproxy '*' --max-time 2 "http://127.0.0.1:$OLLAMA_PORT/api/version" 2>/dev/null || true)" in
+          *"\"$ollama_version\""*) true ;; *) false ;; esac; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 30 ] || die 1 "Ollama $ollama_version did not answer on 127.0.0.1:$OLLAMA_PORT within 60 s — see $ROOT/logs/ollama.log"
+    sleep 2
+done
+note "Ollama answers on 127.0.0.1:$OLLAMA_PORT (loopback only)"
+echo "Installed. The worker appears in Fleet as '$NAME' within a minute (agent log: $ROOT/logs/worker-agent.log)."

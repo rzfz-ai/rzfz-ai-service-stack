@@ -1,0 +1,56 @@
+{# #2422: one GPU/VRAM pair per worker the LLM Manager reports. An external
+   backend (e.g. federated GPUStack) has no agent sample; its GPU is in the
+   base GPU tiles above, so it gets a one-line card, not an empty pair. A failed
+   fetch says why instead of looking like a CPU box. gpu_pct / vram_pct None
+   render an em-dash, no bar. Sourced from get_workers() in the dashboard route. #}
+{% if llm_workers_reason %}
+<div class="card stat">
+    <div class="k">LLM workers</div>
+    <div class="v">&mdash;</div>
+    <div class="sub">{{ llm_workers_reason }}</div>
+</div>
+{% endif %}
+{% for w in llm_workers | default([]) %}
+{% if w.external %}
+<div class="card stat">
+    <div class="k">GPU &mdash; {{ w.name }}</div>
+    <div class="v">&mdash;</div>
+    <div class="sub">external backend &mdash; sampled in the GPU tiles above</div>
+</div>
+{% else %}
+{# Why a sample is missing, from what the view knows: a worker that is not
+   ready, one that never reported, a CPU-only worker, or one reporting no GPU. #}
+{% if w.status and w.status != 'ready' %}{% set why = 'worker is ' ~ w.status %}
+{% elif not w.has_metrics %}{% set why = 'waiting for the first sample from this worker' %}
+{% elif w.hardware == 'cpu' %}{% set why = 'CPU-only worker' %}
+{% else %}{% set why = 'this worker reports no GPU data' %}{% endif %}
+    <div class="card stat">
+        <div class="k">GPU &mdash; {{ w.name }}</div>
+        {% if w.gpu_pct is not none %}
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ w.gpu_pct }}%;background:{% if w.gpu_pct > 85 %}var(--error){% elif w.gpu_pct > 60 %}var(--warn){% else %}var(--success){% endif %}"></div>
+        </div>
+        <div class="v">{{ w.gpu_pct }}<small>%</small></div>
+        <div class="sub">compute load</div>
+        {% else %}
+        <div class="v">&mdash;</div>
+        <div class="sub">no GPU sample</div>
+        <div class="sub" style="font-size:0.75rem">{{ why }}</div>
+        {% endif %}
+    </div>
+    <div class="card stat">
+        <div class="k">VRAM &mdash; {{ w.name }}</div>
+        {% if w.vram_pct is not none %}
+        <div class="memory-bar" style="margin:0.375rem 0 0.25rem">
+            <div class="memory-bar-fill" style="width:{{ w.vram_pct }}%;background:{% if w.vram_pct > 90 %}var(--error){% elif w.vram_pct > 75 %}var(--warn){% else %}var(--success){% endif %}"></div>
+        </div>
+        <div class="v">{{ w.vram_used_gb }}<small>/ {{ w.vram_total_gb }} GB</small></div>
+        <div class="sub">{{ w.vram_pct }}% used</div>
+        {% else %}
+        <div class="v">&mdash;</div>
+        <div class="sub">no VRAM info</div>
+        <div class="sub" style="font-size:0.75rem">{{ why }}</div>
+        {% endif %}
+    </div>
+{% endif %}
+{% endfor %}

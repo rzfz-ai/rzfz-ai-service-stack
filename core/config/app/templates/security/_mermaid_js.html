@@ -1,0 +1,11 @@
+{# #2564: the docs are rendered server-side; blueprints/security.py emits a
+   ```mermaid fence as <pre class="mermaid">SOURCE</pre> (as core/help does).
+   Load the VENDORED library (same file as
+   core/help/static/vendor/mermaid.min.js — no CDN, air-gap safe) and the hook
+   that draws it, from 'self', and only when the page carries a diagram (the
+   bundle is ~2.6 MB). The source stays in the HTML, so no-JS or a failed render
+   still shows readable text. #}
+{% if doc_html and '<pre class="mermaid">' in doc_html %}
+    <script src="{{ url_for('static', filename='vendor/mermaid.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='security-mermaid.js') }}"></script>
+{% endif %}

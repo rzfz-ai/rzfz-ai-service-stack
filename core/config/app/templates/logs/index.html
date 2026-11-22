@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block page_title %}Log Snapshots{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Log Snapshots</h1>
+    <p class="lede">{{ snapshots | length }} snapshot{{ 's' if snapshots | length != 1 else '' }} available</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+<form method="POST" action="{{ url_for('logs.create') }}" style="margin-bottom:1rem">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="btn primary">Create Snapshot</button>
+</form>
+
+<h2 class="section">Snapshots</h2>
+{% if snapshots %}
+<div class="table-wrap">
+    <table class="rz">
+        <thead><tr><th>Filename</th><th>Size</th><th>Actions</th></tr></thead>
+        <tbody>
+            {% for s in snapshots %}
+            <tr>
+                <td><code>{{ s.filename }}</code></td>
+                <td>{{ s.size_mb }} MB</td>
+                <td>
+                    <div class="btn-row">
+                        <a href="{{ url_for('logs.download', filename=s.filename) }}" class="btn ghost sm">Download</a>
+                        <button class="btn ghost sm" onclick="sendToSupport('{{ s.filename }}')">Send</button>
+                        <form method="POST" action="{{ url_for('logs.delete') }}" style="margin:0">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="filename" value="{{ s.filename }}">
+                            <button type="submit" class="btn ghost sm" onclick="return confirm('Delete?')">Delete</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p style="padding:1rem;color:var(--text-muted)">No log snapshots. Create one to collect container logs, system info, and the audit log.</p>
+{% endif %}
+
+<!-- Send to support -->
+<h2 class="section">Send to Support</h2>
+<div class="card">
+    <div class="card-body">
+    <p style="font-size:0.8125rem;color:var(--text-secondary);margin-bottom:0.75rem">
+        Create a new log snapshot and send it via email to support.
+    </p>
+    <div class="field" style="max-width:400px">
+        <label>Recipient email</label>
+        <input type="email" id="support-email" value="{{ support_email }}">
+    </div>
+    <div class="field" style="max-width:400px">
+        <label>Issue description (optional)</label>
+        <textarea id="support-description" rows="3" style="resize:vertical" placeholder="Describe the issue..."></textarea>
+    </div>
+    <button class="btn primary" id="send-support-btn" onclick="sendNewSnapshot()">Create & Send to Support</button>
+    <div id="support-result" class="hidden" style="margin-top:0.5rem;font-size:0.8125rem"></div>
+    </div>
+</div>
+
+<script>
+function sendToSupport(filename) {
+    const email = document.getElementById('support-email').value;
+    if (!email) { alert('Enter a support email address.'); return; }
+    const desc = document.getElementById('support-description').value;
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('description', desc);
+    formData.append('filename', filename);
+    doSend(formData);
+}
+
+function sendNewSnapshot() {
+    const email = document.getElementById('support-email').value;
+    if (!email) { alert('Enter a support email address.'); return; }
+    const desc = document.getElementById('support-description').value;
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('description', desc);
+    formData.append('create_new', 'true');
+    doSend(formData);
+}
+
+function doSend(formData) {
+    const btn = document.getElementById('send-support-btn');
+    const result = document.getElementById('support-result');
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    result.className = 'hidden';
+
+    fetch('{{ url_for("logs.send_support") }}', { method: 'POST', headers: window.rzfzCsrfHeaders(), body: formData })
+        .then(r => r.json())
+        .then(data => {
+            result.className = data.success ? 'flash flash-success' : 'flash flash-error';
+            result.textContent = data.message;
+            btn.disabled = false;
+            btn.textContent = 'Create & Send to Support';
+            if (data.success) setTimeout(() => window.location.reload(), 1500);
+        })
+        .catch(err => {
+            result.className = 'flash flash-error';
+            result.textContent = 'Failed: ' + err.message;
+            btn.disabled = false;
+            btn.textContent = 'Create & Send to Support';
+        });
+}
+</script>
+{% endblock %}

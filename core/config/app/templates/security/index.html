@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block page_title %}Security Documentation{% endblock %}
+
+{% block page_content %}
+<div class="page">
+    <h1>Security Documentation</h1>
+    <p class="lede">Security architecture, assessment, SBOM and security how-tos for this box.</p>
+</div>
+
+{% include "security/_overview.html" %}
+
+{% if doc_html %}
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+    <div style="display:flex;gap:2rem;flex-wrap:wrap;font-size:0.875rem">
+        <div><strong>Stack version:</strong> <code>{{ doc_meta.get('stack_version', 'unknown') }}</code></div>
+        <div><strong>Last generated:</strong> {{ doc_meta.get('generated', 'unknown') }}</div>
+        <div><strong>Source of truth:</strong> <code>docs/security-architecture.md</code></div>
+    </div>
+    </div>
+</div>
+
+<div class="card markdown-body">
+<div class="card-body">
+{{ doc_html | safe }}
+</div>
+</div>
+{% endif %}
+
+{% include "security/_styles.html" %}
+{% endblock %}
+
+{% block extra_js %}
+    {{ super() }}
+{% include "security/_mermaid_js.html" %}
+{% endblock %}

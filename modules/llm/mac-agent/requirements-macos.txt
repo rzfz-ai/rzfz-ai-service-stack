@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: BUSL-1.1
+# #2559: the Mac worker agent's runtime deps — modules/llm/node-agent/requirements.txt
+# minus `docker` (the Mac runs no containers; app.native_runtime never imports
+# the docker SDK). Same pins as the Linux agent: one agent, two runtimes.
+# tests/unit/scripts/test_2559_mac_packaging.py keeps the two files in step.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+httpx==0.28.1
+websockets==13.1

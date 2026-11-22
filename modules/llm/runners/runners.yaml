@@ -1,0 +1,188 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+#
+# #1516 (operator decision E5) — the ONE source of truth for llama.cpp runner
+# images: which targets exist, what they are called, how they are built.
+#
+# Before this file the same tags were written down three times — in
+# `cli/post-install.sh` (build), again in its publish list, and again in
+# `modules/llm/node-agent/app/drivers/images.py` (what a node pulls). #1497 was
+# exactly that drift: the publish list named a runner nothing builds.
+#
+# ── the tag scheme ──────────────────────────────────────────────────────────
+# ONE repository, the target in the tag:
+#
+#     llama-runner:<engine-build>-<target>
+#
+# The engine build comes FIRST, so `docker images llama-runner` answers "are all
+# targets on the same llama.cpp?" at a glance. The rest names the toolkit and
+# the GPU architecture the binary was compiled for, so the tag alone says where
+# it runs. Rollback is another tag in the same repository, not another
+# repository.
+#
+# This replaces a scheme where the tag could not tell two INCOMPATIBLE binaries
+# apart: `llama-cuda-runner:b11778` (CUDA 12.8, sm_120) and
+# `llama-cuda-gb10-runner:b11778` (CUDA 13.0.2, sm_121a) carried the same tag and
+# differed only by repository name. Pulling the wrong one dies with
+# "CUDA error: no kernel image is available for execution on the device"
+# — measured on the GB10 (.191, 2026-09-05).
+#
+# Every tag is single-architecture by construction (the GB10 target is arm64,
+# the rest amd64), so the hub delivery needs NO multi-arch manifests for
+# runners; only the node-agent image does. Each target states this in `arch`
+# rather than leaving it to this comment: the offline packager fails closed on
+# a runner the packaging host COULD have built (#2154), and it can only tell
+# that from a cross-architecture target if the manifest says so.
+#
+# `legacy` is the pre-#1516 name. It is published as an alias for one cycle so
+# a box pinned via RAZZFAZZ_ENGINE_IMAGE_* keeps resolving.
+
+repository: llama-runner
+
+# The docker build CONTEXT of every target, relative to the stack root. Each
+# target's `dockerfile:` below lives in its own directory, but the context is
+# THIS directory, not that one: the Dockerfiles `COPY llama-server-shim`, which
+# sits beside them here. A build with the target's own directory as context
+# fails only at that COPY, after the base image pull (and, for the CUDA targets,
+# after the compile stage). Every build site reads this key
+# (scripts/lib.sh razzfazz_runner_build_context: init, upgrade, post-install
+# and the packager's build line). By hand:
+#
+#     docker build -t llama-runner:<tag> [--build-arg K=V] \
+#         -f modules/llm/runners/<target-dir>/Dockerfile modules/llm/runners
+build_context: modules/llm/runners
+
+# The llama.cpp release every target should carry. A target that deliberately
+# lags (or follows an upstream image) says so in `engine_build`.
+#
+# #2336 (2026.11-rc1): fleet bump to b11778 (52ffa0274, published 2026-10-21).
+#
+# 2026.11 GA: the fleet follows llama.cpp's STABLE line. Upstream now marks
+# every daily bNNNNN build a pre-release and ships versioned releases; v0.9.0
+# (2026-11-04) is the first one this fleet carries. A stable release is a
+# tagged commit of the same branch, and its release notes name the daily build
+# that carries its binaries ("Nightly build: b12110"). Measured 2026-11-08:
+#   git ls-remote … refs/tags/v0.9.0^{} -> cd959bae99ff4bed22bef2604f45241c09bbb8c8
+#   git ls-remote … refs/tags/b12110    -> cd959bae99ff4bed22bef2604f45241c09bbb8c8
+#   GitHub compare b12110...v0.9.0      -> identical
+# so b12110 IS v0.9.0. The tags keep the build number, because every tool here
+# orders pins by it (check-llama-cpp-pins.py, the advisory ranges, the rollback
+# floor); `engine_release` names the stable version it is.
+# The v0.9.0 GitHub release itself carries no binaries; the Vulkan tarball and
+# the ghcr server image are published under b12110 (image label
+# org.opencontainers.image.revision = cd959bae…, measured).
+# ROCm stays on its measured toolbox build (see its note).
+engine_build: b12110
+engine_release: v0.9.0
+
+# #2336: the three advisories that name a FIX COMMIT rather than a build, which
+# check-llama-cpp-pins.py therefore reports as "unmapped". Checked 2026-10-21
+# with the GitHub compare API (compare <fix>...<tag>, status "ahead" = the fix
+# commit is an ancestor of the tag). Every build in this file contains all three.
+# b12110 (v0.9.0): b11778 contains all three and b12110 descends from it
+# (compare b11778...v0.9.0: ahead 332, behind 0, measured 2026-11-08).
+commit_advisories:
+  - {id: GHSA-8947-pfff-2f3c, fix_commit: c78fb909b23758f5e418cf98a69bc8a0ef142fb8, contained_in: [b8940, b11778, b12110]}
+  - {id: GHSA-vgg9-87g3-85w8, fix_commit: 26a48ad699d50b6268900062661bd22f3e792579, contained_in: [b8940, b11778, b12110]}
+  # The advisory names c33fe8b8 as both vulnerable and patched; it is the
+  # vocab heap-overflow fix (#14145, 2025-06-13), an ancestor of every build.
+  - {id: GHSA-g4cc-763q-h9h6, fix_commit: c33fe8b8c4427202706b1434e9fc8ab5752c9cac, contained_in: [b8940, b11778, b12110]}
+
+targets:
+  - target: vulkan
+    tag: b12110-vulkan
+    hardware: amd
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-vulkan/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b12110}
+    legacy: llama-vulkan-runner:b12110
+    note: >-
+      AMD Strix Halo (gfx1151) and any Vulkan-capable AMD GPU. llama.cpp v0.9.0:
+      upstream's llama-b12110-bin-ubuntu-vulkan-x64.tar.gz, sha256
+      a5d741940956ec62e8783aee7e5a4c7c761af867d6f027c3277a51e1a3ac59b0 (GitHub
+      asset digest, re-measured on download 2026-11-08). Same file layout as the
+      b11778 tarball, same glibc floor (2.34).
+
+  - target: vulkan
+    tag: b11778-vulkan
+    hardware: amd
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-vulkan/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b11778}
+    legacy: llama-vulkan-runner:b11778
+    note: Kept for rollback — the previous pin (b11778) is one `docker tag` away.
+
+  - target: rocm7.2.1
+    tag: b8940-rocm7.2.1
+    # Measured on the box: `llama-server --version` in this toolbox digest says
+    # version 8940 (78433f606). The three GGUF-loader advisory fixes are in that
+    # commit, so check-llama-cpp-pins.py exempts this one build (both keys below).
+    measured_build: 8940
+    advisories_fixed_in_commit: 78433f606
+    hardware: amd
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-rocm/Dockerfile
+    build_args: {}
+    legacy: llama-rocm-runner:rocm-7.2.1
+    note: >-
+      Upstream toolbox image (kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1). The llama.cpp inside is what that
+      toolbox digest carries: b8940 (78433f606), measured. The third-party
+      toolbox lags upstream (the fleet pin is b12110 = v0.9.0); the tag names the real build, not the fleet's. The
+      old tag named only the ROCm version, so the engine build was invisible;
+      the new one carries both.
+      #2336 (2026.11-rc1): stays on b8940. No ROCm 7.2.1 / gfx1151 image of
+      b11778 exists: the toolbox publishes no b11778 build, and upstream's b11778
+      release ships only a ROCm 10.0 tarball (a different toolchain, not a
+      bump of this target). The exemption above still holds: 78433f606 contains
+      the fixes for all three commit-named advisories (compare: identical).
+      2026.11 GA (v0.9.0): still b8940. The toolbox's rocm-7.2.1 tag was last
+      rebuilt 2026-04-26 (digest f85b391c…, Docker Hub, measured 2026-11-08);
+      its active lines are now ROCm 10.0 / TheRock nightlies built from
+      llama.cpp master under timestamp tags — no ROCm 7.2.1 build, and no build
+      named after a stable llama.cpp release, exists. Moving to ROCm 10.0 is a
+      toolchain change with its own box run, not part of this bump.
+
+  - target: cpu
+    tag: b12110-cpu
+    hardware: cpu
+    arch: amd64
+    dockerfile: modules/llm/runners/llama-cpu/Dockerfile
+    build_args: {}
+    legacy: llama-cpu-runner:b12110
+    note: >-
+      Wraps ghcr.io/ggml-org/llama.cpp:server, pinned by digest to server-b12110
+      = llama.cpp v0.9.0 (image label revision cd959bae…, version b12110;
+      index digest sha256:1145e8de…, measured 2026-11-08 with the anonymous
+      ghcr registry API) in the Dockerfile FROM so the CPU build is
+      reproducible instead of tracking a floating tag (#1782). The previous
+      pin's digest was server-b11706 (revision f74e2fa6); the note here used to
+      call it b11778, which it never was. Same layout as before (/app/llama-server,
+      Ubuntu 24.04 base, entrypoint /app/llama-server, LLAMA_ARG_HOST/PORT env).
+
+  - target: cuda12.8-sm120
+    tag: b12110-cuda12.8-sm120
+    hardware: cuda
+    arch: amd64
+    cuda_arch: "120"
+    # #1517: the CUDA compute capability this binary is FOR. `nvidia-smi
+    # --query-gpu=compute_cap` reports it, so the node picks its runner from the
+    # GPU itself instead of a hand-typed class name.
+    compute_cap: "12.0"
+    dockerfile: modules/llm/runners/llama-cuda/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b12110}
+    legacy: llama-cuda-runner:b12110
+    note: RTX PRO 6000 Blackwell — compute capability 12.0.
+
+  - target: cuda13.0-sm121a
+    tag: b12110-cuda13.0-sm121a
+    hardware: cuda
+    arch: arm64
+    cuda_arch: 121a-real
+    compute_cap: "12.1"
+    dockerfile: modules/llm/runners/llama-cuda-gb10/Dockerfile
+    build_args: {LLAMA_CPP_TAG: b12110}
+    legacy: llama-cuda-gb10-runner:b12110
+    note: >-
+      GB10 / DGX-Spark class — compute capability 12.1, arm64. CUDA 12.8's nvcc
+      does not know sm_121 at all, which is why this cannot share the sm_120
+      image.

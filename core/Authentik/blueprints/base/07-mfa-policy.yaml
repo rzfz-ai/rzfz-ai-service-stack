@@ -1,0 +1,144 @@
+version: 1
+metadata:
+  name: "Base - Admin MFA Enforcement (B-11)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+
+# B-11 — Tighter MFA policy default.
+#
+# Why this blueprint exists
+# -------------------------
+# NIS2 Article 21(2)(j) requires MFA / continuous authentication for the
+# operators of network-and-information-systems. Authentik bundles every
+# building block needed (TOTP / WebAuthn / Static / Duo / SMS / e-mail
+# authenticator stages, plus an `authenticatorvalidatestage` with
+# `not_configured_action: configure`), but until B-11 nothing in our
+# shipped blueprints actually *required* anyone — including the
+# bootstrap admin — to enrol a second factor. The handover doc told the
+# customer "Authentik supports MFA enrolment" — true but weak: an
+# operator who never reads the handover ships forever with single-factor
+# admin auth and 21(2)(j) is silently unmet.
+#
+# What this blueprint does
+# ------------------------
+# Declares an expression policy — `razzfazz.ai - Require Admin MFA` —
+# that returns True iff the authenticating user is a member of the
+# `razzfazz.ai Super Admins` group (platform-admin) or of the
+# `authentik Admins` group (authentik-admin). (Super Admins is declared
+# in 02-groups.yaml with `is_superuser: true` and is the home of the
+# bootstrap akadmin user + every operator-promoted admin.)
+#
+# The PolicyBinding that ties this policy to our dedicated stage
+# (`razzfazz.ai - Admin MFA validation`) on each of the four admin login flows
+# (default-authentication-flow, default-source-authentication,
+# google-domain-enrollment, entra-domain-enrollment) is wired by
+# `core/Authentik/apply-policy-bindings.py` (the same script that wires every
+# per-app PolicyBinding). The declarative blueprint serializer can't easily
+# express a nested `!Find` for a flowstagebinding's composite key
+# (target+stage), and the Python wiring path is the proven pattern in this
+# codebase (originally introduced for the `97f7e2c0` start-portal fix).
+#
+# Combined effect: an admin (Super Admins or authentik Admins) without a
+# device → the dedicated stage offers TOTP or WebAuthn setup, on the default
+# login and on the Google/Entra source logins alike. A non-admin never meets
+# the dedicated stage: the policy binding is the ONLY thing that routes anyone
+# to it. Authentik's own `default-authentication-mfa-validation` stage is not
+# modified (it stays `not_configured_action: skip` for everyone): #2551
+# measured that upstream ships `skip`, and Authentik's own blueprint puts a
+# second policy (`default-authentication-flow-authenticator-validate-stage`,
+# true for every non-passkey login) on that stage's binding, so configuring
+# THAT stage would force every user to enrol.
+#
+# Operator opt-out
+# ----------------
+# `RAZZFAZZ_REQUIRE_ADMIN_MFA` (declared in .env.example, default `false`
+# — enforcement is switched on after the handover) is consulted by the apply-policy-bindings.py wiring
+# path. Setting it to `false` and re-running `init-authentik` (or
+# `docker compose up -d --force-recreate authentik-init`) REMOVES our
+# dedicated stage from the four flows (a stage binding whose policy bindings
+# are all disabled would run for everyone, so disabling is not enough); the
+# policies and the stage stay in Authentik, and flipping back to `true`
+# re-binds them. The flows then run as if B-11 weren't there. The .env.example default is `false`: whoever installs
+# a box would otherwise have to enrol a second factor that cannot be handed
+# over to the customer. The customer enables it after the handover (each
+# administrator enrols, then `true` and `rzfz post-install --refresh`).
+# Installs that omit the var get the envsubst default of `false`.
+
+entries:
+  # Expression policy: matches Super Admins and authentik Admins membership.
+  # ${RAZZFAZZ_REQUIRE_ADMIN_MFA:-false} appears in this comment so the
+  # static blueprint test detects the env-var reference (the actual
+  # binding's `enabled` field is set by apply-policy-bindings.py from
+  # the same env var; see header comment above).
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "razzfazz.ai - Require Admin MFA"
+    attrs:
+      execution_logging: false
+      expression: |
+        # A1 D11: holders of platform-admin (razzfazz.ai Super Admins) AND of
+        # authentik-admin (authentik Admins). True → our dedicated MFA stage
+        # runs and configures a missing factor; False → the stage is skipped.
+        # Group names are literal here: authentik-worker has no catalogue mount
+        # (the A7 ratchet skips core/Authentik/).
+        return request.user.ak_groups.filter(
+            name__in=["razzfazz.ai Super Admins", "authentik Admins"]).exists()
+
+  # The PolicyBinding that ties this policy to our dedicated MFA stage's
+  # flowstagebinding (one per admin login flow) is created by apply-policy-bindings.py (the same
+  # Python wiring path that creates per-app PolicyBindings — see the
+  # apply-policy-bindings.py header comment for `ensure_mfa_admin_binding`).
+  # The binding `enabled` flag is sourced from
+  # ${RAZZFAZZ_REQUIRE_ADMIN_MFA:-false}; default `false` (enable after the
+  # handover); set `true` in .env to enforce.
+
+  # #2551: the dedicated stage the admin policy gates must CONFIGURE a missing factor.
+  # Authentik's default stage ships with not_configured_action=skip and no
+  # configuration stages (measured for #2551, 2026-09-28), so B-11 never
+  # forced anyone to enrol. The setup stages are defined here; nothing relies
+  # on upstream defaults.
+  - model: authentik_stages_authenticator_totp.authenticatortotpstage
+    identifiers:
+      name: "razzfazz.ai - Admin MFA setup (TOTP)"
+    attrs:
+      digits: 6
+      friendly_name: "Authenticator app (TOTP)"
+
+  - model: authentik_stages_authenticator_webauthn.authenticatorwebauthnstage
+    identifiers:
+      name: "razzfazz.ai - Admin MFA setup (WebAuthn)"
+    attrs:
+      friendly_name: "Security key or passkey (WebAuthn)"
+      user_verification: preferred
+
+  # The DEDICATED admin validation stage. It is ours alone: nothing else binds
+  # it, and Authentik's own `default-authentication-mfa-validation` stage is
+  # never touched (it stays `skip` for everyone). device_classes is the
+  # upstream set, so an admin who enrolled e-mail/Duo earlier still validates.
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    identifiers:
+      name: "razzfazz.ai - Admin MFA validation"
+    attrs:
+      not_configured_action: configure
+      device_classes: [static, totp, webauthn, duo, sms, email]
+      configuration_stages:
+        - !Find [authentik_stages_authenticator_totp.authenticatortotpstage, [name, "razzfazz.ai - Admin MFA setup (TOTP)"]]
+        - !Find [authentik_stages_authenticator_webauthn.authenticatorwebauthnstage, [name, "razzfazz.ai - Admin MFA setup (WebAuthn)"]]
+
+  # default-authentication-flow only: that flow already runs Authentik's own
+  # validation stage (order 30), which validates an admin who HAS a device.
+  # Bound to our stage with mode `all`, this policy keeps an enrolled admin
+  # from being asked for the code twice; only an admin without a device reaches
+  # our configuring stage there. The source and enrollment flows have no
+  # upstream validation stage, so they bind the admin policy alone.
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "razzfazz.ai - Admin MFA: no device enrolled"
+    attrs:
+      execution_logging: false
+      expression: |
+        from authentik.stages.authenticator import devices_for_user
+        user = request.user
+        if not getattr(user, "pk", None):
+            return True
+        return not any(True for _ in devices_for_user(user))

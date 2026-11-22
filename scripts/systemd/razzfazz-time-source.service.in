@@ -1,0 +1,8 @@
+[Unit]
+Description=razzfazz.ai apply the requested time source (validates the request, then scripts/apply-time-source.sh)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash @STACK_DIR@/scripts/time-source-watcher.sh
+NoNewPrivileges=yes
+PrivateTmp=yes

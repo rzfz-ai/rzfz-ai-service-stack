@@ -1,0 +1,143 @@
+# ==============================================================================
+# OpenTelemetry Collector — BASE config (razzfazz observability profile)
+# ==============================================================================
+# Runs in the `otel-collector` container (otel/opentelemetry-collector-contrib).
+# This is the piece #193 found MISSING: the openlit all-in-one image ships NO
+# OTLP receiver, so spans emitted by modules/chat/pipelines/openlit_filter.py to
+# :4318 had nothing to land in. This collector IS that receiver, and it writes
+# the otel_traces / otel_logs / otel_metrics tables into ClickHouse
+# (`create_schema: true`) — the schema OpenLIT's UI reads. Fixes #193.
+#
+# LOG EXPORT (#197) is NOT here — it lives in a SEPARATE overlay config
+# (otel-collector-logs-export.yaml) that is merged on top of this file ONLY when
+# OTEL_LOG_EXPORT_ENABLED=true. When disabled, the disabled overlay is merged
+# instead (a no-op), so an unset external endpoint can NEVER break collector
+# startup on an air-gapped box. Two-file merge = the opt-in switch.
+#
+# Env substitution: the collector supports ${env:VAR:-default}. All env comes
+# from ../../.env via the container's env_file (see observability/compose.yml).
+# ==============================================================================
+
+receivers:
+  # OTLP in from openlit_filter.py (gRPC 4317) and any SDK auto-instrumentation
+  # (HTTP 4318). Container-network only — never host-published (loopback rule).
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Hard memory ceiling so a trace burst can't OOM the 512m container. Absolute
+  # MiB (not %) so it's deterministic regardless of host RAM.
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 400
+    spike_limit_mib: 100
+  # Batch before the ClickHouse write to keep part-count down — the module's
+  # clickhouse-config.xml tightened parts_to_throw_insert to 300 after the
+  # 2026-05-17 production merge-storm, so batched inserts matter.
+  batch:
+    timeout: 5s
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+
+  # #2486: ~4.4 non-inference requests/s (health, readiness, model list) ran
+  # through the instrumented router and buried real LLM traffic in OpenLIT.
+  # A span that names NO model on one of these routes is dropped here; every
+  # span with gen_ai.request.model passes, whatever its name. Traces only:
+  # metrics and logs are untouched. The box measurement of the noise is in
+  # .gsd/reports/2026-10-2486-openlit-noise.md.
+  # Second statement: LiteLLM's service child spans (`service` set). `auth`
+  # carries the request route in `call_type`, so it is dropped with its
+  # parent. `postgres` and `proxy_pre_call` carry a function name there, not
+  # a route; per span they look the same under a completion, so they pass.
+  # Third and fourth statements: what an idle box still wrote after the first
+  # two (measured: ~24 spans/s, all infrastructure instrumentation of Dify and
+  # its plugin daemon). Cache and SQL client spans (`db.system` /
+  # `db.system.name`: Valkey hget/hset/expire/PUBLISH/GET, `SELECT dify_db`,
+  # `connect`) and Dify's periodic Celery jobs (`run/schedule.*`,
+  # `apply_async/schedule.*`, e.g. the workflow-schedule poll). A span that
+  # names a model, or that the OpenLIT SDK marks as a gen_ai operation (its
+  # vector-DB spans carry gen_ai.operation.name), always passes. OpenLIT 2's
+  # trace list shows one row per trace, so each poll was a row of its own.
+  filter/non_inference:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["gen_ai.request.model"] == nil and (IsMatch(name, "(?i)(/health\\b|readiness|liveliness|liveness|/v1/models$|/models$)") or IsMatch(attributes["http.route"], "(?i)^(/health.*|/v1/models|/models)$"))'
+        - 'attributes["gen_ai.request.model"] == nil and attributes["service"] != nil and IsMatch(attributes["call_type"], "(?i)^(/health.*|/v1/models|/models)$")'
+        - 'attributes["gen_ai.request.model"] == nil and attributes["gen_ai.operation.name"] == nil and (attributes["db.system"] != nil or attributes["db.system.name"] != nil)'
+        - 'attributes["gen_ai.request.model"] == nil and IsMatch(name, "^(run|apply_async)/schedule\\.")'
+
+exporters:
+  # Trace/metric/log store OpenLIT reads. Native protocol (9000), db `openlit`,
+  # tables otel_traces/otel_logs/otel_metrics. create_schema builds them on
+  # first write (fixes #193 point 2 — "never creates the trace schema").
+  #
+  # RETENTION — race-free (2026.08 disk-fill fix, #193/#139). The `ttl` below
+  # makes the exporter bake a TTL clause into the CREATE TABLE it issues on the
+  # FIRST write, so otel_traces/otel_logs/otel_metrics are born with retention.
+  # This is the primary guard. Previously retention was left ENTIRELY to
+  # clickhouse-init.sh's `ALTER … MODIFY TTL`, which runs from
+  # docker-entrypoint-initdb.d at container start — BEFORE this exporter has
+  # lazily created the tables — so the ALTER hit non-existent tables, was
+  # swallowed, and (absent a later ClickHouse restart) NEVER applied. On production
+  # the tables therefore accumulated unbounded to ~130 GiB and filled the host
+  # disk. Born-with-TTL removes that ordering race and the restart dependency.
+  # Default 168h = 7 days; override via OBSERVABILITY_RETENTION_TTL (keep it
+  # equal to OBSERVABILITY_RETENTION_DAYS × 24h). clickhouse-init.sh still
+  # re-applies the days-expressed `MODIFY TTL` (+ MATERIALIZE) each restart, to
+  # converge the SHOW-CREATE expression to toIntervalDay(N) for the acceptance
+  # test and to reclaim any rows written before a TTL existed.
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
+    database: openlit
+    username: ${env:CLICKHOUSE_USER:-default}
+    password: ${env:CLICKHOUSE_PASSWORD:-}
+    create_schema: true
+    ttl: ${env:OBSERVABILITY_RETENTION_TTL:-168h}
+    logs_table_name: otel_logs
+    traces_table_name: otel_traces
+    metrics_table_name: otel_metrics
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+extensions:
+  # Liveness endpoint (container-network only). No host-publish.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+      # Never emit the collector's own OTLP self-telemetry to the external
+      # target — keep internal noise out of the customer's SIEM.
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/non_inference, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    # OpenLIT SDK logs (if any) → ClickHouse. This is the INTERNAL log path.
+    # The #197 EXTERNAL container-log path is a distinct `logs/external`
+    # pipeline added only by the export overlay.
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]

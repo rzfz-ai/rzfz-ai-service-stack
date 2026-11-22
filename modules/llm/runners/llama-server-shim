@@ -1,0 +1,67 @@
+#!/bin/sh
+# llama-server-shim — translate `--flag=value` into `--flag value`.
+#
+# Why: GPUStack 2.x exposes per-model `backend_parameters` as a JSON list
+# of strings. Operators naturally write a single list item per parameter:
+#   ["--ctx-size=8192", "-fa=1"]
+# which renders as ONE row per parameter in the GPUStack admin UI.
+#
+# Upstream llama-server (and the llama.cpp CLI parser in general) does NOT
+# accept `--flag=value` — it requires two separate argv tokens
+# (`--flag value`). The previous custom `llama-box` binary in GPUStack 0.7.1
+# accepted the `=value` form; v2.x switched to upstream and the form was
+# silently dropped. Operators were forced to write
+#   ["--ctx-size", "8192", "-fa", "1"]
+# which is twice as many UI rows and makes long backend_parameter lists
+# unreadable.
+#
+# This shim runs as `/usr/local/bin/llama-server` inside our runner images
+# (vulkan, rocm, cpu) and rewrites argv before exec'ing the real binary at
+# $LLAMA_SERVER_BIN.
+#
+# Behaviour:
+#   --foo=bar  →  --foo bar
+#   -f=bar     →  -f bar
+#   anything not starting with `-` or not containing `=` is passed through
+#   unchanged. `=` inside values is preserved (only the FIRST `=` splits).
+#
+# Special-case `--`: stop rewriting once we hit a literal `--` (POSIX
+# end-of-options marker), so users can pass things like `-- --weird=raw`.
+#
+# We intentionally DO NOT depend on bash — must work on Alpine /bin/sh
+# (the ggml-org image is Debian, kyuz0 is Fedora, our vulkan is Ubuntu;
+# all ship POSIX sh, none guaranteed bash).
+set -eu
+
+: "${LLAMA_SERVER_BIN:?LLAMA_SERVER_BIN must be set in the runner image}"
+
+# Build new argv into positional parameters via `set --`.
+new_argv=
+post_dd=0
+for arg in "$@"; do
+    if [ "$post_dd" = 1 ]; then
+        new_argv="$new_argv $(printf '%s' "$arg" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
+        continue
+    fi
+    case "$arg" in
+        --)
+            post_dd=1
+            new_argv="$new_argv '--'"
+            ;;
+        --*=*|-?=*)
+            # Split on the FIRST `=` only.
+            flag=${arg%%=*}
+            val=${arg#*=}
+            new_argv="$new_argv $(printf '%s' "$flag" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/") $(printf '%s' "$val" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
+            ;;
+        *)
+            new_argv="$new_argv $(printf '%s' "$arg" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
+            ;;
+    esac
+done
+
+# Re-parse new_argv into "$@" via eval (only safe path in POSIX sh; the
+# single-quote escaping above neutralises any embedded quotes).
+eval "set -- $new_argv"
+
+exec "$LLAMA_SERVER_BIN" "$@"

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none" role="img" aria-label="razzfazz.ai guide">
+  <!-- Guide page: black line outline, transparent fill -->
+  <rect x="8.5" y="5.5" width="25" height="37" rx="3.5" stroke="#1f2328" stroke-width="2.2"/>
+  <!-- Text lines: grey -->
+  <path d="M13.5 13.5h13M13.5 19.5h16M13.5 25.5h9.5" stroke="#9aa0a6" stroke-width="2" stroke-linecap="round"/>
+  <!-- razzfazz spark: #CD1719 accent -->
+  <path d="M32.5 17 L23 30.5 H29.2 L24.8 43 L40 26.5 H32.7 L36.6 17 Z" fill="#CD1719"/>
+</svg>

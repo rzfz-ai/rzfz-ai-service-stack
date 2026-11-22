@@ -1,0 +1,61 @@
+version: 1
+metadata:
+  name: "Base - OAuth groups scope mapping (True SSO #33)"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ==========================================
+  # OAuth2 scope mapping: `groups`
+  # ==========================================
+  # True SSO group->role mapping (#33). Emits the authenticated user's Authentik
+  # group NAMES as a `groups` claim so downstream OIDC apps (Open WebUI, Gitea,
+  # Synapse, Vaultwarden) can map an Authentik group -> an in-app role.
+  #
+  # This is intentionally explicit rather than relying on Authentik's default
+  # `profile` scope (whose internals — whether it carries `groups` — drift across
+  # Authentik releases). The apps that consume roles request this `groups` scope
+  # and read the `groups` claim.
+  #
+  # The admin group is NOT hardcoded here — the claim carries ALL of the user's
+  # group names; each app decides which group name is its admin role via its own
+  # config (SSO_ADMIN_GROUP -> Open WebUI OAUTH_ADMIN_ROLES / Gitea --admin-group).
+  # ==========================================
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers:
+      name: "razzfazz.ai OAuth Mapping: groups"
+    attrs:
+      name: "razzfazz.ai OAuth Mapping: groups"
+      scope_name: "groups"
+      description: "razzfazz.ai True SSO (#33): user's Authentik group names for in-app role mapping"
+      expression: |
+        return {
+            "groups": [group.name for group in request.user.ak_groups.all()],
+        }
+
+  # ==========================================
+  # OAuth2 scope mapping: knowledge scopes (#2473 D6)
+  # ==========================================
+  # The user's knowledge scopes (groups named "KB: <scope>" carrying
+  # attributes.rzfz_kb_scope: true) as their OWN claim, `rzfz_kb_groups`, so
+  # Open WebUI syncs ONLY these into its groups (OAUTH_GROUPS_CLAIM). The
+  # `groups` claim above stays the roles claim; the two never mix, because an
+  # admin is in no KB: group. Same scope name: Authentik merges both results.
+  # The placeholder `rzfz-no-knowledge-scope` is ALWAYS appended: Open WebUI
+  # 0.11.3 (utils/oauth.py update_user_groups) changes no membership when the
+  # claim is EMPTY, so a user who left their last scope would keep reading it.
+  # With the placeholder the claim is never empty; modules/chat/compose.yml
+  # blocks the name (OAUTH_BLOCKED_GROUPS), so nobody ever joins it.
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers:
+      name: "razzfazz.ai OAuth Mapping: knowledge scopes"
+    attrs:
+      name: "razzfazz.ai OAuth Mapping: knowledge scopes"
+      scope_name: "groups"
+      description: "razzfazz.ai knowledge scopes (#2473): user's KB groups for Open WebUI group sync"
+      expression: |
+        return {
+            "rzfz_kb_groups": sorted(
+                group.name for group in request.user.ak_groups.all()
+                if (group.attributes or {}).get("rzfz_kb_scope") is True
+            ) + ["rzfz-no-knowledge-scope"],
+        }

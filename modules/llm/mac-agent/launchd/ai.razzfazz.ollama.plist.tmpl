@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: BUSL-1.1
+     #2559: the Mac worker's Ollama, a system LaunchDaemon (it comes back after a
+     crash and after a reboot with nobody logged in). It runs as the installing
+     user ({{USER}}), never as root, and listens on loopback only: the master
+     reaches it through the agent's outbound relay. Its port is the worker's
+     own (mac-agent/ollama-port.conf), not Ollama's default, so an Ollama the
+     Mac already runs keeps its port. The installer (and ollama-port-migrate.sh)
+     render {{USER}}, {{ROOT}} and {{OLLAMA_PORT}}. The release asset is flat (ollama next to its
+     libraries), so the binary is current/ollama. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.razzfazz.ollama</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ROOT}}/ollama/current/ollama</string>
+    <string>serve</string>
+  </array>
+  <key>UserName</key><string>{{USER}}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>WorkingDirectory</key><string>{{ROOT}}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OLLAMA_HOST</key><string>127.0.0.1:{{OLLAMA_PORT}}</string>
+    <key>OLLAMA_MODELS</key><string>{{ROOT}}/ollama-models</string>
+    <key>HOME</key><string>{{ROOT}}</string>
+  </dict>
+  <key>StandardOutPath</key><string>{{ROOT}}/logs/ollama.log</string>
+  <key>StandardErrorPath</key><string>{{ROOT}}/logs/ollama.log</string>
+</dict>
+</plist>
