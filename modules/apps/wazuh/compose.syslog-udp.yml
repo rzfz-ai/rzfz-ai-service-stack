@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# compose.syslog-udp.yml — the UDP twin of the Wazuh 514 syslog port (#2526)
+# ==============================================================================
+# NOT in COMPOSE_FILE by default. scripts/lib.sh::ensure_wazuh_syslog_udp_overlay
+# composes it when WAZUH_SYSLOG_UDP=true and drops it otherwise (on every init
+# and upgrade), so the host's UDP 514 is only taken when the listener is wanted.
+# Many hosts run rsyslog on UDP 514; publishing the port unconditionally would
+# collide with it on every box that enables the wazuh profile.
+#
+# The flag also makes the securityconfig one-shot add the UDP <remote> block to
+# the manager's ossec.conf, with the same WAZUH_SYSLOG_ALLOWED_IPS fence as the
+# TCP listener. Same host bind as TCP: WAZUH_SYSLOG_HOST_BIND (loopback default).
+services:
+  wazuh-manager:
+    ports:
+      - "${WAZUH_SYSLOG_HOST_BIND:-127.0.0.1}:${WAZUH_MANAGER_SYSLOG_PORT:-514}:514/udp"

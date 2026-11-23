@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# Hardware overlay: AMD GPU (ROCm / Vulkan).
+# Used by the `llm-legacy` profile when HARDWARE=amd in .env (it served the
+# retired `llm` 2.x profile too until #1447 / cutover C7a). Activated via
+# COMPOSE_FILE=docker-compose.yml:llm/compose.devices.amd.yml (set automatically
+# by razzfazz-init.sh / razzfazz-upgrade.sh based on detected hardware).
+#
+# This is the validated path on AMD Ryzen AI Max+ PRO 395 (Radeon 8060S, gfx1151,
+# Strix Halo). For non-Strix-Halo AMD GPUs the same overlay applies, but the
+# custom backend registered by init-backends.py (kyuz0/amd-strix-halo-toolboxes)
+# may need to be swapped for a different runner image — see manifests/VERSIONS.md
+# `gpustack-rocm-runner` notes.
+
+services:
+  # #1448 (cutover C8, decision D4): the GPUStack 0.7.1 module is ONE service
+  # for every hardware line; this block is the AMD half of what used to be a
+  # separate `gpustack-legacy` service definition. Without it the container
+  # refuses to start (the HARDWARE guard in its command checks /dev/kfd), so a
+  # box whose COMPOSE_FILE lost the overlay fails loudly instead of serving
+  # from the CPU.
+  gpustack-legacy:
+    cap_add:
+      - LINUX_IMMUTABLE
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      # #536 prerequisite: /dev/kfd + /dev/dri are root:render on the host.
+      # Today this container reaches them because it runs as ROOT (bypasses
+      # group checks) — the moment it is de-rooted, the render gid is its
+      # ONLY path to the GPU. By NUMBER, not name: compose resolves names in
+      # the IMAGE's /etc/group (render=109 there), not the host's (rc6.7 #63).
+      - "${RENDER_GID:-992}"
+    volumes:
+      - /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro
+      - /usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:ro
+    environment:
+      LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu

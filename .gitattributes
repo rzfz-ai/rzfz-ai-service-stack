@@ -1,0 +1,10 @@
+# Offline-package (git archive) delivery filter — internal-only paths are
+# excluded from an offline package (Enterprise) (which uses `git archive`). NOTE: this does
+# NOT affect pull-based installs (git fetch/checkout ship the full tree); see
+# .gsd/reports/ga5-plan-2026-06-21.md (workstream B / pull-vs-package finding).
+.gsd/                       export-ignore
+tests/                      export-ignore
+.claude/                    export-ignore
+# #3253: the Agentic OS concept and its prototypes are development work only — never in a customer package.
+docs/specs/agentic-os/      export-ignore
+.gitattributes              export-ignore

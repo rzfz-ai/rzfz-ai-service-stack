@@ -1,0 +1,42 @@
+{% set total_updates = manifest_updates.values() | map('length') | sum %}
+{% if fetch_message is defined and fetch_message %}
+<p style="font-size:0.75rem;color:#166534;margin-bottom:0.25rem">{{ fetch_message }}</p>
+{% endif %}
+{% if manifest_info %}
+<p style="font-size:0.75rem;color:var(--color-text-muted);margin-bottom:0.375rem">
+    Manifest: {{ manifest_info.stack_version }} ({{ manifest_info.channel }}) — {{ manifest_info.published[:10] }}
+</p>
+{% endif %}
+{% if cve_alerts %}
+{% for cve in cve_alerts %}
+<div style="padding:0.25rem 0;font-size:0.8125rem">
+    <span class="badge" style="background:#fee2e2;color:#991b1b">{{ cve.severity }}</span>
+    <strong>{{ cve.cve }}</strong> — {{ cve.image }} (fixed in {{ cve.fixed_in }})
+</div>
+{% endfor %}
+{% endif %}
+{% if total_updates > 0 %}
+<table class="container-table">
+    <thead><tr><th>Image</th><th>Current</th><th>Available</th><th></th></tr></thead>
+    <tbody>
+        {% for profile, updates in manifest_updates.items() %}
+        {% for u in updates %}
+        <tr>
+            <td><code style="font-size:0.75rem">{{ u.image }}</code></td>
+            <td>{{ u['from'] }}</td>
+            <td><strong>{{ u.to }}</strong></td>
+            <td><button class="btn btn-sm btn-primary" onclick="applyImageUpdate('{{ u.key }}', this)">Update</button></td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem">
+    {{ total_updates }} update{{ 's' if total_updates != 1 else '' }} available.
+    Click Update to apply individually.
+</p>
+{% elif manifest_info %}
+<p style="font-size:0.8125rem;color:#166534">All container versions match the manifest.</p>
+{% else %}
+<p style="font-size:0.8125rem;color:var(--color-text-muted)">No manifest found. Place manifests/versions.json in the stack root.</p>
+{% endif %}

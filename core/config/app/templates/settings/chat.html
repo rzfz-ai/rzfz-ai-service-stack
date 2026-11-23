@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block page_title %}Chat (Open WebUI){% endblock %}
+{% block page_content %}
+{# #2521 follow-up (K4): OWUI_FORWARD_USER_INFO_HEADERS. Saving writes .env and
+   recreates the openwebui service (settings.chat_save). #}
+<div class="page">
+    <h1>Chat (Open WebUI)</h1>
+    <p class="lede">What Open WebUI sends along with each chat request</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+<form method="POST" class="settings-form">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <h2 class="section">Forward user info headers
+        {% if config.forward_user_info_headers %}<span class="badge badge-production">On</span>{% else %}<span class="badge badge-experimental">Off</span>{% endif %}
+    </h2>
+    <div class="card">
+        <div class="field">
+            <label><input type="radio" name="forward_user_info_headers" value="true" {% if config.forward_user_info_headers %}checked{% endif %}> On (default)</label>
+        </div>
+        <div class="field">
+            <label><input type="radio" name="forward_user_info_headers" value="false" {% if not config.forward_user_info_headers %}checked{% endif %}> Off</label>
+        </div>
+        <div class="card" id="owui-forward-warning" style="margin-top:0.75rem;background:var(--razz-red-tint);border-left:3px solid var(--razz-red)">
+            <strong>Warning:</strong> Open WebUI then sends each user's id, name, e-mail and role to EVERY model connection configured in Open WebUI, including external providers. Required for per-chat session affinity.
+        </div>
+        <p class="hint" style="margin-top:0.75rem">
+            With forwarding on, Open WebUI also names the chat in each request, and the LLM Manager keeps a
+            chat's turns on one replica so its prompt cache is reused. The LLM Manager reads only the chat id;
+            it neither logs nor forwards the user fields. With forwarding off, every turn is balanced on its own.
+            Session affinity itself is switched in the LLM Manager console (Settings → Routing).
+        </p>
+        <p class="hint">
+            Saving a change recreates Open WebUI{% if not chat_enabled %} — the Chat module is disabled, so the value is only stored and applies when it is enabled{% endif %}.
+            Stored as <code>OWUI_FORWARD_USER_INFO_HEADERS</code> in <code>.env</code>; upgrades keep it.
+        </p>
+    </div>
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn primary">Save</button>
+    </div>
+</form>
+<h2 class="section" id="owui-code-tools">Code and tools</h2>
+<div class="card">
+    <p class="hint">
+        Tools and functions are Python that runs inside Open WebUI, with its network and its secrets; the
+        code interpreter runs code a model wrote. A new install starts with all of these off; an upgrade keeps
+        what this box already has. Change them in Open WebUI: Admin Settings → Code Execution, and
+        Admin Settings → Users → Permissions (the default) or Groups (one group).
+    </p>
+    {% if code_tools.error %}
+    <p class="hint"><strong>{{ code_tools.error }}</strong></p>
+    {% else %}
+    <table class="table">
+        <tbody>
+        {% for it in code_tools['items'] %}
+        <tr data-item="{{ it.id }}">
+            <td>{{ it.label }}</td>
+            <td>{% if it.value %}<span class="badge badge-experimental">On</span>{% elif it.value is none %}<span class="badge">Not set yet (off at the next start)</span>{% else %}<span class="badge badge-production">Off</span>{% endif %}</td>
+            <td>{% if it.groups %}granted to group(s): {{ it.groups | join(', ') }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,397 @@
+# ==============================================================================
+# DOCUMENT CONVERSION MODULE (Docling Serve)
+# ==============================================================================
+# Profile: docling
+# Document conversion and understanding API with Gradio + Swagger UI.
+# User-facing at docling.<domain> behind Authentik SSO.
+#
+# Two pipelines available per request:
+#   - standard (default for clients that don't specify): built-in CPU layout
+#     model + RapidOCR. Always works, no extra deps.
+#   - vlm (opt-in via `pipeline=vlm` + `vlm_pipeline_preset=granite_docling`):
+#     uses granite-docling-258M auto-downloaded into the docling container's
+#     model cache (~500 MB) on first request. Single VLM call replaces
+#     layout+OCR+table-structure with much higher quality for complex
+#     layouts, multi-column docs, tables, math, handwriting.
+#
+# WHY NOT route docling at GPUStack's granite-docling endpoint? We tried
+# (compose history). docling-jobkit's `custom_vlm_presets` field is typed
+# `dict[str, Any]` and the manager doesn't validate the inner model_spec
+# dict into a `VlmModelSpec` object — so a server-configured custom preset
+# pointing at GPUStack's OpenAI-compatible endpoint blows up at request
+# time with `'dict' object has no attribute 'response_format'`. Same bug
+# hits the per-request `vlm_pipeline_custom_config` path. Until that's
+# fixed upstream we run the model inline. The 258M weights are tiny and
+# CPU inference is ~10-30s per page on this hardware — acceptable.
+# Tracked: docling-project/docling-jobkit dict→VlmConvertOptions coercion.
+#
+# #129 — RQ async engine (two-process). docling's default async engine is
+# LOCAL: in-memory, single-process. With UVICORN_WORKERS>1 the Gradio UI's
+# /v1/status/poll + /v1/result/<id> round-robin to a worker that doesn't hold
+# the job state → 404 → UI shows a bare "error" (the doc actually converted).
+# Fix: ENG_KIND=rq backs job state with the stack's valkey (DB 9), so any API
+# worker resolves status/result; a SEPARATE `docling-serve rq-worker` process
+# consumes the queue and does the conversion (that's now the real
+# conversion-concurrency knob — scale via DOCLING_RQ_WORKER_REPLICAS). The
+# uvicorn API keeps UVICORN_WORKERS for HTTP concurrency.
+# ==============================================================================
+
+# Shared image / volumes — the API and the rq-worker run the same image and
+# need the same model cache + scratch + German tessdata.
+x-docling-common: &docling-common
+  image: ghcr.io/docling-project/docling-serve-cpu:v1.38.2
+  profiles: ["docling"]
+  restart: unless-stopped
+  volumes:
+    - docling-scratch:/tmp/docling
+    - docling-models:/opt/app-root/src/.cache/docling/models
+    # German OCR for scanned/printed forms (PSA PDF->JSON demo): the upstream
+    # docling-serve-cpu image ships tesseract with only eng+osd traineddata.
+    # Mount the German model (tessdata_fast deu, ~1.5 MB, vendored from the
+    # tika image) into tesseract's TESSDATA_PREFIX so `ocr_preset=tesseract`
+    # + `ocr_lang=deu` works. Digital PDFs use the text layer (no OCR);
+    # handwriting uses the granite-docling VLM. Reproducible on every box via
+    # git (file committed under doc-processing/docling/tessdata/).
+    # Path is relative to THIS compose file's dir (doc-processing/docling/), so
+    # it must be ./tessdata/... NOT ./doc-processing/docling/tessdata/... — the
+    # latter resolved to a doubled path (doc-processing/docling/doc-processing/
+    # docling/tessdata) that doesn't exist, so Docker auto-created a root-owned
+    # empty dir and mounted THAT (German OCR silently broken + the root-owned
+    # dir aborted `git stash -u` on every upgrade). (#185)
+    - ./tessdata/deu.traineddata:/usr/share/tesseract/tessdata/deu.traineddata:ro
+
+# Shared model/engine config — IDENTICAL on the API and the worker so a job
+# enqueued by the API is converted the same way by the worker.
+x-docling-env: &docling-env
+  # Load built-in layout + OCR models at boot.
+  DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"
+  # Default OCR engine: RapidOCR — faster + more accurate than EasyOCR
+  # on clean text, already pre-installed in the docling-serve-cpu image.
+  DOCLING_SERVE_DEFAULT_OCR_KIND: "rapidocr"
+  # VLM bits: allow inline auto-download of granite-docling on first
+  # `pipeline=vlm` request. The image's default DOCLING_SERVE_ARTIFACTS_PATH
+  # restricts model loading to pre-cached models (and refuses to auto-
+  # download). Setting it empty here unsets the restriction; the cache
+  # still lives at the standard HF location inside the docling-models
+  # named volume, which we mount so the download survives recreates.
+  DOCLING_SERVE_ARTIFACTS_PATH: ""
+  DOCLING_SERVE_DEFAULT_VLM_PRESET: "granite_docling"
+  # Operator hotfix 2026-05-15: bump sync timeout (default 120s was hit by
+  # 8-doc OWUI bulk-upload).
+  DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+  # #129: RQ async engine backed by the stack's valkey (Redis-compatible),
+  # DB index 9 (0=authentik, 1-6/8=various, 7=onyx). Job state lives in valkey
+  # so every uvicorn API worker — and the rq-worker — share it.
+  DOCLING_SERVE_ENG_KIND: "rq"
+  DOCLING_SERVE_ENG_RQ_REDIS_URL: "redis://:${VALKEY_PASSWORD:-}@valkey:6379/9"
+  # #2977: docling-serve (v1.38.2, otel_instrumentation.setup_otel_instrumentation)
+  # logs `Registering RQ metrics collector for Redis at <redis_url>` at every
+  # API worker start, and that URL carries the Valkey password. The URL is ONE
+  # setting (eng_rq_redis_url: no separate password field), and the line is
+  # emitted only while the Prometheus export is on, so the export is off: this
+  # stack scrapes no docling metrics (the line's RQ collector feeds /metrics
+  # only), and the key-less /metrics route goes with it. The password is then
+  # in no log line. Revisit when upstream masks the URL or takes a password
+  # on its own; a re-enabled export must come with a log filter.
+  DOCLING_SERVE_OTEL_ENABLE_PROMETHEUS: "false"
+
+services:
+  # ── API (uvicorn) — serves HTTP + Gradio UI, ENQUEUES jobs to RQ ────────────
+  docling:
+    <<: *docling-common
+    container_name: docling
+    # The UI bundle in the image points its "Open in viewer" button at a third-party
+    # site (doclang.ai) and sends it the converted file; no server setting turns that
+    # off. ./patches/strip-external-viewer.sh rewrites the address in the served bundle
+    # before the server starts and refuses to start if one survives. (The egress
+    # sidecar below fences docling-mcp's server-side fetches only; a click is made by
+    # the browser, so the patch is the control.)
+    entrypoint: ["/bin/sh", "/etc/docling-patches/strip-external-viewer.sh"]
+    command: ["docling-serve", "run"]
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
+    volumes:
+      - docling-scratch:/tmp/docling
+      - docling-models:/opt/app-root/src/.cache/docling/models
+      - ./tessdata/deu.traineddata:/usr/share/tesseract/tessdata/deu.traineddata:ro
+      - ./patches:/etc/docling-patches:ro
+    environment:
+      <<: *docling-env
+      # HTTP concurrency (each worker ~500 MB model state). Memory-constrained
+      # boxes can override DOCLING_UVICORN_WORKERS=1 in .env. Conversion
+      # parallelism now lives in docling-rq-worker, not here.
+      UVICORN_WORKERS: "${DOCLING_UVICORN_WORKERS:-3}"
+      # Web UI at /ui. Up to 1.35 this was a Gradio app; since 1.36 it is a static
+      # React bundle that ships in the image (the Gradio UI was removed upstream).
+      DOCLING_SERVE_ENABLE_UI: "1"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://localhost:5001/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      valkey:
+        condition: service_started
+
+  # ── RQ worker — CONSUMES the queue and does the actual conversion ───────────
+  # This is the real conversion-concurrency knob: scale via
+  # DOCLING_RQ_WORKER_REPLICAS (default 2). No container_name (replicas need
+  # none), no host port, no UI.
+  docling-rq-worker:
+    <<: *docling-common
+    command: ["docling-serve", "rq-worker"]
+    environment:
+      <<: *docling-env
+    deploy:
+      replicas: ${DOCLING_RQ_WORKER_REPLICAS:-2}
+    healthcheck:
+      # The worker has no HTTP server; treat a live process as healthy.
+      test: ["CMD-SHELL", "pgrep -f 'docling-serve rq-worker' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      valkey:
+        condition: service_started
+      docling:
+        condition: service_started
+
+  # ── Docling's MCP server, offered ONLY through mcp-manager's gateway ───────
+  # The SAME pinned image ships `docling-mcp-server` (docling-mcp 3.3.0).
+  # docling-mcp is not multi-tenant on its own (one document cache for every
+  # caller, key lists in its errors, local-path and directory reads, disk
+  # writes, fetches any URL), so the gateway fences it (two tools only,
+  # http(s) sources only, per-caller document keys, scrubbed errors —
+  # mcp-manager app/services/docling_guard.py) and so does the network
+  # (docs/superpowers/specs/2026-10-mcp-rework-design.md §7, rulings I3/R2-1):
+  #   * docling-mcp is on docling-mcp-net ALONE (internal: no route out). Not
+  #     `default` (postgres, valkey, the manager APIs), not `coding-agents`
+  #     (the sandboxes), not `mcp-network` (the per-user credential proxies),
+  #     and no path to mcp-manager or Caddy. The only other members are
+  #     docling-egress and docling-resolver (its DNS, #2674, port 53 only).
+  #   * every URL it fetches goes through docling-egress:3128, which denies
+  #     every private, loopback, link-local and ULA range and the box's own
+  #     addresses AFTER DNS resolution — so a conversion URL cannot be aimed at
+  #     the stack (docling:5001 included: it converts in-process).
+  #   * no env_file, no secret, only the conversion and generation tool groups
+  #     loaded (no manipulation tools), its own scratch (not docling's).
+  docling-mcp:
+    image: ghcr.io/docling-project/docling-serve-cpu:v1.38.2
+    profiles: ["docling"]
+    container_name: docling-mcp
+    restart: unless-stopped
+    entrypoint: ["docling-mcp-server"]
+    command: ["--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000",
+              "conversion", "generation"]
+    environment:
+      DOCLING_MCP_CONVERSION_MODE: "local"
+      # 3.3.0 bounds the in-process document cache (least-recently-used eviction;
+      # 3.2.0 grew without limit) at 10 documents, shared by EVERY caller of this
+      # one process. An evicted key answers "document not found" to the gateway's
+      # export, so ten documents across all users would evict constantly.
+      DOCLING_MCP_CACHE_MAX_DOCUMENTS: "${DOCLING_MCP_CACHE_MAX_DOCUMENTS:-25}"
+      # The models baked into the pinned image (docling's own converter reads
+      # them from here; nothing is downloaded at conversion time).
+      DOCLING_ARTIFACTS_PATH: "/opt/app-root/src/.cache/docling/models"
+      HTTP_PROXY: "http://docling-egress:3128"
+      HTTPS_PROXY: "http://docling-egress:3128"
+      http_proxy: "http://docling-egress:3128"
+      https_proxy: "http://docling-egress:3128"
+      NO_PROXY: ""
+      no_proxy: ""
+    networks:
+      - docling-mcp-net
+    # #2674: docling-core checks every URL source before it fetches it: the
+    # host must resolve, inside this container, to a global address
+    # (docling_core/utils/file.py `_is_safe_url`). docling-mcp-net is
+    # internal, so Docker's embedded DNS does not forward external names here
+    # and EVERY remote URL was refused ("URL is not allowed"). Docker's
+    # embedded DNS still answers the container names (docling-egress) and
+    # forwards every other name to this server from the container's own
+    # namespace: docling-resolver, on this net, at its fixed address.
+    # The answer is the real one, so docling-core keeps refusing private,
+    # loopback and link-local targets; the fetch itself still goes through
+    # docling-egress, which resolves again and enforces its deny list on the
+    # address it dials.
+    dns:
+      - ${DOCLING_RESOLVER_IP:-10.213.77.2}
+    # No search domain: the host's search list would turn a short name into
+    # a host-domain lookup sent upstream. "." means none.
+    dns_search: ["."]
+    tmpfs:
+      - /tmp:size=2g
+    mem_limit: 3g
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      docling-egress:
+        condition: service_started
+      docling-resolver:
+        condition: service_started
+
+  # ── docling-resolver: name resolution for docling-mcp's URL guard (#2674) ──
+  # docling-mcp's `dns:` names this container's fixed address on
+  # docling-mcp-net. ./resolver/forwarder.py (standard library only, run by
+  # the SAME pinned image's Python: no new upstream image) relays each query
+  # unchanged to the embedded DNS of its own namespace, which forwards
+  # external names because this container is also on docling-resolver-edge
+  # (a plain bridge whose only member it is). It forwards only the question
+  # it validated (plus a well-formed EDNS OPT record), and answers itself:
+  # REFUSED for anything but one class-IN A/AAAA query, and for single-label
+  # names; NXDOMAIN for `<name>.docling-mcp-net` and
+  # `<name>.docling-resolver-edge`. Those rules cover only what reaches it:
+  # names on docling-mcp's own network (docling-egress, docling-resolver,
+  # `<name>.docling-mcp-net`) are answered by Docker's embedded DNS inside
+  # docling-mcp before the relay, and resolve to private addresses, which
+  # the URL check and docling-egress both refuse.
+  # It is not on docling-edge (mcp-manager) or any stack network, holds no
+  # secret and no env_file, writes nothing (read-only root), and listens on
+  # port 53 as the image's own non-root user: the namespaced sysctl below
+  # lets an unprivileged process bind it, so no capability is held at all.
+  docling-resolver:
+    image: ghcr.io/docling-project/docling-serve-cpu:v1.38.2
+    profiles: ["docling"]
+    container_name: docling-resolver
+    restart: unless-stopped
+    entrypoint: ["python3", "/etc/docling-resolver/forwarder.py"]
+    command: ["--bind", "${DOCLING_RESOLVER_IP:-10.213.77.2}", "--upstream", "127.0.0.11"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./resolver:/etc/docling-resolver:ro
+    networks:
+      docling-mcp-net:
+        ipv4_address: ${DOCLING_RESOLVER_IP:-10.213.77.2}
+      docling-resolver-edge: {}
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "53"
+    read_only: true
+    mem_limit: 64m
+    cpus: 0.25
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # A single-label name is refused by the relay itself: proves the
+      # listener without depending on the box's upstream DNS.
+      test: ["CMD", "python3", "/etc/docling-resolver/forwarder.py", "--check", "${DOCLING_RESOLVER_IP:-10.213.77.2}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ── docling-egress: docling-mcp's only way out, and the gateway's only way in
+  # The stack's OWN Caddy build (core/Caddy/Dockerfile: caddy 2.11.7 with the
+  # forwardproxy plugin pinned by commit, #2571) — no new upstream image — run
+  # with its own config (./egress/Caddyfile: global `admin off`, so there is
+  # no admin listener at all) and two sites:
+  #   :3128  forward proxy for docling-mcp: explicit deny list (checked after
+  #          DNS resolution) plus the box's own addresses, which
+  #          ./egress/entrypoint.sh collects at start: HOST_IP and whatever
+  #          MAIN_DOMAIN resolves to in the container. It refuses to start only
+  #          when NO valid box address survives into that list (a WARN, and
+  #          `rzfz status` WARNs, when MAIN_DOMAIN does not resolve and only
+  #          HOST_IP is denied); strips X-Authentik-* / X-Rzfz-*.
+  #   :8080  reverse proxy to docling-mcp:8000/mcp, admitted ONLY with HTTP
+  #          Basic `mcp-gateway:<DOCLING_RELAY_SECRET>` — shape-checked by a
+  #          header regexp first (a wrong user or an oversized header never
+  #          reaches bcrypt), then checked by basic_auth against a bcrypt hash
+  #          (constant time) — and stripped before proxying (docling-mcp never
+  #          sees it).
+  # Networks: docling-mcp-net (with docling-mcp) and docling-edge (with
+  # mcp-manager only; plain bridge = the sidecar's internet egress). The
+  # gateway's registry URL is http://docling-egress:8080/mcp.
+  # The ONE secret it receives is DOCLING_RELAY_SECRET, passed by name (never a
+  # literal, never on a command line); the entrypoint hashes it and unsets it
+  # before caddy starts, so caddy holds only the hash. No env_file.
+  docling-egress:
+    image: razzfazz-stack-caddy
+    pull_policy: never
+    profiles: ["docling"]
+    container_name: docling-egress
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/etc/docling-egress/entrypoint.sh"]
+    environment:
+      # `:-`, not `:?`: compose interpolates every service of the file, so a
+      # `:?` would fail EVERY compose command on a box without the key, docling
+      # on or off. ./entrypoint.sh refuses to start without it instead.
+      DOCLING_RELAY_SECRET: ${DOCLING_RELAY_SECRET:-}
+      MAIN_DOMAIN: ${MAIN_DOMAIN:-}
+      # The host's own address (cli/init.sh writes it): denied too, and the
+      # one the sidecar falls back on when MAIN_DOMAIN does not resolve inside
+      # a container (an /etc/hosts-only domain, an offline box).
+      HOST_IP: ${HOST_IP:-}
+    volumes:
+      - ./egress:/etc/docling-egress:ro
+    networks:
+      - docling-mcp-net
+      - docling-edge
+    mem_limit: 128m
+    # Bounds what bcrypt checks of wrong relay passwords can cost the box.
+    cpus: 0.5
+    cap_drop: [ALL]
+    # The caddy binary in razzfazz-stack-caddy carries the FILE capability
+    # cap_net_bind_service=ep. Under no-new-privileges with an empty bounding
+    # set the kernel refuses to exec it at all (rc 126, "Operation not
+    # permitted"): the sidecar crash-looped on "could not hash the relay
+    # secret" (measured on a box, #2086). Granting the one cap the file
+    # names lets the exec through; nothing else is held. Same as
+    # agent-egress-proxy (modules/agents/compose.egress-allowlist.yml).
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  docling-scratch:
+  docling-models:
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge
+  # #2086: docling-mcp's own network (docling-mcp + docling-egress only), and
+  # the edge between docling-egress and mcp-manager (mcp-manager's compose
+  # declares the same name).
+  docling-mcp-net:
+    name: docling-mcp-net
+    driver: bridge
+    internal: true
+    # `internal` stops forwarding, not traffic to the HOST: the bridge still
+    # gets a gateway address on the host, through which a member could reach
+    # the host's own listeners (sshd, the published 80/443). `isolated`
+    # (Docker >= 28) gives the bridge no host address at all. On an older
+    # Docker the fallback is `com.docker.network.bridge.inhibit_ipv4: "true"`
+    # (which one a host accepts depends on its Docker version).
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    # #2674: a fixed subnet, because docling-mcp's `dns:` must name
+    # docling-resolver by address (Docker takes no name there). The resolver's
+    # address is outside ip_range, so no container can take it first.
+    # The default 10.213.77.0/24 is RFC1918 (denied by docling-egress) and
+    # outside every pool Docker allocates from here: 172.16.0.0/12 (the
+    # appliance and harden-host daemon.json), Docker's own 172.17-31 and
+    # 192.168 defaults, the CI runners' 10.201.0.0/16 and openbao-net's
+    # 10.213.76.0/24. A box whose LAN already uses it overrides all three
+    # together in .env (DOCLING_MCP_NET_SUBNET, DOCLING_MCP_NET_IP_RANGE,
+    # DOCLING_RESOLVER_IP): compose cannot derive one from another.
+    ipam:
+      config:
+        - subnet: ${DOCLING_MCP_NET_SUBNET:-10.213.77.0/24}
+          ip_range: ${DOCLING_MCP_NET_IP_RANGE:-10.213.77.128/25}
+  docling-edge:
+    name: docling-edge
+    driver: bridge
+  # #2674: docling-resolver's way to the host's DNS (a plain bridge: Docker's
+  # embedded DNS forwards external names only for a container that has one).
+  # docling-resolver is its only member.
+  docling-resolver-edge:
+    name: docling-resolver-edge
+    driver: bridge

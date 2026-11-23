@@ -1,0 +1,2 @@
+{"attributes":{"timeFieldName":"timestamp","title":"wazuh-alerts-4.x-*"},"id":"rzfz-ip-alerts","migrationVersion":{"index-pattern":"7.6.0"},"references":[],"type":"index-pattern"}
+{"attributes":{"timeFieldName":"timestamp","title":"wazuh-archives-4.x-*"},"id":"rzfz-ip-archives","migrationVersion":{"index-pattern":"7.6.0"},"references":[],"type":"index-pattern"}

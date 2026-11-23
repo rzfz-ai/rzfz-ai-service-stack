@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# The ONE Dify plugin pin table (#2545). Read by `rzfz post-install`
+# (dify_install_plugin, via razzfazz_dify_plugin_pin) and by an offline package (Enterprise)
+# (the package carries exactly these members). Columns, TAB-separated:
+#   plugin    pinned version    full identifier (name:version@checksum)    required|optional
+# required: every box installs it, so a package build fails without it. optional:
+# installed only on some boxes (gpustack: only with a GPUStack profile, #1248), so a
+# build box without it warns and the package carries none. A 3-column row (older
+# tags) is required.
+# gpustack: >=0.0.15 for chat_template_kwargs.enable_thinking passthrough (0.0.8
+# silently drops it); 0.0.16 (#1968).
+# openai_api_compatible: 0.0.34 -> 0.0.66 (#1968). It carries EVERY model
+# registration of this stack. Compatibility was checked field by field against
+# provider/openai_api_compatible.yaml: 0.0.66 requires endpoint_url (always),
+# context_size (llm/text-embedding/rerank) and max_chunks (text-embedding, #1509);
+# _dify_register_models sends all three, and each of the 16 new fields is optional.
+# Note: max_chunks is absent from the 0.0.34 schema, so #1509 was measured on a CPU test box
+# against a NEWER plugin than the old pin.
+# openai_api_compatible: 0.0.66 -> 0.0.83 (#3233). 0.0.66 has the structured-output
+# capability COMMENTED OUT in models/llm/llm.py (`entity.features.append(
+# ModelFeature.STRUCTURED_OUTPUT)`), so Dify 1.18 refuses every structured-output node
+# at stage=capability; 0.0.83 appends it when the credential says
+# structured_output_support supported|native (read in the package, llm.py:272-275).
+# Boxes only worked because Dify's fix_only auto-upgrade had moved the daemon to 0.0.83.
+# Credential schema vs 0.0.66: nothing removed, nothing newly required; new optional
+# multimodal_embedding_format; stream_function_calling gains `native`. Every field
+# _dify_register_models / _dify_manager_llm_extras sends exists with our values.
+# 0.0.83 ran on 0.91 (plugin daemon 0.6.12) 11-11..11-13. Apache-2.0 (dify-official-plugins).
+# an offline package (Enterprise) refuses a build whose openai_api_compatible does not advertise it.
+langgenius/gpustack	0.0.16	langgenius/gpustack:0.0.16@f288904dcea6f54811d7f6795aacdc395368556163bca1253fa2f2eca8c21b30	optional
+langgenius/openai_api_compatible	0.0.83	langgenius/openai_api_compatible:0.0.83@83fe34a84efc3ac71eedf98751b8dd0c41408f3e081ab781994dbdfe572a9593	required
+abesticode/knowledge_pro	0.0.6	abesticode/knowledge_pro:0.0.6@73873eda46ee70c8d528c409381f705f24206d34f913ac4bfee35812c6d4a6e2	required
+junjiem/mcp_sse	0.2.3	junjiem/mcp_sse:0.2.3@ce2b8fa30300474f51da7e7d38543a2d15f4b720aee305e1dad0a8fdf27b9892	required

@@ -1,0 +1,83 @@
+<!-- #2526: UniFi (Network / UniFi OS) CEF events over syslog.
+     The prematch avoids "CEF:0|" because Wazuh's syslog pre-decoder may take
+     "CEF" as the program name and strip it; "Ubiquiti|UniFi" is in the message
+     either way. Wazuh applies only the FIRST matching child decoder, unless
+     the children carry the parent's own name: then they are siblings and ALL
+     apply. So every child below is named rzfz-unifi-cef and extracts one
+     field; a field missing from an event does not stop the others.
+     Real UniFi OS lines have no src= and no UNIFIcategory; the admin name
+     contains spaces and the source IP sits in "msg=... Source IP: a.b.c.d".
+     Check on a running manager with /var/ossec/bin/wazuh-logtest. -->
+<decoder name="rzfz-unifi-cef">
+  <prematch type="pcre2">Ubiquiti\|UniFi</prematch>
+</decoder>
+
+<!-- UniFi Network sends "<host-without-spaces> CEF:0|Ubiquiti|...": the syslog
+     pre-decoder then takes "CEF" as program_name, and a decoder WITHOUT
+     <program_name> is never tried for such an event. This second parent of the
+     same name catches that form; the children below attach to both. -->
+<decoder name="rzfz-unifi-cef">
+  <program_name>^CEF$</program_name>
+  <prematch type="pcre2">Ubiquiti\|UniFi</prematch>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">Ubiquiti\|UniFi[^|]*\|([^|]*)\|([^|]*)\|([^|]*)\|(\d+)\|</regex>
+  <order>unifi.version,unifi.signature_id,unifi.name,unifi.severity</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">(?|\bsrc=(\S+)|\bUNIFIsrcClientIp=(\S+))</regex>
+  <order>srcip</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">Source IP: (\d+\.\d+\.\d+\.\d+)</regex>
+  <order>srcip</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bUNIFIadmin=(.+?)(?= [A-Za-z]+=|$)</regex>
+  <order>dstuser</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bUNIFIcategory=(\S+)</regex>
+  <order>unifi.category</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bUNIFIsubCategory=(.+?)(?= [A-Za-z]+=|$)</regex>
+  <order>unifi.subcategory</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bdst=(\S+)</regex>
+  <order>dstip</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bdpt=(\d+)</regex>
+  <order>dstport</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bproto=(\S+)</regex>
+  <order>protocol</order>
+</decoder>
+
+<decoder name="rzfz-unifi-cef">
+  <parent>rzfz-unifi-cef</parent>
+  <regex type="pcre2">\bUNIFIpolicyName=(.+?)(?= [A-Za-z]+=|$)</regex>
+  <order>unifi.policy</order>
+</decoder>
+

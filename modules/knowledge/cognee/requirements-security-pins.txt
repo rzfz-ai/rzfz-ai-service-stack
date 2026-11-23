@@ -1,0 +1,35 @@
+# Security floor for the cognee image's virtualenv (#2336). The base image
+# (cognee/cognee) ships the versions of its own lock file; each pin below is the
+# first release that closes every Critical/High advisory published for the
+# version the base carries (OSV/GHSA data, 2026-10-20; base cognee 1.6.5 lock
+# re-read 2026-10-23: nltk 3.10.3, pillow 12.3.0, pypdf 6.19.0, PyJWT 2.14.0,
+# yarl 1.25.1 and urllib3 2.8.0 are what it carries, aiohttp 3.14.3 is below
+# the fix), and it is installed over
+# the base by the Dockerfile. Exact pins only (tests/unit/consistency/test_2762_*).
+# Re-derive on every cognee base bump: a pin that the new base already exceeds
+# must be dropped, or pip would downgrade it.
+#
+# Version the 1.6.5 base carries (uv.lock) -> pinned. A pin equal to the base is a
+# no-op today and keeps the floor if a later base moves down.
+# nltk      3.10.3 (base) -> 3.10.3  (1.5.3 carried 3.9.4: 6 Critical, 36 High; the last two advisories name 3.10.3)
+# pillow    12.3.0 (base) -> 13.0.0  (#3343, 2026.11-ga.1: 11 Critical on 12.3.0 in the 2026.11-ga
+#                              SBOM, no 12.x backport. fastembed declares pillow<13, pip prints
+#                              that conflict and installs anyway; fastembed uses PIL for its
+#                              image models only, the text embeddings cognee uses never touch it)
+# certifi   2026.7.22 (base) -> 2026.10.23  (#3343: 1 Critical, closed from 2026.10.18)
+# pypdf     6.19.0 (base) -> 6.19.0  (1.5.3 carried 6.13.3: 20 High)
+# PyJWT     2.14.0 (base) -> 2.14.0  (1.5.3 carried 2.13.0: 2 Critical, 10 High)
+# anyio     4.15.1 (base) -> 4.15.1  (past the 4.14.2 that closed 2 Critical, 2 High; pinned at what
+#                              the base carries so the pin can never LOWER it)
+# aiohttp   3.14.3 (base) -> 3.14.4  (4 High; 3.14.4 needs yarl>=1.25.1)
+# yarl      1.25.1 (base) -> 1.25.1
+# urllib3   2.8.0  (base) -> 2.8.0   (1.5.3 carried 2.7.0: 4 High)
+nltk==3.10.3
+pillow==13.0.0
+certifi==2026.10.23
+pypdf==6.19.0
+PyJWT==2.14.0
+anyio==4.15.1
+aiohttp==3.14.4
+yarl==1.25.1
+urllib3==2.8.0

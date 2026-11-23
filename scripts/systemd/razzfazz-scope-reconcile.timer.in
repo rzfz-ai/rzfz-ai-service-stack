@@ -1,0 +1,9 @@
+[Unit]
+Description=razzfazz.ai run the knowledge-scope and role reconcile every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
