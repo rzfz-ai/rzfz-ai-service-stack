@@ -1,0 +1,107 @@
+version: 1
+metadata:
+  name: "Google - Property Mappings"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Google OAuth - Username"
+    attrs:
+      expression: |
+        email = info.get("email")
+        if not email:
+            return {"username": ""}
+        return {"username": email.split("@")[0].replace(".", "_")}
+
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Google OAuth - Name"
+    attrs:
+      expression: |
+        name = info.get("name")
+        if not name:
+            return {"name": ""}
+        return {"name": name}
+
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Google OAuth - Avatar"
+    attrs:
+      expression: |
+        # Extract the picture URL from the Google 'info' object
+        picture = info.get("picture")
+        # If a picture exists, update the user's avatar attribute
+        if picture:
+            return {
+                "attributes": {
+                    "avatar": picture
+                }
+            }
+        return {}
+
+  # #2473 D4: the user's Google groups (group e-mail), Cloud Identity with the login token
+  # (scope cloud-identity.groups.readonly). Never raises and never writes a partial list:
+  # a refused call, a missing token or e-mail, a malformed or incomplete answer or any
+  # error returns {}, so the previous ids stay (an outage must not strip roles). A 200
+  # without "memberships" is Google's encoding of "no groups" (an empty repeated field
+  # is omitted) and is written as []. A token whose granted scopes lack the groups scope
+  # (a user can untick it on Google's consent screen) is a failed lookup, so the
+  # reconcile's staleness limit drops the sync-added groups instead of keeping them.
+  # The e-mail enters the CEL query as an escaped single-quoted string literal.
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "razzfazz.ai - Upstream groups (Google)"
+    attrs:
+      expression: |
+        GROUPS_SCOPE = "https://www.googleapis.com/auth/cloud-identity.groups.readonly"
+        try:
+            import requests
+            tok = token.get("access_token") if isinstance(token, dict) else None
+            email = info.get("email") if isinstance(info, dict) else None
+            if not isinstance(tok, str) or not tok or not isinstance(email, str) or not email:
+                ak_logger.warning("rzfz-upstream-sync: no Google access token or e-mail, ids unchanged")
+                return {}
+            granted = token.get("scope")
+            if not isinstance(granted, str) or GROUPS_SCOPE not in granted.split():
+                ak_logger.warning("rzfz-upstream-sync: groups scope not granted, ids unchanged")
+                return {}
+            if any(ord(c) < 32 for c in email):
+                ak_logger.warning("rzfz-upstream-sync: e-mail not usable in a Cloud Identity query, ids unchanged")
+                return {}
+            literal = "'" + email.replace("\\", "\\\\").replace("'", "\\'") + "'"
+            ids, page = [], None
+            for _page in range(20):
+                params = {"query": "member_key_id == " + literal + " && 'cloudidentity.googleapis.com/groups.discussion_forum' in labels",
+                          "pageSize": 500}
+                if page:
+                    params["pageToken"] = page
+                r = requests.get(
+                    "https://cloudidentity.googleapis.com/v1/groups/-/memberships:searchTransitiveGroups",
+                    params=params, headers={"Authorization": "Bearer " + tok}, timeout=10)
+                if r.status_code != 200:
+                    ak_logger.warning("rzfz-upstream-sync: Cloud Identity refused, ids unchanged", status=r.status_code)
+                    return {}
+                body = r.json()
+                members = body.get("memberships", []) if isinstance(body, dict) else None
+                if not isinstance(members, list):
+                    ak_logger.warning("rzfz-upstream-sync: malformed Cloud Identity answer, ids unchanged")
+                    return {}
+                for m in members:
+                    key = m.get("groupKey") if isinstance(m, dict) else None
+                    gid = key.get("id") if isinstance(key, dict) else None
+                    if not isinstance(gid, str) or not gid.strip():
+                        ak_logger.warning("rzfz-upstream-sync: malformed Cloud Identity group, ids unchanged")
+                        return {}
+                    ids.append("google:" + gid.strip())
+                page = body.get("nextPageToken")
+                if not page:
+                    return {"attributes": {"rzfz_upstream_ids": sorted(set(ids))}}
+                if not isinstance(page, str):
+                    ak_logger.warning("rzfz-upstream-sync: malformed Cloud Identity page token, ids unchanged")
+                    return {}
+            ak_logger.warning("rzfz-upstream-sync: more than 20 Cloud Identity pages, ids unchanged")
+            return {}
+        except Exception as exc:
+            ak_logger.warning("rzfz-upstream-sync: Google lookup failed, ids unchanged", error=type(exc).__name__)
+            return {}

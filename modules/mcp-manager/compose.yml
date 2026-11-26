@@ -1,0 +1,404 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+services:
+  # ==========================================
+  # MCP Manager: Per-User Personal MCP Orchestration (#36)
+  # ==========================================
+  # Provisions per-user MCP-proxy sidecars (one per user+integration) that hold
+  # THAT user's external credentials and expose an SSO-gated HTTP MCP endpoint,
+  # wired into the user's own agents (Hermes / Moltis / OpenCode).
+  #
+  # SECURITY: holds the AES-GCM master key (MCP_MANAGER_SECRET_KEY) in memory;
+  # credentials are encrypted at rest in mcp_manager_db. Talks to docker via
+  # docker-socket-proxy (SAME constrained grants as agent-manager — no BUILD /
+  # SECRETS / SWARM). Stores every user's external creds → SECURITY REVIEW
+  # REQUIRED before merge.
+  mcp-manager:
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
+    image: razzfazz-mcp-manager:latest
+    pull_policy: never
+    container_name: mcp-manager
+    profiles: ["mcp"]
+    restart: unless-stopped
+    mem_limit: 512m
+    # #2472 B22: not root. uid 100 owns the svc-mcp-manager credential files
+    # (0400) the OpenBao identity reconcile writes into openbao-mcp-cred; the
+    # manager needs no capability (port 5000, docker through the socket proxy
+    # over TCP, nothing written but /tmp).
+    user: "100:1000"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${MCP_MANAGER_PORT:-5120}:5000"
+    # #2472: NO env_file. The stack .env holds AUTHENTIK_BOOTSTRAP_TOKEN (a write
+    # token for the whole directory) and every other service's secrets; an
+    # env_file would hand all of it to this container and the read-only
+    # Authentik token below would mean nothing. Every key mcp-manager reads is
+    # listed here, by name (tests/unit/consistency/
+    # test_2472_mcp_manager_never_gets_the_bootstrap_token.py renders it).
+    environment:
+      # Which modules are on (the gateway's requires_profiles) and the
+      # network mode (requires_egress), as the stack .env says.
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      RAZZFAZZ_NETWORK_MODE: ${RAZZFAZZ_NETWORK_MODE:-online}
+      RAZZFAZZ_VERSION: ${RAZZFAZZ_VERSION:-}
+      TZ: ${TZ:-}
+      # #2086: the gateway's relay secret for the docling-egress sidecar
+      # (core/mcp/mcp-servers.yaml relay_secret_env). Empty => docling is
+      # "not configured" at the gateway (fail closed).
+      DOCLING_RELAY_SECRET: ${DOCLING_RELAY_SECRET:-}
+      # Keys the HMAC behind every per-user MCP instance hostname
+      # (caddy_client.instance_token; wiki/MCP-Manager.md). Empty => falls
+      # back to MCP_MANAGER_SECRET_KEY, as it always did.
+      MCP_DOMAIN_TOKEN_SECRET: ${MCP_DOMAIN_TOKEN_SECRET:-}
+      MCP_MANAGER_SECRET_KEY: ${MCP_MANAGER_SECRET_KEY:-}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-}
+      MAIN_DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+      MCP_DOMAIN: mcp.${MAIN_DOMAIN:-razzfazz-box}
+      MCP_MANAGER_DATABASE_URL: postgresql://${MCP_MANAGER_DB_USER:-}:${MCP_MANAGER_DB_PASSWORD:-}@postgres/${MCP_MANAGER_DB:-mcp_manager_db}
+      MCP_NETWORK: mcp-network
+      MCP_MAX_INSTANCES: ${MCP_MAX_INSTANCES:-50}
+      # #61 (HIGH-1): shared secret gating /internal/* (agent-manager presents
+      # it). Empty => /internal fails closed (401).
+      MCP_INTERNAL_TOKEN: ${MCP_INTERNAL_TOKEN:-}
+      # #2472 (design record §7, ruling 2): the DEDICATED read-only Authentik
+      # token (A17 creates it) for the GET-only user lookups of
+      # gateway_identity.AuthentikDirectory. Empty => no directory: Open WebUI
+      # callers stay unresolved and pre-upgrade rows stay unattributed (fail
+      # closed). mcp-manager never receives AUTHENTIK_BOOTSTRAP_TOKEN.
+      MCP_MANAGER_AUTHENTIK_READONLY_TOKEN: ${MCP_MANAGER_AUTHENTIK_READONLY_TOKEN:-}
+      # #2472 (§2.3): resolved exactly as Open WebUI's own (modules/chat/
+      # compose.yml). While true, the Open WebUI path gets no personal
+      # credentials: anyone could sign up with a person's email.
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-false}
+      # #2472 system_oauth: while Open WebUI signs in through Authentik
+      # (OWUI_OIDC_ACTIVE, derived from ENABLE_OPENWEBUI_OIDC), its gateway
+      # connections forward the chat user's Authentik access token. The
+      # gateway checks it with the openwebui-oidc provider's PUBLIC keys:
+      # issuer from AUTHENTIK_DOMAIN, audience = the client id (not secret).
+      # The client secret never comes here.
+      OWUI_OIDC_ACTIVE: ${OWUI_OIDC_ACTIVE:-}
+      OPENWEBUI_OIDC_CLIENT_ID: ${OPENWEBUI_OIDC_CLIENT_ID:-}
+      AUTHENTIK_DOMAIN: ${AUTHENTIK_DOMAIN:-auth.localhost}
+      # F-A3: talk to docker-socket-proxy, never the raw socket.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      # OAuth client ids and secrets (server-side only). Empty until the
+      # operator registers OAuth apps per box; the card reads "not set up on
+      # this box" and the OAuth start route refuses until then. #3424: the
+      # GitHub and Google client ids come from .env like every other provider.
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      # #3453: what Google Workspace may do. The provisioner hands these to
+      # each person's Google proxy at start (catalogue env_map {{policy:…}});
+      # the proxy enforces them and reads any other spelling as the strictest
+      # value (read-only, false).
+      GOOGLE_MCP_MODE: ${GOOGLE_MCP_MODE:-read-write}
+      GOOGLE_MCP_ALLOW_SEND: ${GOOGLE_MCP_ALLOW_SEND:-true}
+      GOOGLE_MCP_SEND_DELETE_AGENTS: ${GOOGLE_MCP_SEND_DELETE_AGENTS:-true}
+      # #2554: the gateway's Gitea OAuth app (registered by `rzfz post-install`,
+      # ensure_gitea_mcp_oauth_app). GITEA_DOMAIN fills the browser-facing
+      # ${GITEA_DOMAIN} in core/mcp/oauth-providers.yaml; the code exchange
+      # itself stays in-stack (http://gitea:3000, oauth.INTERNAL_TOKEN_URLS).
+      GITEA_DOMAIN: ${GITEA_DOMAIN:-git.${MAIN_DOMAIN:-razzfazz-box}}
+      OAUTH_GITEA_CLIENT_ID: ${OAUTH_GITEA_CLIENT_ID:-}
+      OAUTH_GITEA_CLIENT_SECRET: ${OAUTH_GITEA_CLIENT_SECRET:-}
+      # #2472: the gateway's Atlassian Cloud OAuth app (core/mcp/
+      # oauth-providers.yaml `atlassian`; registered by the operator at
+      # developer.atlassian.com). Empty => "not configured".
+      OAUTH_ATLASSIAN_CLIENT_ID: ${OAUTH_ATLASSIAN_CLIENT_ID:-}
+      OAUTH_ATLASSIAN_CLIENT_SECRET: ${OAUTH_ATLASSIAN_CLIENT_SECRET:-}
+      # #2472: the gateway's Microsoft 365 (Entra) app. M365_TENANT_ID fills
+      # the tenant path of core/mcp/oauth-providers.yaml `m365` (a tenant id
+      # or domain only; empty or 'common' => not configured).
+      M365_TENANT_ID: ${M365_TENANT_ID:-}
+      OAUTH_M365_CLIENT_ID: ${OAUTH_M365_CLIENT_ID:-}
+      OAUTH_M365_CLIENT_SECRET: ${OAUTH_M365_CLIENT_SECRET:-}
+      # #3433: what Microsoft 365 may do (app/services/m365_guard.py): the
+      # scopes a person is asked for, and the gateway's tool rules. The
+      # defaults are unrestricted; any other spelling is the strictest value.
+      M365_MCP_MODE: ${M365_MCP_MODE:-read-write}
+      M365_MCP_ALLOW_SEND: ${M365_MCP_ALLOW_SEND:-true}
+      M365_MCP_SEND_DELETE_AGENTS: ${M365_MCP_SEND_DELETE_AGENTS:-true}
+      M365_MCP_SEND_DELETE_WORKFLOWS: ${M365_MCP_SEND_DELETE_WORKFLOWS:-true}
+      M365_MCP_CONFIRM_SEND_DELETE: ${M365_MCP_CONFIRM_SEND_DELETE:-false}
+      # #3433: Microsoft 365 writes, sends and deletes also go to this JSON
+      # Lines audit file (AuditLogger), which the host's Wazuh agent reads
+      # (scripts/install-wazuh-agent.sh AUDIT_SOURCES).
+      MCP_AUDIT_LOG_PATH: /var/log/razzfazz/mcp-audit.log
+      # #36 two-tier cognee memory: the manager auto-provisions per-user cognee
+      # accounts + API keys (personal memory) and grants company-brain reads,
+      # authenticating to the cognee backend as the admin/default user. The
+      # personal cognee integration is FAIL-CLOSED when these are unset or the
+      # backend does not enforce access control.
+      COGNEE_BASE_URL: http://cognee:8000
+      COGNEE_ADMIN_EMAIL: razzfazz-ai-admin@${MAIN_DOMAIN:-razzfazz-box.local}
+      # #2472 review: NO fallback to AUTHENTIK_BOOTSTRAP_PASSWORD. That is the
+      # Authentik admin's password, a write credential for the whole
+      # directory; mcp-manager must never hold it. Empty => the manager's
+      # cognee provisioning fails closed (init and upgrade mint the key).
+      COGNEE_ADMIN_PASSWORD: ${COGNEE_ADMIN_PASSWORD:-}
+      # Shared lib on the import path (bind-mounted below).
+      PYTHONPATH: /app/common
+      # #2472 B22: with the openbao profile on, OAuth tokens live in OpenBao
+      # (a technical user's under secret/apps/<svc>/oauth/, a person's under
+      # secret/users/<sub>/oauth/ once A19's gate holds), written as the
+      # AppRole svc-mcp-manager from the read-only credential volume below.
+      OPENBAO_ADDR: http://openbao:8200
+      OPENBAO_SUB_IS_UID: ${OPENBAO_SUB_IS_UID:-false}
+    networks:
+      # #61 NEW-2, UPDATED for #619/#639: mcp-manager now JOINS mcp-network —
+      # since #619 retired the dynamic Caddy routes, the manager's wildcard
+      # bearer-relay IS the bridge to the per-user proxies (Caddy no longer
+      # dials them), so it must resolve them by name. The invariant moves
+      # from topology to explicit gates, and is STRONGER than before:
+      #   * /internal/*  — X-MCP-Internal-Token (hmac), fails closed (#61)
+      #   * api/dashboard/oauth — Caddy source-IP anchor (#639; the #397
+      #     pattern): in-network header forgery from a compromised proxy is
+      #     refused before any auth-header is read
+      #   * instance hosts — the wildcard hook's own peer anchor + per-proxy
+      #     bearer (constant-time), unknown hosts 404
+      # The proxies themselves stay mcp-network-ONLY (unchanged).
+      - default
+      - mcp-network
+      # #1016: reach the isolated docker-socket-proxy (mcp-manager provisions
+      # per-user proxy containers through it).
+      - docker-ctl
+      # #2086: the gateway's ONLY path to Docling's MCP server — the
+      # docling-egress relay (http://docling-egress:8080/mcp, relay secret
+      # required). mcp-manager never joins docling-mcp-net.
+      - docling-edge
+      # #2472: the gateway's only path to mcp-atlassian (a dedicated edge:
+      # nothing else is on it).
+      - mcp-atlassian-edge
+      # #2472: the gateway's only path to ms365-mcp.
+      - mcp-m365-edge
+      # #2472 B22: reach http://openbao:8200 (OAuth tokens only, the
+      # svc-mcp-manager policy).
+      - openbao-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:5000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      # Live-edit catalog + provider registry without rebuilding the image
+      # (docker restart mcp-manager picks up edits).
+      - ../../core/mcp/personal-mcp-catalog.yaml:/personal-mcp-catalog.yaml:ro
+      - ../../core/mcp/oauth-providers.yaml:/oauth-providers.yaml:ro
+      # #2472: the MCP gateway's server registry (`gateway_servers:`).
+      - ../../core/mcp/mcp-servers.yaml:/mcp-servers.yaml:ro
+      # Shared auth library (build context can't COPY it — same as agent-manager).
+      - ../../core/common/razzfazz_common:/app/common/razzfazz_common:ro
+      # #2473: the role catalogue (core/rbac/roles.yaml); razzfazz_common.rbac reads it.
+      - ../../core/rbac/roles.yaml:/etc/razzfazz/rbac/roles.yaml:ro
+      # #2472 B22: svc-mcp-manager's role_id and secret_id, written by the
+      # OpenBao identity reconcile (modules/apps/openbao/compose.yml).
+      - openbao-mcp-cred:/run/rzfz-bao:ro
+      # #3433: the audit file Wazuh collects (MCP_AUDIT_LOG_PATH). The image
+      # creates the directory owned by uid 100, so a fresh volume is too.
+      - mcp-manager-audit:/var/log/razzfazz
+
+  # ==========================================
+  # Jira + Confluence MCP server (#2472)
+  # ==========================================
+  # For Open WebUI, Dify and the agents, reached ONLY through the MCP gateway
+  # (core/mcp/mcp-servers.yaml `atlassian`). One stateless container; the
+  # caller's Atlassian OAuth token (or a technical user's client-credentials
+  # token) arrives per request from the gateway. It holds no credential of
+  # its own: the site and cloud id are not secrets. Opt-in profile: it needs
+  # an Atlassian Cloud site and an OAuth app.
+  mcp-atlassian:
+    image: ghcr.io/sooperset/mcp-atlassian:${MCP_ATLASSIAN_VERSION:-0.23.1}
+    profiles: ["mcp-atlassian"]
+    container_name: mcp-atlassian
+    restart: unless-stopped
+    command: ["--transport", "streamable-http", "--port", "9000", "--host", "0.0.0.0"]
+    environment:
+      STATELESS: "true"
+      JIRA_URL: ${ATLASSIAN_SITE_URL:-}
+      CONFLUENCE_URL: ${ATLASSIAN_SITE_URL:-}/wiki
+      ATLASSIAN_OAUTH_CLOUD_ID: ${ATLASSIAN_CLOUD_ID:-}
+      # User-provided tokens mode: every request brings its own bearer.
+      ATLASSIAN_OAUTH_ENABLE: "true"
+    networks:
+      # A dedicated edge to mcp-manager, NOT mcp-network (the per-user
+      # credential proxies), the stack default or coding-agents (tests/unit/
+      # consistency/test_2086_gateway_upstreams_are_off_the_sandbox_net.py).
+      # Not internal: it calls the Atlassian Cloud APIs.
+      - mcp-atlassian-edge
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  # ==========================================
+  # Microsoft 365 MCP server (#2472)
+  # ==========================================
+  # Mail, calendar, OneDrive and SharePoint through Microsoft Graph, AS the
+  # user: the gateway (core/mcp/mcp-servers.yaml `m365`) hands it the
+  # person's own Entra token as the bearer on every request. Read-only in
+  # 2026.11, no dynamic client registration, no On-Behalf-Of exchange — so it
+  # holds no client secret (the client id and tenant only keep its own
+  # sign-in endpoints off the multi-tenant default app).
+  ms365-mcp:
+    image: ghcr.io/softeria/ms-365-mcp-server:${MS365_MCP_VERSION:-0.156.2}
+    profiles: ["mcp-m365"]
+    container_name: ms365-mcp
+    restart: unless-stopped
+    # #3433: M365_MCP_MODE picks the flags. read-write (the default, also
+    # when unset or empty) drops --read-only, and then --allowed-scopes limits
+    # the tools to the scopes the gateway asks a person for
+    # (core/mcp/oauth-providers.yaml m365 scopes_read_write, + scopes_send
+    # unless M365_MCP_ALLOW_SEND is not true); read-only and any other value
+    # is --read-only. The tool lists of each mode are measured in
+    # tests/fixtures/ms365-mcp/tools-<version>.json.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        case "$${M365_MCP_MODE:-read-write}" in
+          read-write)
+            scopes="User.Read Mail.ReadWrite Calendars.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All"
+            if [ "$${M365_MCP_ALLOW_SEND:-true}" = "true" ]; then scopes="$$scopes Mail.Send"; fi
+            exec ms-365-mcp-server --http 3000 --org-mode --allowed-scopes "$$scopes"
+            ;;
+          *)
+            exec ms-365-mcp-server --http 3000 --org-mode --read-only
+            ;;
+        esac
+    environment:
+      M365_MCP_MODE: ${M365_MCP_MODE:-read-write}
+      M365_MCP_ALLOW_SEND: ${M365_MCP_ALLOW_SEND:-true}
+      MS365_MCP_CLIENT_ID: ${OAUTH_M365_CLIENT_ID:-}
+      MS365_MCP_TENANT_ID: ${M365_TENANT_ID:-}
+      MS365_MCP_DISABLE_DCR: "true"
+      # It creates its log directory at start (~/.ms-365-mcp-server/logs by
+      # default) and exits when it cannot; the root is read-only, so the logs
+      # go to the tmpfs.
+      MS365_MCP_LOG_DIR: /tmp/ms365-logs
+      # #3433: at info it logs every request body ("Set body param: ..."), i.e.
+      # mail text and file content; warnings and errors only.
+      LOG_LEVEL: warn
+    networks:
+      # A dedicated edge to mcp-manager (see mcp-atlassian). Not internal: it
+      # calls Microsoft Graph.
+      - mcp-m365-edge
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  # ==========================================
+  # Test/Echo MCP image builder (#36 P2)
+  # ==========================================
+  # Build-only one-shot (like agent-manager's coding-tools-image). Builds the
+  # self-contained test MCP image the catalog references for `test-echo` so the
+  # provisioning → routing → cred-injection → agent-reachability chain can be
+  # proven end-to-end on a test box WITHOUT real third-party creds.
+  mcp-test-echo-image:
+    build:
+      context: ./test-echo-mcp
+      dockerfile: Dockerfile
+    image: razzfazz-mcp-test-echo:latest
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["mcp"]
+    container_name: mcp-test-echo-image-builder
+    # A build-only one-shot: it exits 0 at once, and the HEALTHCHECK its
+    # image inherits would mark the exited container unhealthy.
+    healthcheck:
+      disable: true
+    restart: "no"
+    # #1280: build-only one-shot — the IMAGE is the deliverable, the container
+    # must exit 0 at once. The image ENTRYPOINT is the real service entrypoint
+    # and ignores argv, so `command: ["true"]` alone kept these running until
+    # the stack stopped (Exited 137). Overriding the entrypoint makes the
+    # contract explicit and independent of the image; cli/init.sh's
+    # razzfazz.init gate (#1247) then reports OK instead of PENDING/STOPPED.
+    entrypoint: ["/bin/true"]
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+  # ==========================================
+  # razzfazz-mcp-proxy image builder, Google build (#2472/#2086, B9)
+  # ==========================================
+  # Build-only one-shot, like mcp-test-echo-image. The catalogue's `google`
+  # entry and the gateway (gateway_credentials.PINNED_PROXY_IMAGES) name this
+  # exact tag; the tag is content-addressed (the rule is in
+  # modules/mcp-manager/mcp-proxy/Dockerfile), so a changed source needs a
+  # new tag in all four places.
+  mcp-proxy-image:
+    build:
+      context: ./mcp-proxy
+      dockerfile: Dockerfile
+    image: razzfazz-mcp-proxy:google-013c166da92a
+    pull_policy: never  # #184 WS2a: built at install; never build/pull at runtime
+    profiles: ["mcp"]
+    container_name: mcp-proxy-image-builder
+    # A build-only one-shot: it exits 0 at once, and the HEALTHCHECK its
+    # image inherits would mark the exited container unhealthy.
+    healthcheck:
+      disable: true
+    restart: "no"
+    entrypoint: ["/bin/true"]
+    command: ["true"]
+    labels:
+      razzfazz.init: "true"
+
+networks:
+  mcp-network:
+    name: mcp-network
+    driver: bridge
+  # #1016 — isolated control-plane net for the socket proxy (declared in
+  # core/compose.yml). Compose merges this identical name-keyed declaration.
+  docker-ctl:
+    name: docker-ctl
+    driver: bridge
+    internal: true
+  # #2086 — the edge to docling-egress (declared in
+  # modules/doc-processing/docling/compose.yml; identical name-keyed declaration).
+  docling-edge:
+    name: docling-edge
+    driver: bridge
+  # #2472 — mcp-manager <-> mcp-atlassian only. Not internal: the upstream
+  # reaches the Atlassian Cloud APIs.
+  mcp-atlassian-edge:
+    name: mcp-atlassian-edge
+    driver: bridge
+  # #2472 — mcp-manager <-> ms365-mcp only. Not internal: the upstream reaches
+  # Microsoft Graph.
+  mcp-m365-edge:
+    name: mcp-m365-edge
+    driver: bridge
+  # #2472 B22: identical to core/compose.yml's declaration (name-keyed, merged).
+  openbao-net:
+    name: openbao-net
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.213.76.0/24
+          ip_range: 10.213.76.128/25
+          gateway: 10.213.76.1
+
+volumes:
+  # #2472 B22: name-keyed, the same volume the openbao module declares and
+  # the identity reconcile fills (modules/apps/openbao/compose.yml).
+  openbao-mcp-cred:
+    name: openbao-mcp-cred
+  # #3433: mcp-manager's audit file (Microsoft 365 writes, sends, deletes).
+  mcp-manager-audit:

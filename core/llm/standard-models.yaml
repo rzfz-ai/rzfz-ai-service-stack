@@ -1,0 +1,705 @@
+# core/llm/standard-models.yaml
+#
+# Single declarative source-of-truth for the standard LLMs in razzfazz-ai-service-stack.
+# Consumed by `core/llm/sync.py` to push consistent config to:
+#
+#   1. gpustack (model registrations + backend_parameters via API)
+#   2. Open WebUI (per-model params.num_ctx / max_tokens in the postgres model table)
+#   3. Dify (provider_models registrations — keep schema in sync; UI re-registration still required)
+#   4. Cognee (LLM_MODEL / EMBEDDING_MODEL env in .env)
+#   5. moltis (per-user [models.<id>] context_window blocks in moltis.toml)
+#   6. hermes (per-user `hermes config set model.context_length`)
+#   7. agent catalog (catalog.py reads agents.<name>.role → models.<id> at agent provision)
+#   8. coding-tools entrypoint.sh (template substitution at image build)
+#
+# When editing this file:
+#
+#   • Use kebab-case-or-dots in model keys (must match the alias the model is served under in gpustack)
+#   • per_slot_context MUST equal ctx-size ÷ parallel (computed, but stated here for consumer apps that need it directly)
+#   • per_slot_context MUST NOT exceed max_context_length (GGUF's declared training max)
+#   • run `core/llm/sync.py --dry-run` after editing to preview consumer-side changes; then `core/llm/sync.py` to apply
+#
+# Hardware-budget note: VRAM accounting on Strix Halo unified-memory APUs requires care — see the
+# project memory `project_strix_halo_vulkan_vram_not_rss.md`. As of 2026-05-12 the dev box runs all
+# 6 standard models within 86 GiB / 96 GiB available with ~10 GiB headroom; the worker boxes have
+# more headroom and could push qwen3.6 to ctx=1M par=4 (full 262K per slot for both models). When
+# operating on a different box, audit the VRAM budget BEFORE bumping ctx-size or parallel.
+
+version: 1
+
+# ── Models ───────────────────────────────────────────────────────────────────
+# Every model the stack ships with. Add/remove entries here; sync.py reconciles.
+models:
+
+  gemma4:
+    huggingface_repo_id: unsloth/gemma-4-26B-A4B-it-GGUF
+    huggingface_filename: gemma-4-26B-A4B-it-Q8_0.gguf
+    huggingface_revision: c099eb48e663fd284577b04978a94ffccb261841
+    sha256:
+      gemma-4-26B-A4B-it-Q8_0.gguf: 5f7cbd0f4564e84342fc34321a09acb54b1a3da9215124e5bf444baa6dda152c
+      mmproj-F16.gguf: 418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f
+    # #1256: gemma4 is vision-capable and this field was MISSING — the only
+    # place its projector was ever named was the LLM-Manager catalog, so the
+    # offline package never bundled it (iter_mmproj skips a model with no
+    # sidecar) and an air-gapped box lost gemma4's vision silently. Repo
+    # listing on HF 2026-09-04: mmproj-BF16.gguf 1 194 828 256 B ·
+    # mmproj-F16.gguf 1 193 058 784 B · mmproj-F32.gguf 2 291 200 480 B.
+    # F16 is what the catalog has been deploying, so declaring it here
+    # changes no live behaviour — it only makes the value reachable by the
+    # other consumers. (Unlike qwen3.6 there is no byte-verified box copy to
+    # prefer, and the ~1.1 GB saving over F32 is real.)
+    huggingface_mmproj_filename: mmproj-F16.gguf
+    backend_parameters:
+      - --ctx-size=1048576       # total KV pool (per_slot_context × parallel)
+      - --parallel=4
+      - --flash-attn=on
+      - --cache-type-k=q8_0
+      - --cache-type-v=q8_0
+      - --temp=1.0
+      - --top-p=0.95
+      - --top-k=64
+      # CRITICAL: do NOT remove --no-cache-prompt or add --swa-full at this ctx-size.
+      # b9101 has a bug in prompt-cache save (state_seq_get_data → ggml_abort) when SWA
+      # layers' KV tensors are present — see PR ggml-org/llama.cpp#13194 commentary.
+      # Workaround --swa-full would fully-allocate SWA layer KV (~256× baseline at our
+      # ctx) and instantly OOM the host. --no-cache-prompt avoids the cache-save path
+      # entirely with zero memory cost. Real fix is upgrading llama.cpp past b9101 (M031-S5).
+      - --no-cache-prompt
+      # Cap llama-server's default 8 GiB host-RAM prompt cache (PR ggml-org/llama.cpp#16391,
+      # default ON since 2025-10) — over 8h of vision load the cache + SWA-checkpoint
+      # storage grew RSS to 9.5 GiB on the prod worker (host RAM 31 GiB total → 391 MiB
+      # free → 4 GiB swap engaged → tok/s drop 30%, request timeouts at 300s). Issues
+      # ggml-org/llama.cpp#21690 + #22127 + discussion #18488. Setting both to 0 keeps
+      # RSS flat (~1 GiB) with zero correctness impact; minor loss of prompt-reuse speedup.
+      - --cache-ram=0
+      - --ctx-checkpoints=0
+    max_context_length: 262144   # GGUF metadata: gemma4.context_length (training max)
+    per_slot_context: 262144     # = ctx-size ÷ parallel — full per-slot capability
+    max_completion_tokens: 16384
+    roles: [chat, general, vision]
+    display_name: "Gemma 4"
+    # auto_start:false (2026-06-13) — gemma4 is registered but NOT started; its
+    # GGUF is background-prefetched after install (#429) so an online box is
+    # complete and can be switched offline without losing the capability.
+    # qwen3.6 is now the always-on default for all roles incl. vision; gemma4 is the
+    # on-demand spare (start it from the GPUStack UI if needed). Keeping it unloaded
+    # frees the VRAM that lets qwen3.6 run at ctx=1M × parallel=4.
+    auto_start: false
+    # Sliding-window attention (1024 tokens, 5-on-1-off pattern across 30 layers) means
+    # KV cache barely grows with ctx-size; we can run par=4 with full 262K per slot.
+    # See incident note 2026-05-12: --swa-full is NOT the right mitigation for our box.
+
+  qwen3.6:
+    huggingface_repo_id: unsloth/Qwen3.6-35B-A3B-GGUF
+    # Q8_0 (single 36.9 GB file) — the quant used in production for our use cases (structured extraction).
+    # Multimodal MoE (image-text-to-text): gpustack auto-detects + wires the repo's
+    # mmproj-*.gguf, so no explicit --mmproj is needed (verified vision on 0.208 2026-06-13).
+    huggingface_filename: Qwen3.6-35B-A3B-Q8_0.gguf
+    huggingface_revision: a483e9e6cbd595906af30beda3187c2663a1118c
+    sha256:
+      Qwen3.6-35B-A3B-Q8_0.gguf: d1a395809f65a43a13ad119eb4e7acdef1ac6d68120f39902c8ab96e72794a59
+      mmproj-F32.gguf: 0a1c1cd2772ae6de5e87e023cea454720924675f11fe2b0e7bb7648e48debdc0
+    # ── vision sidecar: THE single declaration (#138, #1256) ────────────────
+    # Every consumer resolves the projector from THIS field: the offline
+    # package (expected_models.iter_mmproj), GPUStack registration
+    # (model_source.apply_mmproj), the LLM-Manager catalog + console
+    # (manager/app/model_manifest.py, via a read-only mount) and the
+    # standard-set deploy (cli/lib-llm-manager-deploy.sh). Nobody keeps a
+    # copy — #1256: a hand-typed `mmproj-F16.gguf` in the manager catalog
+    # disagreed with this line for eight days, so the manager deploy shipped
+    # NO projector rather than gamble, and a clean box served qwen3.6
+    # text-only while the GPUStack boxes had vision.
+    #
+    # The repo carries THREE projectors (listed live on HF 2026-09-04):
+    # mmproj-BF16.gguf 902 822 624 B · mmproj-F16.gguf 899 283 680 B ·
+    # mmproj-F32.gguf 1 786 305 248 B. F32 is the one with a box behind it:
+    # it is what GPUStack's auto-detect pulled on the boxes that HAD working
+    # vision (0.208, 2026-06-13), #138 copied it out of that HF cache and
+    # byte-compared it (1.79 GB, byte-exact), and every offline package has
+    # recorded it in expected-models.json since 2026-08-24. Moving to F16
+    # would halve the sidecar but is a fleet behaviour change with no
+    # evidence behind it AND would invalidate the sidecar named in existing
+    # packages — a deliberate separate change, never a drive-by.
+    #
+    # Online, GPUStack auto-detects the projector from the HF repo; offline
+    # (source=local_path) there is NO auto-detect, so the package bundles
+    # this file and registration adds an explicit --mmproj pointing at the
+    # sideloaded copy. The LLM Manager never auto-detects: it deploys exactly
+    # the files it is given, which is why this field has to be declared.
+    huggingface_mmproj_filename: mmproj-F32.gguf
+    backend_parameters:
+      # qwen3.6 is the SOLE always-on default (gemma4 + coder-next are auto_start:false),
+      # so it gets the full per-slot context across 4 concurrent slots: 262144 × 4 = 1048576.
+      - --ctx-size=1048576
+      - --parallel=4
+      - --cache-type-k=q8_0
+      - --cache-type-v=q8_0
+      - --flash-attn=on
+      - --temp=0.7
+      - --top-p=0.95
+      - --top-k=20
+      - --min-p=0.0
+      # #925 (split from #242): presence-penalty MUST stay 0.0 here.
+      # qwen3.6 is the SINGLE always-on registration serving EVERY role
+      # (chat, coding, general, vision — see defaults below), and gpustack
+      # applies backend_parameters per REGISTRATION, not per role. So there
+      # is no "chat gets 1.5, extraction gets 0.0" split available on the
+      # box: whatever stands here runs on structured document extraction
+      # (the document-to-JSON workflow) too. presence_penalty penalizes tokens that
+      # already appeared — and extraction NEEDS repetition: the recurring
+      # digits of an IBAN/PAN/amount and the repeated JSON keys of the
+      # output schema. At 1.5 that is the ovisocr2 digit-truncation /
+      # broken-JSON failure mode, fleet-wide. #242 built the Mac gateway's
+      # `chat` profile at presence_penalty 0.0 explicitly to match the box
+      # (modules/llm/mac-gateway/gen_config.py) — this makes that premise
+      # true again. A creative-chat preset, if ever wanted, needs a SECOND
+      # registration under its own alias, not a value change here.
+      - --presence-penalty=0.0
+      # #901: 1.0 means OFF (neutral) — do NOT put it back. Symptom: qwen3.6
+      # "thinks endlessly" in OWUI chat/RAG, repeating the same argument
+      # dozens of times inside <think> ("Wait… Final Answer… I will output
+      # this… Wait…"), burning the whole token budget and returning almost
+      # nothing. Two gaps produced it: repeat-penalty (the windowed
+      # anti-repetition lever, and the strongest one against paragraph-level
+      # loops) was disabled fleet-wide, and the only other lever —
+      # presence-penalty — is an OpenAI sampling field any client can
+      # override (OWUI has qwen3.6 params {} and sync.py pushes only
+      # num_ctx + max_tokens, so a client-sent 0 silently disarms it).
+      # Since #925 pins presence-penalty at 0.0 by design (extraction
+      # safety, see above), repeat-penalty is THE anti-loop control here:
+      # repeat_penalty is NOT an OpenAI field — OWUI/Dify cannot clobber
+      # it — so the protection holds whatever the client payload says.
+      # Verified on the Exoscale RTX-6000-Blackwell box against the
+      # identical ambiguous RAG prompt at the clobber worst case
+      # (presence_penalty=0):
+      #   repeat 1.0 -> 1691 completion tokens, 5584 think chars,   8-char answer
+      #   repeat 1.1 ->  685 completion tokens, 2197 think chars, 114-char correct answer
+      - --repeat-penalty=1.1
+      # Same host-RAM containment as gemma4 above. 2026-05-18 prod-worker measurement:
+      # qwen3.6 RSS climbed 92 MiB → 12.1 GiB over 8 h of vision load with the default
+      # 8 GiB --cache-ram. Issue ggml-org/llama.cpp#22127 reports the identical pattern
+      # on Qwen2.5-VL (11.9 GiB → 1.0 GiB with --cache-ram=0). Keeps RSS flat with
+      # zero correctness impact; minor loss of prompt-reuse speedup on repeated prompts.
+      - --cache-ram=0
+      # #2520: context checkpoints ON (8) for qwen3.6 — and ONLY here. qwen3.6 is a
+      # hybrid/recurrent model: with --ctx-checkpoints=0 it cannot reuse a prompt
+      # prefix at all. Measured on prod's exact args + GGUF
+      # (2026-09-26): 2nd request with the same 11.6k-token prefix 12.8 s at 0 vs
+      # 0.68 s at 8. Cost: +1.7 GiB host RSS per engine (3.9 -> 5.6 GiB), no extra
+      # VRAM, first pass 4-13 % slower. --cache-ram=0 above stays. The LLM
+      # Manager's admission charges the 1.7 GiB per engine
+      # (manager/app/footprint.py::CTX_CHECKPOINT_HOST_RSS_GB).
+      - --ctx-checkpoints=8
+      # #2520: prompt-processing batch sizes, measured on the same box:
+      # -ub 1024 -b 2048 gives 905 -> 1,005 tok/s (+11 %); -ub 2048 is -7 %,
+      # -ub 4096 is -38 %. Do not "round up".
+      - --ubatch-size=1024
+      - --batch-size=2048
+      # ga.2 (#150): thinking is ON by default. qwen3.6 is a reasoning model and
+      # reasoning is its VALUE — a FRESH box must default it thinking-ON; a user
+      # or app disables it per-request when they don't want it. The ga.1 (#170)
+      # "Issue J" workaround baked '--chat-template-kwargs={"enable_thinking":
+      # false}' in HERE to kill reasoning at the server for ALL consumers; that is
+      # REVERTED. The real day-1 bug it was papering over was a too-tight OUTPUT
+      # token budget: with thinking ON and a low request max_tokens the whole
+      # budget goes to reasoning_content and content='' / finish_reason=length.
+      # The correct fix is thinking-ON + a generous default output budget (see
+      # max_completion_tokens below) so thinking AND the answer both fit — never a
+      # server-side reasoning kill-switch. Consumers that genuinely want reasoning
+      # OFF disable it per-request and are UNAFFECTED by this revert:
+      #   • OpenWebUI — the model's reasoning/thinking toggle
+      #   • Dify      — model completion-params (compatibility_mode=extended)
+      #   • cognee / lightrag / coding-agents — inject chat_template_kwargs.
+      #     enable_thinking=false themselves (own compose env / local-model shim).
+      # There is deliberately NO --predict/-n cap in backend_parameters: the
+      # server generates until EOS or context, so a client that passes no
+      # max_tokens is never truncated. Memory project_qwen3_thinking_disable_llamabox_param.
+    max_context_length: 262144
+    per_slot_context: 262144
+    # Generous per-request output budget: sync.py pushes this as OWUI's per-model
+    # max_tokens and llm_config.py as the agents' maxTokens — large enough that
+    # thinking + the answer both fit. This is the ga.2 (#150) day-1 fix that
+    # replaces the reverted enable_thinking=false kill-switch.
+    max_completion_tokens: 32768
+    roles: [chat, coding, general, vision]
+    display_name: "Qwen3.6"
+    # #2158: always-on on the GPU / unified-memory classes only. On a CPU
+    # worker this entry is refused by the admission gate by construction
+    # (126.9 GB at ctx=1M par=4 against a 30 GB host), so there it is an
+    # on-demand spare and `qwen3-4b-instruct` below is the always-on chat
+    # default (`defaults_by_hardware.cpu`). core/llm/hardware_catalog.py
+    # evaluates this field for every consumer.
+    hardware: [amd, nvidia, apple]
+    # Measured resident footprint (decimal GB) per hardware family, with the
+    # catalogue's arguments (ctx=1M, parallel=4). Admission charges at least the
+    # largest of these, also on a row whose formula estimate (footprint.py,
+    # 41.7) is lower: the formula left about 9 GB of every engine unaccounted.
+    # Measured 2026-11-08 right after load, the same on llama.cpp b11778 and
+    # b12110 (v0.9.0):
+    #   nvidia: GB10 (CUDA sm_121a), 50.6 GiB device memory (nvidia-smi) = 54.4 GB
+    #   amd:    Strix Halo (Vulkan), 46.6 GiB VRAM + 1.1 GiB GTT = 51.3 GB
+    # The ctx-checkpoint host RAM (footprint.py) is charged on top, as before.
+    measured_footprint_gb:
+      nvidia: 54.4
+      amd: 51.3
+    # Full-attention MoE (256 experts, top-8 routing); ctx scales KV linearly. As the sole
+    # always-on model we run the full ctx=1048576 par=4 (262K per slot × 4 concurrent
+    # sessions). Audit VRAM per-box before adding a second always-on model alongside it.
+
+  qwen3-4b-instruct:
+    # #2158 — the CPU class's always-on chat model. Proven on the box class:
+    # journey C's 0.79 (ga.15 llm-cpu, 30 GB host) served it at ~38 tok/s on
+    # the CPU runner. Instruct-2507 is a NON-thinking model, so a small
+    # max_tokens cannot be eaten by reasoning and answer with empty content.
+    # Quant and repo as measured there (2.5 GB Q4_K_M). ctx=32768 across two
+    # slots (16K per request): weights 2.5 GB + KV ~2.6 GB (36 layers, 8 KV
+    # heads, head_dim 128, q8_0) + compute → ~6.3 GB by the manager's own
+    # estimator (footprint.py), against a 27.5 GB budget on a 30 GB host.
+    huggingface_repo_id: unsloth/Qwen3-4B-Instruct-2507-GGUF
+    huggingface_filename: Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+    huggingface_revision: a06e946bb6b655725eafa393f4a9745d460374c9
+    sha256:
+      Qwen3-4B-Instruct-2507-Q4_K_M.gguf: 3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597
+    backend_parameters:
+      - --ctx-size=32768
+      - --parallel=2
+      - --flash-attn=on
+      - --cache-type-k=q8_0
+      - --cache-type-v=q8_0
+    max_context_length: 262144
+    per_slot_context: 16384
+    max_completion_tokens: 8192
+    roles: [chat, coding, general]
+    display_name: "Qwen3 4B Instruct"
+    auto_start: true
+    # Always-on on CPU workers only; elsewhere an on-demand spare the console
+    # can deploy (a GPU box keeps qwen3.6 as its sole always-on default).
+    hardware: [cpu]
+    # Measured resident footprint (decimal GB), see qwen3.6. CPU runner, the
+    # arguments above, right after load, 2026-11-08: 4.16 GiB on llama.cpp
+    # b11706, 5.65 GiB (= 6.1 GB) on b12110 (v0.9.0), against a formula
+    # estimate of 4.9 on the deployment row.
+    measured_footprint_gb:
+      cpu: 6.1
+
+  qwen3-coder-next:
+    huggingface_repo_id: Qwen/Qwen3-Coder-Next-GGUF
+    huggingface_filename: Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-*.gguf
+    ollama_tag: hf.co/Qwen/Qwen3-Coder-Next-GGUF:Q4_K_M  # #2559: sharded — Ollama resolves the quant by tag
+    huggingface_revision: b82fb7382639d97b38fa7672e526c760c2fb358e
+    sha256:
+      Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf: 6bcfc9f9c37901eeb92172e2ab871224dab36a453d263bcb2547f737409534da
+      Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00002-of-00004.gguf: 817def0691ee9d08bf3dc4444be7aed29c9e52091e8fa9d97901ce7e7f6f01d3
+      Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00003-of-00004.gguf: 23aa634d47dca9b4ca3ea249384e6f01951b24c83cdc076f37f6f43d6c99883f
+      Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00004-of-00004.gguf: 249c768cc5f130dc731567d6edcbdacc48e14dec9e02c5dbe2b2185d2c5bdb2b
+    backend_parameters:
+      - --ctx-size=262144
+      - --parallel=1
+      - --flash-attn=on
+      - --cache-type-k=q8_0
+      - --cache-type-v=q8_0
+      - --temp=1.0
+      - --top-k=40
+      - --top-p=0.95
+      - --cache-ram=0
+      - --ctx-checkpoints=0
+    max_context_length: 262144
+    per_slot_context: 262144
+    max_completion_tokens: 32768
+    roles: [coding]
+    display_name: "Qwen3 Coder Next"
+    # auto_start:false (2026-06-13) — OPTIONAL heavy-coding model (80B-class). qwen3.6 is
+    # the default for coding; start coder-next from the GPUStack UI for hard coding tasks.
+    auto_start: false
+
+  qwen3.8-27b:
+    huggingface_repo_id: unsloth/Qwen3.8-27B-GGUF
+    # filename LIVE-verified on HF 2026-08-23 (unsloth-dynamic naming, 16.5 GB)
+    huggingface_filename: Qwen3.8-27B-UD-Q4_K_M.gguf
+    huggingface_revision: 4ca720788d1e01f1bff70c033e0d0028fd02e502
+    sha256:
+      Qwen3.8-27B-UD-Q4_K_M.gguf: 322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482
+    # #1256: NO huggingface_mmproj_filename on purpose. The repo DOES carry
+    # projectors (HF 2026-09-04: mmproj-BF16.gguf 931 146 432 B ·
+    # mmproj-F16.gguf 927 607 488 B — and note there is NO mmproj-F32.gguf
+    # here; F32 is qwen3.6's file, not this model's). qwen3.8-27b is a
+    # developer-preset TEXT/coding model in this stack: nothing asks it for
+    # vision, its roles are [chat, coding], and the MTP draft path it exists
+    # for was debugged with the projector renamed OUT of the cache. Every
+    # consumer resolves the projector from the DECLARATION, never from the
+    # repo listing, precisely so a repo-level file cannot attach itself to a
+    # model that does not want it.
+    backend_parameters:
+      # #1583/#609: the MTP flags live HERE now. They used to sit in the
+      # GPUStack 2.x backend command (llama-box-vulkan-custom b9851 /
+      # llama-box-rocm-custom rocm-7.2.1-mtp), and this list stayed MTP-free
+      # so the model would also run on a non-MTP backend version. #1447 (C7a)
+      # removed that registration path — and with it the only place that ever
+      # turned MTP on. The model kept running and quietly lost the speculative
+      # decoding it was added for: no error, no log line, no difference except
+      # the throughput.
+      #
+      # The capability itself never belonged to GPUStack. The runner image
+      # builds on upstream llama.cpp b9851, where `--spec-type` /
+      # `--spec-draft-n-max` are server flags; GPUStack only supplied the
+      # command line. The manager path already carries them —
+      # cli/lib-llm-manager-deploy.sh::params_for turns `--flag=value` into the
+      # params dict and drivers/base.py::params_to_cli_flags turns it back into
+      # `--spec-type draft-mtp …`, verbatim the line the retired backend used.
+      #
+      # The research constraints (#609) are NOT optional and are guarded by
+      # tests/unit/llm-backends/test_609_mtp_backend.py for every place that
+      # turns MTP on:
+      #   * --parallel=1 — beyond one stream the gains vanish and the bugs
+      #     appear;
+      #   * NO --cache-type-k/v — KV-quant plus the spec-draft path crashes
+      #     (llama.cpp #24040). At 128 GB UMA the fp16 KV (~2 GB @32K, hybrid
+      #     GDN arch) is a non-issue;
+      #   * --flash-attn=on and no mmap are mandatory on Strix Halo. "No mmap"
+      #     is `--load-mode=none` since llama.cpp v0.4.1 (b10964), which removed
+      #     `--no-mmap`: every build the fleet ran since rejects that flag at
+      #     start ("invalid argument"), so this entry could not start until
+      #     2026.11 GA. tests/fixtures/llama-server-flags.json is the pinned
+      #     engine's flag table; a guard checks every flag here against it.
+      #
+      # NOT claimed here: that the speedup materialises on a given box. The
+      # box acceptance gate (draft-acceptance > 60% + output diff) is what
+      # decides that, and `auto_start: false` below stays until it has run.
+      - --ctx-size=32768
+      - --parallel=1
+      - --flash-attn=on
+      - --load-mode=none
+      - --spec-type=draft-mtp
+      - --spec-draft-n-max=2
+      - --temp=0.7
+      - --top-p=0.8
+    max_context_length: 262144
+    per_slot_context: 32768
+    max_completion_tokens: 32768
+    roles: [chat, coding]
+    display_name: "Qwen3.8 27B (MTP)"
+    # #609 (2026-08-23): developer-preset only — 27B dense-hybrid is the class
+    # Strix Halo is WEAK at without MTP (~12-14 t/s; ~20-30 t/s with). Not in
+    # `standard` (would force a ~17 GB download on every box), auto_start:false
+    # until the box acceptance gate (draft-acceptance > 60% + output diff)
+    # has passed on the target box; then start it from the GPUStack UI or flip
+    # this flag deliberately.
+    presets: [developer]
+    auto_start: false
+    # #2962 model risk flag: Qwen3.8 models, this one included, were seen making
+    # unasked and unannounced requests to Alibaba Cloud storage and to the cloud
+    # metadata address in agent and tool-use settings (see `risk_families`
+    # below for the full reason). `denied-only` = run agents on it only with
+    # egress denied (AGENT_EGRESS_POLICY=allowlist). The LLM Manager console and
+    # the developer preset show it; an agent started on it under open egress
+    # logs a warning. The whole Qwen3.8 family carries the same flag through
+    # `risk_families` below (#3394); this entry states it explicitly.
+    egress: denied-only
+
+  inkling-2-mini:
+    # #3403 — the first model of the EXPERIMENTAL runner channel. Inkling 2 Mini
+    # (Thinking Machines, released 2026-11-20) is a looped MoE: 24 layers, the
+    # middle 12 run three times, 26.2B total / 3.4B active (5.4B effective per
+    # token), text + image in. llama.cpp reads it as the `inkling2_loop`
+    # architecture since #32694 (merged 2026-11-20), so the fleet's stable
+    # runner b12110 cannot load it at all — `runner: experimental` below sends
+    # every deploy of this repository to the experimental build (b12679,
+    # modules/llm/runners/runners.yaml) on whatever hardware line it lands.
+    #
+    # Repository: ggml-org's conversion, not Unsloth's. Unsloth's root GGUFs
+    # are in Unsloth's own looped layout, which mainline llama.cpp does not read
+    # ("need Unsloth Studio / Desktop or Unsloth's llama.cpp prebuilts",
+    # unsloth/Inkling-2-Mini-GGUF Mainline_Support/README.md, read 2026-11-24);
+    # their mainline-layout copies are published as `*.gguf_file` and must be
+    # renamed by hand, which a node that stores weights under their Hugging Face
+    # names cannot do. ggml-org/Inkling-2-Mini-GGUF is the llama.cpp project's
+    # own conversion for the architecture PR, in the mainline layout, with
+    # `.gguf` names.
+    #
+    # Files, Hugging Face API at revision e8a2cecf (2026-11-21), 2026-11-24:
+    #   Inkling-2-Mini-IQ4_NL.gguf       17 627 940 768 B  (chosen: ~4.5 bit —
+    #       routed experts of layers 0-19 IQ4_NL, everything else Q8_0, imatrix)
+    #   Inkling-2-Mini-Q8_0.gguf         27 820 099 264 B
+    #   Inkling-2-Mini-BF16.gguf         52 226 509 504 B
+    #   mmproj-Inkling-2-Mini-BF16.gguf     641 805 984 B  (chosen projector)
+    #   mmproj-Inkling-2-Mini-Q8_0.gguf     345 910 944 B
+    # IQ4_NL + projector = 18.3 GB of weights: room on every GPU worker class
+    # (Strix Halo, RTX PRO 6000, GB10); not offered to the CPU class, where a
+    # 5.4B-active looped model at 30 GB host RAM has no headroom to speak of.
+    huggingface_repo_id: ggml-org/Inkling-2-Mini-GGUF
+    huggingface_filename: Inkling-2-Mini-IQ4_NL.gguf
+    huggingface_revision: e8a2cecf0e78914f07cc27b9be711a9b2c7561d9
+    sha256:
+      Inkling-2-Mini-IQ4_NL.gguf: cbdf3fa9dc50a4124977980f37da4f1fa764b0cfe800d275cd43d26ce2a81af4
+      mmproj-Inkling-2-Mini-BF16.gguf: e914997fe07fb2066bfdce855ec7275c15bc2b624e5423149f1027839593d9cb
+    huggingface_mmproj_filename: mmproj-Inkling-2-Mini-BF16.gguf
+    backend_parameters:
+      # Sampling as the model card recommends: temperature 1.0, no truncation.
+      # No KV-cache quantisation on a brand-new architecture (each loop pass
+      # keeps its own KV); 64K across two slots keeps the footprint modest.
+      - --ctx-size=65536
+      - --parallel=2
+      - --flash-attn=on
+      - --temp=1.0
+      - --top-p=1.0
+      - --top-k=0
+      - --min-p=0.0
+    # The model card's figure ("a context window of up to 1M tokens"), not read
+    # from the GGUF header.
+    max_context_length: 1048576
+    per_slot_context: 32768      # = ctx-size ÷ parallel
+    max_completion_tokens: 16384
+    roles: [chat, general, vision]
+    display_name: "Inkling 2 Mini (experimental runner)"
+    # Apache 2.0 — the base model card (thinkingmachines/Inkling-2-Mini), which
+    # the ggml-org conversion inherits (its own card states none).
+    license: apache-2.0
+    hardware: [amd, nvidia]
+    # Catalogue-only, like granite-docling: no preset deploys it and no package
+    # bundles its weights. An operator deploys it from the console catalogue
+    # (or the API); experimental means no stability promise.
+    presets: [catalogue]
+    auto_start: false
+    runner: experimental
+    # #3468: why — the GGUF architecture the stable runner does not know
+    # (llama.cpp >= b12600). Named in the notice that refuses a stable move.
+    architecture: inkling2_loop
+
+  granite-docling:
+    huggingface_repo_id: ibm-granite/granite-docling-258M-GGUF
+    huggingface_filename: granite-docling-258M-BF16.gguf
+    huggingface_revision: e1e344cb19bae46a1d5edb4f04a27ebe0c268f72
+    sha256:
+      granite-docling-258M-BF16.gguf: fba182dea1c3adccbf2c5c22971fa7d4479587d83b20607405df1710a3683723
+      mmproj-model-f16.gguf: 4b7b2c4ed3162bd9cb323668c188e2324838b8f8ca4f3f9767f16c4c600d43ad
+    # #1256: declared explicitly, so every consumer reads ONE field instead of
+    # parsing it back out of the --mmproj parameter below (the derivation is
+    # kept as a fallback for hand-edited manifests, see
+    # expected_models.mmproj_filename). Verified on HF 2026-09-04: the repo
+    # carries exactly one projector, mmproj-model-f16.gguf (190 031 712 B).
+    # The absolute path in backend_parameters is a GPUStack-volume path and
+    # means nothing to an LLM-Manager worker — the node derives its own from
+    # `files`, which is why the filename has to be declared on its own.
+    huggingface_mmproj_filename: mmproj-model-f16.gguf
+    backend_parameters:
+      - --mmproj=/var/lib/gpustack/cache/huggingface/ibm-granite/granite-docling-258M-GGUF/mmproj-model-f16.gguf
+      - --ctx-size=4096
+      - --parallel=1
+    max_context_length: 4096
+    per_slot_context: 4096
+    max_completion_tokens: 2048
+    roles: [vision-document-conversion]
+    display_name: "Granite Docling"
+    # #2407 (decision of 2026-09-23): CATALOGUE-ONLY. Docling Serve runs
+    # its own granite-docling (DOCLING_SERVE_DEFAULT_VLM_PRESET=granite_docling,
+    # modules/doc-processing/docling/compose.yml) and docling-jobkit cannot be
+    # pointed at a server preset, so an engine here had no consumer. `presets:
+    # [catalogue]` keeps it out of every preset and every package; an operator
+    # who wires a consumer deploys it from the console.
+    presets: [catalogue]
+    auto_start: false
+
+  qwen3-reranker:
+    huggingface_repo_id: ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF
+    huggingface_filename: qwen3-reranker-0.6b-q8_0.gguf
+    huggingface_revision: a02f48bb4f057028298c21fa033da2b30d7742d5
+    sha256:
+      qwen3-reranker-0.6b-q8_0.gguf: 22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48
+    # A reranker is a cross-encoder: like the embedding model it scores the
+    # whole (query + document) in one non-causal forward pass, so ubatch must
+    # be >= the largest single input. OWUI's default RAG chunking sets
+    # CHUNK_SIZE=5000 + markdown-header-splitter OFF (whole-doc chunks), which
+    # yields ~1000-1250-token chunks; with the llama-box default ubatch=512 the
+    # reranker returns HTTP 500 "input (N tokens) is too large to process …
+    # increase the physical batch size (current: 512)". OWUI swallows that
+    # error and retrieval silently returns ZERO sources — the chat model then
+    # answers with no grounding and no error surfaced anywhere (#908). This was
+    # masked because it only triggers once query+chunk exceeds 512 tokens, i.e.
+    # after the whole-doc chunking default landed. Size batch=ubatch=ctx,
+    # exactly like qwen3-embedding above.
+    backend_parameters:
+      - --ctx-size=8192
+      - --batch-size=8192
+      - --ubatch-size=8192
+    max_context_length: 8192
+    per_slot_context: 8192
+    roles: [reranker]
+    display_name: "Qwen3 Reranker"
+
+  qwen3-embedding:
+    # #2727: not always-on on the CPU class, which serves qwen3-embedding-0.6b
+    # below (an 8B embedder never fits a 16 GB CPU box). Boxes that already run
+    # this model keep it: defaults_for(..., env) pins an existing box's embedding.
+    hardware: [amd, nvidia, apple]
+    huggingface_repo_id: Qwen/Qwen3-Embedding-8B-GGUF
+    huggingface_filename: Qwen3-Embedding-8B-Q4_K_M.gguf
+    huggingface_revision: 69d0e58a13e463cd99a9b83e3f5fee7c10265fab
+    sha256:
+      Qwen3-Embedding-8B-Q4_K_M.gguf: 3fcd3febec8b3fd64435204db75bf0dd73b91e8d0661e0331acfe7e7c3120b85
+    # ctx/batch sized to fit cognee/lightrag graph-summary chunks (~2700–3000
+    # tok). nomic's hard 2048 cap is exactly why those pipelines failed to embed
+    # (prod 2026-06-19); qwen3-embedding-8B is natively 32K, so 8192 gives ample
+    # headroom at modest KV cost. ubatch must be ≥ the largest single input for
+    # non-causal embedding pooling, hence batch=ubatch=ctx.
+    backend_parameters:
+      - --ctx-size=8192
+      - --batch-size=8192
+      - --ubatch-size=8192
+      - --parallel=2
+    max_context_length: 8192
+    per_slot_context: 8192
+    # Measured live against the endpoint on 0.91 (v0.7.1 llama-box runner,
+    # Qwen3-Embedding-8B Q4_K_M): POST /v1-openai/embeddings returns 4096-dim
+    # vectors, and the OpenAI `dimensions` param is IGNORED (requesting
+    # 768/2560/4096 all return 4096). An earlier "2560" here was wrong and made
+    # sync.py write LIGHTRAG_/COGNEE_EMBEDDING_DIM=2560, mismatching the pgvector
+    # tables against the real 4096-dim output → document inserts failed. #70.
+    embedding_dimensions: 4096
+    roles: [embedding]
+    display_name: "Qwen3 Embedding"
+
+  # #2727: the CPU class's embedder. 0.64 GB instead of 4.7 GB, 1024-dim, 32K
+  # native context. A NEW alias, not a re-pointed qwen3-embedding: existing
+  # boxes keep the 8B/4096 their vector stores were built on.
+  qwen3-embedding-0.6b:
+    hardware: [cpu]
+    huggingface_repo_id: Qwen/Qwen3-Embedding-0.6B-GGUF
+    huggingface_filename: Qwen3-Embedding-0.6B-Q8_0.gguf
+    huggingface_revision: 370f27d7550e0def9b39c1f16d3fbaa13aa67728
+    sha256:
+      Qwen3-Embedding-0.6B-Q8_0.gguf: 06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439
+    # same sizing rule as qwen3-embedding: batch=ubatch=ctx so one long
+    # cognee/lightrag chunk embeds in a single pass
+    backend_parameters:
+      - --ctx-size=8192
+      - --batch-size=8192
+      - --ubatch-size=8192
+      - --parallel=2
+    max_context_length: 8192
+    per_slot_context: 8192
+    embedding_dimensions: 1024
+    roles: [embedding]
+    display_name: "Qwen3 Embedding 0.6B"
+
+  # nomic-embed-text was removed here (#2236, operator decision 2026-09-18): its
+  # entry declared a WILDCARD weight name ("*f16*.gguf") that only GPUStack could
+  # resolve; the LLM Manager skipped it (#1786), the packager refused it (#2233,
+  # #1544), and no 2026.09 box served it. The default embedder (qwen3-embedding)
+  # covers the role; consumers were moved off nomic by #1793.
+    display_name: "Nomic Embed Text v1.5"
+
+
+# ── Risk-flagged model families (#3394) ──────────────────────────────────────
+# A family below is NOT forbidden. A model whose name, repository or file name
+# belongs to it (case and separators ignored; the family must stand on its own,
+# so `Qwen3.8` does not match `Qwen3-8B`) carries the family's `egress:` flag,
+# and the LLM Manager deploys it only after the operator has read the notice
+# and acknowledged it — console editor, catalogue, "Deploy from cache", a
+# hand-typed repository and the CLI alike. Agent egress (AGENT_EGRESS_POLICY)
+# is the control: run agents on such a model only with egress denied. A
+# catalogue entry's own `egress:` wins over the family's.
+risk_families:
+  - family: Qwen3.8
+    egress: denied-only
+    reason: "Qwen3.8 models were seen making unasked and unannounced requests to Alibaba Cloud storage and to the cloud metadata address (169.254.169.254) in agent and tool-use settings; public analyses attribute this to training artifacts, and no data is known to have left"
+
+# ── Excluded model families (#2962) ──────────────────────────────────────────
+# Families the stack must not offer at all. The LLM Manager refuses to deploy a
+# model whose name, repository or file name belongs to a family below (matched
+# like `risk_families`), from every path: console catalogue, HuggingFace
+# browser, a hand-typed repository, the CLI. Empty since #3394: Qwen3.8 is
+# flagged and warned about before install instead. The mechanism stays.
+excluded_models: []
+
+# ── Defaults (per role) ──────────────────────────────────────────────────────
+# When something asks for "the chat model" / "the coding model", sync.py resolves
+# the alias from here. Change the value (e.g. coding: gemma4) to swap fleet-wide
+# defaults in one place.
+
+defaults:
+  # qwen3.6 (Q8_0, multimodal) is the single always-on default for ALL use cases
+  # (operator decision 2026-06-13). It covers chat, general, coding AND image-vision.
+  # gemma4 is kept downloaded but auto_start:false (on-demand spare); coder-next is
+  # the optional heavy-coding model (also auto_start:false).
+  chat: qwen3.6
+  coding: qwen3.6
+  general: qwen3.6
+  vision: qwen3.6
+  # qwen3-embedding (8K ctx, dim 4096 — see the entry above) — nomic's
+  # 2048-tok cap can't embed
+  # cognee/lightrag graph-summary chunks (prod 2026-06-19). OWUI manages its own
+  # embedding (sync.py skips embedding for openwebui), so its lighter RAG path is
+  # unaffected; the consumers that switch are cognee / lightrag.
+  embedding: qwen3-embedding
+  reranker: qwen3-reranker
+
+# #2158: per-hardware-family overrides of the defaults above, applied by
+# core/llm/hardware_catalog.py::defaults_for for every consumer that asks for
+# "the chat model". A CPU box cannot place qwen3.6; its chat/coding/general
+# default is the 4B model. `vision` is NOT overridden: the 4B is text-only, and
+# a CPU box has no always-on vision model (qwen3.6 stays a console spare there).
+defaults_by_hardware:
+  cpu:
+    chat: qwen3-4b-instruct
+    coding: qwen3-4b-instruct
+    general: qwen3-4b-instruct
+    # #2262/#2727: the 0.6B embedder (1024-dim) fits a 16 GB CPU box, the 8B did
+    # not (409 over-subscribe). New boxes only: an existing box keeps its model.
+    # tests/unit/consistency/test_2262_every_class_can_embed.py keeps it placeable.
+    embedding: qwen3-embedding-0.6b
+    reranker: qwen3-reranker
+
+
+# ── Agent → role mapping ─────────────────────────────────────────────────────
+# Maps each agent type to a role (resolved from `defaults` above). catalog.py's
+# `LLM_MODEL` env_template values come from this. Override per-agent if a
+# specific agent needs a non-default model (e.g. hermes pinned to gemma4
+# even if `chat` default changes).
+
+agents:
+  moltis:
+    role: coding          # → qwen3.6
+    # Reason: gemma4's chat template breaks on moltis 20260510.01's tool-array schemas
+    # (Jinja filter `upper` fails on array-form type fields). qwen-derived templates work.
+
+  hermes:
+    role: chat            # → qwen3.6
+    # Reason: hermes-agent uses standard chat patterns; qwen3.6 is the single
+    # always-on default and covers long-context chat.
+
+  coding-tools:
+    role: coding          # → qwen3.6
+    # Reason: gsd-pi + opencode are coding tools; coder-tier model preferred.
+
+  paperclip:
+    role: chat            # → qwen3.6
+    # Reason: conversational tier — orchestration / planning, not deep coding.
+
+
+# ── Consumer-specific notes ──────────────────────────────────────────────────
+# Each consumer's quirks that sync.py needs to honor — listed here for reference,
+# but sync.py implements the behavior in its per-consumer modules.
+
+consumers:
+  gpustack:
+    # backend-parameters changes need a scale=0 / scale=1 dance — sync.py handles this.
+    auto_restart_on_param_change: true
+  openwebui:
+    # Per-model params written to postgres `model.params` JSON.
+    params_fields: [num_ctx, max_tokens]
+  dify:
+    # provider_models row matches alias; deletion is safe but new-alias registration must
+    # go through the Dify UI (Settings → Model Provider → gpustack → Edit + Save) because
+    # the gpustack plugin re-fetches the live model list there.
+    requires_ui_refresh: true
+  cognee:
+    # litellm doesn't have a built-in context-length lookup for our custom aliases. Token-budget
+    # control needs LLM_ARGS extra_body overrides — sync.py emits these alongside LLM_MODEL.
+    use_extra_body_for_context: true
+  moltis:
+    # `moltis config set` is unimplemented in 20260510.01; sync.py writes the TOML file directly
+    # in the per-user named volume.
+    config_path: /home/moltis/.config/moltis/moltis.toml
+  hermes:
+    # `hermes config set model.context_length N` works and persists to the named volume.
+    config_command: "/opt/hermes/.venv/bin/hermes config set"

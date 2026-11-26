@@ -1,0 +1,89 @@
+# Repo-root build context — used by the razzfazz-help and start-portal image builds
+# (core/compose.yml razzfazz-help: build.context=.., dockerfile=core/help/Dockerfile).
+# The help Dockerfile copies just `core/common/`, `core/help/**` and the BASE docs
+# `docs/community/**`; everything else here is excluded so the build context sent to
+# the Docker daemon stays small and stable. 2026.07 docs rework / #125 P1: the gated
+# `docs/enterprise/**` is NO LONGER baked in (it is runtime-mounted as a box-local
+# overlay — see core/compose.yml), so it is excluded from the context below.
+#
+# The start portal also builds from the repo root (core/start-portal/Dockerfile), so
+# these rules apply to both. image_provenance.context_digest applies this file too
+# (#2757): a path excluded here can never make those images read stale.
+
+# VCS + churn
+.git/
+.gitignore
+# #3397: export-ignored (it names itself in .gitattributes), so no package ever
+# carries it; a box keeps its own copy, or has none. Unlike .gitattributes this
+# file IS shipped, so this line also holds on a box that cannot read the
+# release's export-ignore rules.
+.gitattributes
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Heavy / irrelevant trees (never copied by core/help/Dockerfile)
+backups/
+volumes/
+tests/
+.gsd/
+.claude/
+.venv/
+node_modules/
+security-run/
+*.tar.gz
+*.bundle
+*.iso
+# #125 P1: gated Enterprise docs + the box-local overlay are runtime-mounted, not
+# baked — keep both out of the help build context.
+docs/enterprise/
+overlay/
+# #3253: development-only material the release tree strips
+# (release-tree-bundle.sh STRIP_PATHS). If it were in the context, the packager
+# (tag tree) and a stick/package box (release tree) would hash different files
+# and the help and start-portal images would read as stale.
+docs/specs/agentic-os/
+# #3496: the internal development files .gitattributes export-ignores. No
+# package carries them and no root image copies them; listed here because an
+# older box's .gitattributes does not know these lines, so this shipped file is
+# what keeps a stale copy on such a box out of the help and start-portal digests.
+CLAUDE.md
+AGENTS.md
+.gitea/
+.github/
+.gitlab-ci.yml
+.vscode/
+wiki/
+docs/specs/
+docs/superpowers/
+docs/operator-notes/
+docs/agents/
+# #3510: the internal docs .gitattributes export-ignores (the walkthroughs that
+# do ship are not copied by any root image either, so the whole directory stays out).
+docs/upgrade-guide-testvm-*
+docs/upgrade-guide-test-single-box-*
+docs/howto-entra-sso-prod.md
+docs/walkthroughs/
+# no root image copies anything under releases/ (its export-ignore lines are an allow-list)
+releases/
+
+# Generated / local state (#2757: box-generated overlays never reach an image)
+compose.offline*.yml
+compose.offline.uv.toml
+compose.corporate-proxy.yml
+# #3412: box-local overlays (compose.local.<name>.yml) never reach an image either
+compose.local.*.yml
+# offline-package payload unpacked into the repo root on a box (#432, #2757)
+images/
+models/
+plugins/
+PACKAGE_INFO
+PAYLOAD_PROVENANCE
+MANIFEST.sha256
+expected-images.json
+.release-files
+.env
+.env.*
+!.env.example
+!.env.dify.example

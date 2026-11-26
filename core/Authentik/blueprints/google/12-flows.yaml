@@ -1,0 +1,109 @@
+version: 1
+metadata:
+  name: "Google - Flows"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # Define the Flow
+  - model: authentik_flows.flow
+    id: enrollment-flow
+    identifiers:
+      slug: google-domain-enrollment
+    attrs:
+      name: "Google Domain Enrollment"
+      title: "Herzlich willkommen bei razzfazz.ai"
+      designation: enrollment
+      authentication: none
+      denied_action: message_continue
+      policy_engine_mode: any
+      layout: sidebar_left
+
+  # Define the Stage: Create User
+  - model: authentik_stages_user_write.userwritestage
+    identifiers:
+      name: "Auto Create Google User"
+    attrs:
+      user_creation_mode: create_when_required
+      create_users_group: !Find [authentik_core.group, [name, "razzfazz.ai Chat Users"]]
+      user_path_template: "goauthentik.io/sources/%(source_name)s/%(username)s"
+      user_type: internal
+
+  # Bind Stage to Flow
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, google-domain-enrollment]]
+      stage: !Find [authentik_stages_user_write.userwritestage, [name, "Auto Create Google User"]]
+    attrs:
+      order: 0
+      policy_engine_mode: any
+      
+  # Bind Policy to Flow (The Corporate Domain Check)
+  # #2501: identified by the model's unique key at Authentik 2026.5.7 —
+  # PolicyBinding.Meta.unique_together = ("policy", "target", "order") — with
+  # `target` as the flow's POLICY-BINDING-MODEL pk. A binding's target FK points
+  # at PolicyBindingModel.pbm_uuid; a Flow has its own pk (flow_uuid), and
+  # `!Find [authentik_flows.flow, …]` returns THAT. The lookup by flow_uuid never
+  # matched the stored binding, the importer tried to create a second one and
+  # hit the unique set ("The fields policy, target, order must make a unique
+  # set."), rolling the whole blueprint back on every apply since 2026-08.
+  # `!KeyOf` special-cases exactly this: for a policybinding entry it returns
+  # the referenced instance's pbm_uuid (authentik/blueprints/v1/common.py KeyOf).
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf enrollment-flow
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, "Is Corporate Domain"]]
+      order: 0
+    attrs:
+      enabled: true
+      timeout: 30
+
+  # Bind Login Stage to Flow (Order 100). #2473 D4: evaluated when the stage is
+  # reached (the new user exists then), for the reconcile policy below.
+  - model: authentik_flows.flowstagebinding
+    id: enrollment-login-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, google-domain-enrollment]]
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, "default-source-authentication-login"]]
+    attrs:
+      order: 100
+      policy_engine_mode: any
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+
+  # #2473 D4: reconcile the upstream group mappings (base/08-upstream-group-sync.yaml)
+  # on the first login too. failure_result true: an error never drops the login stage.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf enrollment-login-binding
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, "razzfazz.ai - Reconcile upstream groups"]]
+      order: 0
+    attrs:
+      enabled: true
+      timeout: 30
+      failure_result: true
+
+  # A first sign-in that matches an existing account by e-mail is a LINK and runs
+  # the source AUTHENTICATION flow (not the enrollment flow above), so the link
+  # check is bound there, on the flow itself: it runs when the flow is planned,
+  # before any stage, and a refusal stops the sign-in with its message (no
+  # connection is saved, nobody is signed in). The flow's policy engine mode
+  # becomes `all`: under Authentik's default `any`, its own "is an SSO flow"
+  # policy passing would let a refused link through. Both SSO sources set the
+  # same mode; each binds its own check, which passes every other source.
+  - model: authentik_flows.flow
+    id: source-authentication-flow
+    identifiers:
+      slug: default-source-authentication
+    attrs:
+      policy_engine_mode: all
+
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf source-authentication-flow
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, "razzfazz.ai - Link by e-mail (Google)"]]
+      order: 11
+    attrs:
+      enabled: true
+      timeout: 30
+      # An error or a timeout refuses the link (never a sign-in as someone else).
+      failure_result: false

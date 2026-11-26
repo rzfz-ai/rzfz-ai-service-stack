@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Confirm Microsoft 365 action - razzfazz.ai</title>
+  <link rel="icon" type="image/svg+xml" href="/branding/rzfz-ai-favicon.svg">
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    .m365-section { margin: 1rem 0; }
+    .m365-section h2 { font-size: 1rem; margin: 0 0 .4rem; }
+    .m365-recipients { list-style: none; padding: 0; margin: 0; }
+    .m365-recipients li { font-family: monospace; padding: .1rem 0; word-break: break-all; }
+    .m365-text, .m365-details { white-space: pre-wrap; word-break: break-word; max-height: none; }
+    .m365-target dt { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-left">
+        <img src="/branding/rzfz-ai-logo.svg" alt="rzfz.ai" class="logo">
+        <h1>Confirm a Microsoft 365 action</h1>
+      </div>
+    </header>
+    {% if error %}
+    <div class="error-card">{{ error }}</div>
+    {% elif done %}
+    <div class="notice">Confirmed: <strong>{{ tool }}</strong>. Go back to the chat and ask for it again
+      with the same content; it runs once, within {{ minutes }} minutes. Nothing has been sent or deleted yet.</div>
+    {% else %}
+    <p>The assistant in your chat wants to run <strong>{{ tool }}</strong>
+      ({% if tool_class == "send" %}it sends or shares something with other people{% else %}it deletes data{% endif %})
+      in your Microsoft 365 account. It runs only if you confirm it here, and only with exactly these details.
+      Nothing on this page is shortened, except the content of attachments, which are listed by name and size.</p>
+
+    <section class="m365-section">
+      <h2>Who it reaches ({{ preview.recipients|length }})</h2>
+      {% if preview.recipients %}
+      <ul class="m365-recipients">
+        {% for r in preview.recipients %}<li>{{ r }}</li>{% endfor %}
+      </ul>
+      {% else %}
+      <p class="hint">No addresses in this call{% if preview.targets %}; see what it acts on below{% endif %}.</p>
+      {% endif %}
+    </section>
+
+    {% if preview.subject is not none %}
+    <section class="m365-section">
+      <h2>Subject</h2>
+      <p>{{ preview.subject }}</p>
+    </section>
+    {% endif %}
+
+    {% for label, fields in preview.targets %}
+    <section class="m365-section m365-target">
+      <h2>The {{ label }} it acts on</h2>
+      <dl>
+        {% for k, v in fields %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}
+      </dl>
+    </section>
+    {% endfor %}
+
+    {% if preview.attachments %}
+    <section class="m365-section">
+      <h2>Attachments ({{ preview.attachments|length }})</h2>
+      <ul>
+        {% for name, size in preview.attachments %}<li>{{ name }}{% if size is not none %} ({{ size }} bytes){% endif %}</li>{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    {% if preview.text is not none %}
+    <section class="m365-section">
+      <h2>Text ({{ preview.text|length }} characters, shown in full)</h2>
+      <pre class="m365-text">{{ preview.text }}</pre>
+    </section>
+    {% endif %}
+
+    <section class="m365-section">
+      <h2>Every detail of the call</h2>
+      <pre class="m365-details">{{ preview.details }}</pre>
+    </section>
+
+    <form method="post" action="/confirm/{{ aid }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-danger">Confirm {{ tool }}</button>
+    </form>
+    <p class="hint">If you did not ask for this, close this page: nothing happens without your confirmation,
+      and the request expires after 10 minutes.</p>
+    {% endif %}
+  </div>
+</body>
+</html>

@@ -1,0 +1,21 @@
+razzfazz-cognee-frontend — build-recipe NOTICE (third-party upstream)
+===================================================
+
+This image is BUILT FROM the third-party upstream(s) listed below. It is NOT
+razzfazz.ai Enterprise (BSL) code. razzfazz.ai's own contributions in this build
+context (Dockerfile, config, patches, wiring) are licensed Apache-2.0
+(SPDX-License-Identifier: Apache-2.0). Each upstream keeps its own licence and is
+used UNMODIFIED unless a patch is noted:
+
+
+  Built from: Cognee (frontend) 1.5.3  —  Apache-2.0
+              https://github.com/topoteretes/cognee
+
+  Vendored:   Geist + Geist Mono variable fonts (fonts/*.woff2)  —  SIL OFL 1.1
+              https://github.com/vercel/geist-font
+              #2488: replaces upstream's next/font/google fetch of these same
+              two families (fonts.googleapis.com / fonts.gstatic.com) with a
+              build-time-local, no-network copy (see patches/apply-local-fonts.js
+              and fonts/OFL.txt).
+
+See the repository-root NOTICE and LICENSE for the full open-core model.

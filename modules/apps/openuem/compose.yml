@@ -1,0 +1,521 @@
+# ==============================================================================
+# OPENUEM MODULE (Unified Endpoint Management / RMM)
+# ==============================================================================
+# Profile: openuem
+# Description: Endpoint inventory, software deployment and remote assistance for
+#              Windows/Linux/macOS fleets. Endpoint agents run on the fleet's
+#              own machines and reach the NATS broker below over the LAN.
+# Status: EXPERIMENTAL — hand-authored (7 containers, outside the add-module
+#         skill's Phase-1 single-container scope, SKILL.md:30). See
+#         docs/superpowers/plans/2026-08-31-1075-openuem-module-integration.md.
+# Config: .env (OPENUEM_* variables)
+# Dependencies: postgres (openuem_db via core/init-db.sh). No Valkey.
+# Upstream: https://github.com/open-uem (Apache-2.0), shipped as separate,
+#           unmodified containerized services.
+#
+# DELIBERATE DIVERGENCE FROM UPSTREAM compose.base.yml:
+#   - upstream's `db:` postgres container is DROPPED — the stack's shared
+#     postgres serves openuem_db (#1075).
+#   - upstream's compose.caddy.yml and caddy/Caddyfile are NOT vendored — the
+#     stack Caddy is the only ingress (#1075). CONSOLE_AUTH_PORT (the
+#     client-certificate login listener) is therefore NOT routed; see
+#     DECISION-2 in the plan for why a client-cert site and a forward_auth site
+#     are mutually exclusive on one host.
+#   - upstream mounts individual FILES out of a host directory; this module
+#     distributes per-consumer named volumes instead (the Task-1 bootstrap),
+#     because a named volume mounted at a file path materialises as a directory
+#     and the consumer gets EISDIR.
+#
+# DECISION-6: OPENUEM_ORGNAME / ORGPROVINCE / ORGLOCALITY / ORGADDRESS /
+# ORGCOUNTRY are baked into every certificate subject AND into the NATS
+# authorization DN table at first start. Changing them later denies every
+# component and every enrolled agent at the broker. Install-time-immutable.
+#
+# Memory budget (DECISION-5, operator confirms):
+#   openuem-console            1GB    (Echo/HTMX server, Go)
+#   openuem-nats               1GB    (JetStream max_mem 1G in the generated cfg)
+#   openuem-worker-* (x3)      512MB each
+#   openuem-ocsp-responder     256MB
+#   openuem-certs (one-shot)   512MB, transient
+#   Ceiling ~3.3GB; typical steady state ~1.0-1.5GB.
+# ==============================================================================
+
+x-openuem-db-url: &openuem-db-url
+  # Shared stack postgres. 5432 is the CONTAINER port (POSTGRES_PORT is the
+  # host-side loopback publish and is irrelevant in-network). No sslmode
+  # parameter: pgx defaults to `prefer` and falls back to plaintext, which is
+  # what upstream's own deployment relies on.
+  DATABASE_URL: "postgres://${OPENUEM_DB_USER:-openuem_user}:${OPENUEM_DB_PASSWORD:-}@postgres:5432/${OPENUEM_DB:-openuem_db}"
+
+x-openuem-nats-servers: &openuem-nats-servers
+  NATS_SERVERS: "${OPENUEM_NATS_HOST:-openuem-nats.${MAIN_DOMAIN:-razzfazz-box}}:${OPENUEM_NATS_PORT:-4433}"
+
+services:
+  # ---------------------------------------------------------------
+  # Cert bootstrap — one-shot. Builds the CA, every component certificate, the
+  # shared agent enrolment keypair, the admin .pfx, and nats.cfg.
+  # ---------------------------------------------------------------
+  openuem-certs:
+    image: openuem/openuem-cert-manager:${OPENUEM_VERSION:-0.12.0}
+    profiles: ["openuem"]
+    container_name: openuem-certs
+    restart: "no"
+    labels:
+      razzfazz.init: "true"
+    mem_limit: 512m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # SECURITY: root inside container required by openuem/openuem-cert-manager —
+    # the image is FROM debian:latest and declares no USER (verified against
+    # open-uem/openuem-cert-manager/Dockerfile @ main, 2026-08-31), and the
+    # generator writes into freshly-created, root-owned volume roots. Pinning a
+    # UID here would make the very first run fail. Compensating controls:
+    # no-new-privileges + cap_drop ALL + no published port + no docker socket,
+    # and the container is a one-shot that exits — no long-lived root process.
+    # S01.2 §F "image expects root for its own setuid/init logic" row.
+    entrypoint: ["/bin/bash", "/bootstrap/bootstrap-certs.sh"]
+    environment:
+      <<: *openuem-db-url
+      ORGNAME: ${OPENUEM_ORGNAME:-razzfazz.ai}
+      ORGPROVINCE: ${OPENUEM_ORGPROVINCE:-Wien}
+      ORGLOCALITY: ${OPENUEM_ORGLOCALITY:-Wien}
+      ORGADDRESS: ${OPENUEM_ORGADDRESS:-}
+      COUNTRY: ${OPENUEM_ORGCOUNTRY:-AT}
+      DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+      SERVER_NAME: ${OPENUEM_DOMAIN:-openuem.${MAIN_DOMAIN:-razzfazz-box}}
+      NATS_SERVER: ${OPENUEM_NATS_HOST:-openuem-nats.${MAIN_DOMAIN:-razzfazz-box}}
+      NATS_PORT: ${OPENUEM_NATS_PORT:-4433}
+      OCSP: "http://${OPENUEM_OCSP_HOST:-openuem-ocsp.${MAIN_DOMAIN:-razzfazz-box}}:${OPENUEM_OCSP_PORT:-8202}"
+      # Empty on purpose: a non-empty value makes create-certs.sh mint a
+      # reverse-proxy certificate this module never uses — the stack Caddy
+      # terminates TLS with its own certificate (DECISION-1).
+      REVERSE_PROXY_SERVER: ""
+    volumes:
+      - ./bootstrap:/bootstrap:ro
+      - openuem-pki:/certificates
+      - openuem-nats-conf:/etc/nats
+      - openuem-certs-nats:/dist/nats
+      - openuem-certs-ocsp:/dist/ocsp
+      - openuem-certs-console:/dist/console
+      - openuem-certs-worker-agents:/dist/worker-agents
+      - openuem-certs-worker-cert-manager:/dist/worker-cert-manager
+      - openuem-certs-worker-notification:/dist/worker-notification
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-db-reconcile:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------
+  # OCSP responder — answers the revocation queries embedded in every
+  # certificate this module issues; the NATS server consults it per connect.
+  # ---------------------------------------------------------------
+  openuem-ocsp-responder:
+    image: openuem/openuem-ocsp-responder:${OPENUEM_VERSION:-0.12.0}
+    profiles: ["openuem"]
+    container_name: openuem-ocsp-responder
+    restart: unless-stopped
+    command: ["start"]
+    mem_limit: 256m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # SECURITY: root inside container required by openuem/openuem-ocsp-responder
+    # (FROM debian:latest, no USER — verified against its Dockerfile @ main).
+    # Compensating: no-new-privileges + cap_drop ALL.
+    environment:
+      <<: *openuem-db-url
+      OCSP_PORT: ${OPENUEM_OCSP_PORT:-8202}
+    ports:
+      # SECURITY: OPENUEM_OCSP_HOST_BIND env-driven, loopback default. Every
+      # certificate this module issues embeds
+      # http://${OPENUEM_OCSP_HOST}:${OPENUEM_OCSP_PORT} as its revocation URL,
+      # so if endpoint agents perform client-side revocation checking the
+      # responder must be LAN-reachable from the fleet — the operator then pins
+      # a specific LAN IP (NEVER 0.0.0.0), exactly as GPUStack master mode does
+      # (S01.2 §A row 3 / F-RC5-1).
+      # OCSP is unauthenticated BY CONSTRUCTION (RFC 6960): a read-only
+      # revocation-status oracle that accepts no state-changing request and
+      # discloses only whether a certificate serial is known/revoked. That is
+      # the whole exposure, stated here rather than left implicit, and it stays
+      # on loopback unless the operator opens the NATS port too. DECISION-3.
+      # Host and container port are deliberately the same variable: the port is
+      # part of a URL baked into certificates and cannot be translated.
+      - "${OPENUEM_OCSP_HOST_BIND:-127.0.0.1}:${OPENUEM_OCSP_PORT:-8202}:${OPENUEM_OCSP_PORT:-8202}"
+    volumes:
+      - openuem-certs-ocsp:/usr/bin/certificates:ro
+    networks:
+      default:
+        aliases:
+          # Must match OPENUEM_OCSP_HOST so the URL baked into the certificates
+          # also resolves inside the docker network (upstream does the same with
+          # its ocsp.openuem.example alias).
+          - ${OPENUEM_OCSP_HOST:-openuem-ocsp.${MAIN_DOMAIN:-razzfazz-box}}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # Mirrors the image's own HEALTHCHECK; duplicated here because podman
+      # ignores image-level healthchecks in some configurations (upstream note).
+      # curl IS present in this image — its Dockerfile apt-installs it.
+      # --noproxy '*' (#273): on a corporate-proxy box the loopback probe would
+      # otherwise be sent to the proxy, which cannot route back INTO the
+      # container — 504, container marked unhealthy while serving fine, and
+      # every `condition: service_healthy` dependant (here: openuem-nats, and
+      # transitively the three workers and the console) fails to start.
+      test: ["CMD-SHELL", "curl --noproxy '*' -f http://localhost:${OPENUEM_OCSP_PORT:-8202}/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      openuem-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------
+  # NATS + JetStream — the agents <-> server broker. THE LAN-facing surface.
+  # ---------------------------------------------------------------
+  openuem-nats:
+    image: nats:2.14.6-alpine
+    profiles: ["openuem"]
+    container_name: openuem-nats
+    restart: unless-stopped
+    command: ["-c", "/etc/nats-config/nats.cfg"]
+    mem_limit: 1g
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # SECURITY: root inside container — nats:2.14.6-alpine declares no USER
+    # (verified against nats-io/nats-docker 2.14.x/alpine3.22/Dockerfile), and
+    # the certificate material the bootstrap writes is root-owned 0640.
+    # Compensating: no-new-privileges + cap_drop ALL.
+    ports:
+      # SECURITY: OPENUEM_NATS_HOST_BIND env-driven, loopback default; a real
+      # fleet operator pins a specific LAN IP (NEVER 0.0.0.0) so endpoint agents
+      # on other machines can reach the broker. GPUStack master-mode pattern,
+      # S01.2 §A row 3 / F-RC5-1.
+      #
+      # PROTOCOL-LEVEL AUTHENTICATION ON THIS PORT — not an assumption. The
+      # config generated by upstream's generate-nats-conf.sh sets, in its tls{}
+      # block, verify_and_map: true (a client MUST present a certificate that
+      # chains to THIS module's CA, and its subject DN is mapped onto a NATS
+      # user) and ocsp_peer: true (that certificate is checked against the OCSP
+      # responder above on every connect). It then emits an
+      # authorization: { users = [...] } table keyed on the exact component DNs,
+      # each with its own publish/subscribe allow-list — an agent may publish
+      # only report / deployresult / agentconfig / wingetcfg.> / ansiblecfg.>.
+      # There is no anonymous path onto this port. See DECISION-3.
+      #
+      # Host and container port are deliberately the same variable: agents are
+      # configured with NATS_HOST:NATS_PORT and the broker certificate's SANs
+      # are minted for that name, so a translation would break enrolment.
+      - "${OPENUEM_NATS_HOST_BIND:-127.0.0.1}:${OPENUEM_NATS_PORT:-4433}:${OPENUEM_NATS_PORT:-4433}"
+    volumes:
+      - openuem-nats-conf:/etc/nats-config:ro
+      - openuem-certs-nats:/etc/nats-certificates:ro
+      - openuem-jetstream:/var/lib/jetstream/data
+    networks:
+      default:
+        aliases:
+          # Must match OPENUEM_NATS_HOST: the console and the three workers dial
+          # NATS_SERVERS by that name, and it is a SAN on the broker cert.
+          - ${OPENUEM_NATS_HOST:-openuem-nats.${MAIN_DOMAIN:-razzfazz-box}}
+    labels:
+      # JetStream is a file-backed stream store; a consistent snapshot wants the
+      # writer stopped. The window is short and agents buffer and retry.
+      - "docker-volume-backup.stop-during-backup=true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # /healthz on the loopback-only monitoring endpoint the cert bootstrap
+      # appends to nats.cfg. wget is busybox-provided in the alpine image.
+      # http_proxy=/https_proxy= are cleared inline (#273): busybox wget has no
+      # --noproxy flag, and on a corporate-proxy box the loopback probe would
+      # otherwise go to the proxy, which cannot route back INTO the container —
+      # 504, container marked unhealthy while serving fine, taking the three
+      # workers and the console (`condition: service_healthy`) down with it.
+      test: ["CMD-SHELL", "http_proxy= https_proxy= wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      openuem-certs:
+        condition: service_completed_successfully
+      openuem-ocsp-responder:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------
+  # Agent worker — consumes agent reports, writes them to openuem_db.
+  # ---------------------------------------------------------------
+  openuem-worker-agents:
+    image: openuem/openuem-worker:${OPENUEM_VERSION:-0.12.0}
+    profiles: ["openuem"]
+    container_name: openuem-worker-agents
+    restart: unless-stopped
+    command: ["agents", "start"]
+    mem_limit: 512m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # SECURITY: root inside container required by openuem/openuem-worker (FROM
+    # debian:latest, no USER — verified against its Dockerfile @ main).
+    # Compensating: no-new-privileges + cap_drop ALL, no published port.
+    environment:
+      <<: [*openuem-db-url, *openuem-nats-servers]
+    volumes:
+      - openuem-certs-worker-agents:/tmp/certificates:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/bin/openuem-worker", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      openuem-certs:
+        condition: service_completed_successfully
+      openuem-nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------
+  # Cert-manager worker — issues the per-agent certificate on admission. The
+  # ONLY component that holds the CA private key.
+  # ---------------------------------------------------------------
+  openuem-worker-cert-manager:
+    image: openuem/openuem-worker:${OPENUEM_VERSION:-0.12.0}
+    profiles: ["openuem"]
+    container_name: openuem-worker-cert-manager
+    restart: unless-stopped
+    command: ["cert-manager", "start"]
+    mem_limit: 512m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      <<: [*openuem-db-url, *openuem-nats-servers]
+      OCSP: "http://${OPENUEM_OCSP_HOST:-openuem-ocsp.${MAIN_DOMAIN:-razzfazz-box}}:${OPENUEM_OCSP_PORT:-8202}"
+    volumes:
+      # This volume alone contains ca.key. Read-only, and no other consumer
+      # receives it (asserted by test_1075_openuem_bootstrap.py).
+      - openuem-certs-worker-cert-manager:/tmp/certificates:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/bin/openuem-worker", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      openuem-certs:
+        condition: service_completed_successfully
+      openuem-nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------
+  # Notification worker — sends operator email (password resets, alerts).
+  #
+  # It takes NO mail setting from this file. Server, port, auth and From live in
+  # openuem_db: the GLOBAL row of the `settings` table (tenant_settings IS NULL),
+  # written by the console's SMTP form and read here
+  # (openuem-worker/internal/models/settings.go:29 @ v0.12.0). `rzfz post-install`
+  # seeds that row from OPENUEM_SMTP_HOST/OPENUEM_SMTP_PORT + SMTP_FROM so the
+  # module inherits the stack relay (#1992) — seed-if-empty, so an operator's own
+  # entry survives.
+  #
+  # OPEN, and deliberately not claimed as solved: the worker builds its client as
+  # `mail.NewClient(server, WithPort(port))` and never reads the smtp_tls /
+  # smtp_starttls columns, so go-mail v0.7.2's DefaultTLSPolicy — TLSMandatory
+  # with a verified ServerName — applies. Whether the stack relay's STARTTLS
+  # certificate satisfies that is measured on a box, not asserted here. #1992.
+  # ---------------------------------------------------------------
+  openuem-worker-notification:
+    image: openuem/openuem-worker:${OPENUEM_VERSION:-0.12.0}
+    profiles: ["openuem"]
+    container_name: openuem-worker-notification
+    restart: unless-stopped
+    command: ["notifications", "start"]
+    mem_limit: 512m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      <<: [*openuem-db-url, *openuem-nats-servers]
+      # #2004: go-mail verifies the relay's STARTTLS certificate against the
+      # SYSTEM roots and cannot be told not to — the worker selects
+      # smtp_tls/smtp_starttls from the database and never reads them
+      # (notifications.go:65), so those columns cannot switch verification off.
+      # Measured on 0.91, 2026-09-13, before the relay had a certificate:
+      #
+      #   x509: certificate is valid for localhost, not smtp-relay
+      #
+      # Go honours SSL_CERT_FILE, so pointing it at the stack's trust bundle is
+      # the whole fix on this side. The bundle is a SUPERSET — the host's system
+      # roots plus every CA this box mints (scripts/lib.sh::
+      # ensure_oidc_ca_superset) — so replacing the store loses nothing the
+      # worker had, and gains the relay's issuer.
+      SSL_CERT_FILE: /etc/ssl/certs/razzfazz-ca.pem
+    volumes:
+      - openuem-certs-worker-notification:/tmp/certificates:ro
+      # Read-only, and the same file five other modules already mount (#1625).
+      - ../../../certs/caddy-ca.pem:/etc/ssl/certs/razzfazz-ca.pem:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/bin/openuem-worker", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      openuem-certs:
+        condition: service_completed_successfully
+      openuem-nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------
+  # Console — the only Caddy-routed surface. HTTPS-only (ListenAndServeTLS),
+  # served with a certificate from this module's own CA.
+  # ---------------------------------------------------------------
+  openuem-console:
+    image: openuem/openuem-console:${OPENUEM_VERSION:-0.12.0}
+    profiles: ["openuem"]
+    container_name: openuem-console
+    restart: unless-stopped
+    command: ["start"]
+    mem_limit: 1g
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # SECURITY: root inside container required by openuem/openuem-console (FROM
+    # debian:latest, no USER — verified against its Dockerfile @ main). The
+    # process writes PIDFILE and tmp/{download,server-releases,commondb} into
+    # its WORKDIR at start (internal/commands/start.go), so a read-only rootfs
+    # is not viable either. Compensating: no-new-privileges + cap_drop ALL, no
+    # published port, and Authentik forward_auth in front of the only route.
+    # S01.2 §F consequence (#1075): cap_drop ALL also takes DAC_OVERRIDE. The
+    # console's internal auth process writes its log as a DIFFERENT uid into
+    # /var/log/openuem-server, which the image ships root-owned, so without
+    # DAC_OVERRIDE that open() is EACCES -> [FATAL] crash-loop on first start.
+    # The capability stays dropped; the writable target is the tmpfs mount
+    # below (world-writable by kernel default), not a handed-back cap.
+    environment:
+      <<: [*openuem-db-url, *openuem-nats-servers]
+      JWT_KEY: ${OPENUEM_CONSOLE_JWT_KEY:-}
+      SERVER_NAME: ${OPENUEM_DOMAIN:-openuem.${MAIN_DOMAIN:-razzfazz-box}}
+      # Literal, not env-driven: the Caddyfile block hardcodes the upstream
+      # address (as every other module's block does), so a second knob here
+      # could only ever drift out of sync with it.
+      CONSOLE_PORT: "1323"
+      AUTH_PORT: "1324"
+      DOMAIN: ${MAIN_DOMAIN:-razzfazz-box}
+      ORGNAME: ${OPENUEM_ORGNAME:-razzfazz.ai}
+      ORGPROVINCE: ${OPENUEM_ORGPROVINCE:-Wien}
+      ORGLOCALITY: ${OPENUEM_ORGLOCALITY:-Wien}
+      ORGADDRESS: ${OPENUEM_ORGADDRESS:-}
+      COUNTRY: ${OPENUEM_ORGCOUNTRY:-AT}
+      # The public name Caddy serves, so the console builds correct absolute
+      # URLs. REVERSE_PROXY_AUTH_PORT stays empty: the client-certificate login
+      # listener is deliberately not routed (DECISION-2).
+      REVERSE_PROXY_SERVER: ${OPENUEM_DOMAIN:-openuem.${MAIN_DOMAIN:-razzfazz-box}}
+      REVERSE_PROXY_AUTH_PORT: ""
+      RE_ENABLE_CERTIFICATES_AUTH: ""
+      RE_ENABLE_PASSWD_AUTH: ""
+      # Break-glass: set to "true" in .env for ONE start to regenerate the
+      # built-in `openuem` account's password (printed to the container log),
+      # then set it back to empty. See docs/enterprise/how-to/openuem.md.
+      RESET_OPENUEM_USER: ${OPENUEM_RESET_OPENUEM_USER:-}
+    volumes:
+      - openuem-certs-console:/bin/certificates:ro
+    # #1075 (forensics in the SECURITY note above): /var/log/openuem-server
+    # exists in the image root-owned, the internal auth process writes there as
+    # a different uid, and cap_drop ALL removed DAC_OVERRIDE -> the open() fails
+    # and the console crash-loops. A tmpfs (kernel default mode 1777) is
+    # writable by every uid without handing the capability back. The log is
+    # auxiliary (stdout carries the real logs), so ephemeral is fine. size=16m:
+    # a tmpfs counts against the 1g memcg, so an uncapped, monotonically
+    # growing log would end in an OOM-kill instead of ENOSPC.
+    # Guard: tests/unit/consistency/test_1075_openuem_console_tmpfs.py
+    tmpfs:
+      - /var/log/openuem-server:size=16m
+    labels:
+      # Request-serving and effectively stateless — all durable state is in the
+      # shared postgres, captured logically by the pg_dumpall archive-pre hook.
+      # Keeping the console up during the nightly archive avoids a pointless
+      # outage window (the repo differentiates: stores stop, servers do not).
+      - "docker-volume-backup.stop-during-backup=false"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # The image ships neither curl nor wget (its Dockerfile installs only
+      # ca-certificates), so this is a bash /dev/tcp liveness probe. It proves
+      # the TLS listener accepts connections; the end-to-end login check lives
+      # in the box step, which is the honest division of labour.
+      # #1267: `/dev/tcp` is a BASH pseudo-device. `CMD-SHELL` runs `/bin/sh -c`,
+      # and /bin/sh in this Debian image is dash → "cannot create
+      # /dev/tcp/127.0.0.1/1323: Directory nonexistent" on every probe, i.e. the
+      # container was reported unhealthy while the console ran fine (Phase-3
+      # round 2). Invoke bash explicitly.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1323"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      openuem-certs:
+        condition: service_completed_successfully
+      openuem-nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  openuem-pki:
+  openuem-nats-conf:
+  openuem-jetstream:
+  openuem-certs-nats:
+  openuem-certs-ocsp:
+  openuem-certs-console:
+  openuem-certs-worker-agents:
+  openuem-certs-worker-cert-manager:
+  openuem-certs-worker-notification:

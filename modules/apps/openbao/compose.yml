@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# OPENBAO MODULE (Secrets management, MPL-2.0) — #2476, decision record D9
+# ==============================================================================
+# Profile: openbao (experimental). API http://openbao:8200 on the dedicated
+# openbao-net network ONLY (no host port, not on the stack `default` net);
+# UI at https://${OPENBAO_DOMAIN} behind Authentik. Static seal: openbao-keygen
+# (root, one-shot) writes the seal key into openbao-keys, the server mounts it
+# read-only and unseals itself at every start, openbao-bootstrap (root,
+# one-shot) initialises once and revokes the root token. Nothing is in .env.
+#
+# openbao-net carries a FIXED subnet so Caddy has a fixed address on it
+# (CADDY_STACK_IPV4): a technical user's AppRole is bound to that /32, and a
+# Dify HTTP node's call reaches OpenBao from it through Caddy's SSRF proxy.
+# OpenBao is on no other network, so every connection Caddy makes to it comes
+# from that address. The declaration is identical in core/compose.yml (compose
+# merges name-keyed networks, the docker-ctl pattern); the stack `default`
+# network is never given a subnet (compose would recreate it, and containers
+# outside compose block its removal).
+x-openbao-oneshot: &oneshot
+  image: openbao/openbao:${OPENBAO_VERSION:-2.6.3}
+  profiles: ["openbao"]
+  restart: "no"
+  user: "0:0"
+  entrypoint: ["/bin/sh", "/bootstrap/openbao-init.sh"]
+  cap_drop: [ALL]
+  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 64m
+  # A failed one-shot (a refusal, exit 3/5/4/7) reaches the operator through
+  # the init exit-code gate and `rzfz status`.
+  labels: {razzfazz.init: "true"}
+  logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+
+services:
+  openbao-keygen:
+    <<: *oneshot
+    container_name: openbao-keygen
+    command: ["keys"]
+    network_mode: none
+    environment:
+      OPENBAO_OWNER: "100:1000"
+      OPENBAO_OWNED_DIRS: "/openbao/data /openbao/snapshots /openbao/cred /openbao/mcp-cred /openbao/agent-cred"
+    volumes:
+      - ./bootstrap/openbao-init.sh:/bootstrap/openbao-init.sh:ro
+      - openbao-data:/openbao/data
+      - openbao-keys:/openbao/keys
+      - openbao-cred:/openbao/cred
+      - openbao-snapshots:/openbao/snapshots
+      - openbao-mcp-cred:/openbao/mcp-cred
+      - openbao-agent-cred:/openbao/agent-cred
+
+  openbao:
+    image: openbao/openbao:${OPENBAO_VERSION:-2.6.3}
+    profiles: ["openbao"]
+    container_name: openbao
+    restart: unless-stopped
+    command: ["server", "-config=/openbao/config/openbao.hcl"]
+    user: "100:1000"               # M2: the image's openbao uid:gid
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+      SKIP_SETCAP: "true"
+      SKIP_CHOWN: "true"
+      # #2476: Go's system roots = the stack's CA superset (mounted below), so
+      # the OIDC discovery and code exchange verify auth.<domain> on an
+      # internal-CA box too; ensure_oidc_ca_superset restarts it on a change.
+      SSL_CERT_FILE: /openbao/tls/oidc-ca.pem
+    volumes:
+      - ./config/openbao.hcl:/openbao/config/openbao.hcl:ro
+      - openbao-data:/openbao/data
+      - openbao-keys:/openbao/keys:ro
+      - openbao-cred:/openbao/cred:ro
+      - openbao-snapshots:/openbao/snapshots
+      # #2476: the svc-mcp-manager AppRole's role_id/secret_id, minted once by
+      # the identity reconcile (`rzfz post-install --refresh`). A name-keyed
+      # volume: mcp-manager mounts the same one read-only (B22).
+      - openbao-mcp-cred:/openbao/mcp-cred
+      # #2476 (A21): the svc-agent-manager AppRole's role_id/secret_id, minted
+      # by the same identity reconcile; agent-manager mounts it read-only.
+      - openbao-agent-cred:/openbao/agent-cred
+      # The stack's CA superset (system bundle + Caddy's internal CA, init.sh
+      # and scripts/lib.sh keep it): OpenBao verifies auth.<domain> with it
+      # for the OIDC discovery and the code exchange (SSL_CERT_FILE above). Three levels up: compose
+      # resolves this bind against THIS file's directory.
+      - ../../../certs/caddy-ca.pem:/openbao/tls/oidc-ca.pem:ro
+    networks:
+      - openbao-net
+    depends_on:
+      openbao-keygen: {condition: service_completed_successfully}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    healthcheck:
+      # 0 = unsealed, 2 = sealed or not yet initialised (running), 1 = error
+      test: ["CMD-SHELL", "bao status >/dev/null 2>&1; [ $$? -ne 1 ]"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+
+  openbao-bootstrap:
+    <<: *oneshot
+    container_name: openbao-bootstrap
+    command: ["bootstrap"]
+    environment:
+      BAO_ADDR: http://openbao:8200
+      OPENBAO_OWNER: "100:1000"
+    volumes:
+      - ./bootstrap/openbao-init.sh:/bootstrap/openbao-init.sh:ro
+      # the policies shared with `rzfz post-install --refresh` (one source)
+      - ./config/policies:/bootstrap/policies:ro
+      - openbao-keys:/openbao/keys
+      - openbao-cred:/openbao/cred
+    networks:
+      - openbao-net
+    depends_on:
+      openbao: {condition: service_healthy}
+
+networks:
+  # Identical to core/compose.yml's declaration (guarded).
+  openbao-net:
+    name: openbao-net
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.213.76.0/24
+          ip_range: 10.213.76.128/25
+          gateway: 10.213.76.1
+
+volumes:
+  openbao-data:
+  openbao-keys:
+  openbao-cred:
+  openbao-snapshots:
+  # name-keyed, so mcp-manager's compose (B22) declares and mounts the same volume
+  openbao-mcp-cred:
+    name: openbao-mcp-cred
+  # name-keyed, so the agent-manager's compose declares and mounts the same volume
+  openbao-agent-cred:
+    name: openbao-agent-cred

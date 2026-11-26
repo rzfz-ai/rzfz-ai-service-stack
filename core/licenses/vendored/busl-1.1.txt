@@ -1,0 +1,28 @@
+razzfazz.ai Service Stack — rzfz.ai Subscription tier
+Business Source License 1.1 (BUSL-1.1) — SOURCE-AVAILABLE
+Copyright (c) 2024-2026 razzfazz.ai GmbH - Member of SEQIS Group
+============================================================
+
+The source-available components (Config/Help/Licenses/Start
+portals, the shared runtime library, Model Sync, Backup
+Management, the Agent Manager and MCP Manager, and the
+razzfazz.ai orchestration surface) are licensed under the
+Business Source License 1.1.
+
+BSL 1.1 is SOURCE-AVAILABLE, NOT an OSI-approved open source
+licence. You may copy, modify and make NON-PRODUCTION use of it
+freely. Private, personal and evaluation use is free — no
+subscription and no registration. COMMERCIAL PRODUCTION use
+requires a valid rzfz.ai Subscription: a licence (not a
+service) to run the current, patched Stack commercially —
+installation, updates and support are separate offerings. A
+subscription valid when a version was released permanently
+authorizes commercial production use of that version. No license
+key is required — the containers run freely; the subscription
+governs permitted use, not technical function. On the version's
+Change Date it converts to the Apache License 2.0 regardless.
+
+Full terms + the rolling Change-Date schedule: LICENSE-BSL and
+config/manifests/license-dates.json in the repository root.
+
+Licensing inquiries: licensing@razzfazz.ai

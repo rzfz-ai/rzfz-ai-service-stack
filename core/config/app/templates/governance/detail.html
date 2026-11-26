@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block page_title %}Checksum #{{ data.set_id }}{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Checksum Snapshot #{{ data.set_id }}</h1>
+    <p class="lede">{{ data.timestamp }} — {{ data.comment }}</p>
+</div>
+<a href="{{ url_for('governance.index', tab='checksums') }}" class="btn ghost sm" style="margin-bottom:1rem;display:inline-block">Back to history</a>
+
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+        <div class="detail-row"><span class="detail-row-label">Source</span><span class="detail-row-value"><span class="badge muted">{{ data.source }}</span></span></div>
+        <div class="detail-row"><span class="detail-row-label">Overall SHA256</span><span class="detail-row-value"><code style="font-size:0.75rem">{{ data.overall_sha256 }}</code></span></div>
+        <div class="detail-row"><span class="detail-row-label">Files</span><span class="detail-row-value">{{ data.file_count }}</span></div>
+        <div class="detail-row"><span class="detail-row-label">Git HEAD</span><span class="detail-row-value">{% if data.git_head %}<code style="font-size:0.75rem">{{ data.git_head }}</code>{% else %}<span class="badge muted">not recorded</span>{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-row-label">.env key-level tracking</span><span class="detail-row-value">{% if data.env_key_id %}<span class="badge ok">yes</span> <code style="font-size:0.75rem">key id {{ data.env_key_id }}</code>{% else %}<span class="badge muted">no — hash only</span>{% endif %}</span></div>
+    </div>
+</div>
+
+<h2 class="section">Files</h2>
+<div class="table-wrap">
+    <table class="rz">
+        <thead><tr><th>File</th><th>SHA256</th><th>Size</th></tr></thead>
+        <tbody>
+            {% for f in data.files %}
+            <tr>
+                <td><code style="font-size:0.75rem">{{ f.filepath }}</code></td>
+                <td style="font-size:0.6875rem"><code>{{ f.sha256[:16] }}{% if f.sha256 != 'MISSING' and f.sha256 != 'ERROR' %}...{% endif %}</code></td>
+                <td>{% if f.file_size %}{{ (f.file_size / 1024) | round(1) }} KB{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

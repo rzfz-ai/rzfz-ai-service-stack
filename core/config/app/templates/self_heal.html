@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block page_title %}Settings portal{% endblock %}
+{% block page_content %}
+<h1>Settings portal</h1>
+<div id="self-heal-status" role="status" aria-live="polite"
+     class="flash {{ 'flash-info' if outcome.state == 'reconnecting' else 'flash-error' }}"
+     data-state="{{ outcome.state }}" data-heal-id="{{ outcome.heal_id or '' }}"
+     data-fallback="{{ outcome.fallback or '' }}">{{ outcome.message }}</div>
+{% if has_files %}
+<form id="self-heal-again" class="hidden" method="GET" action="{{ form_action }}">
+    <p>Your change was not applied yet. Files cannot be kept, so choose the file again.</p>
+    <button type="submit" class="btn btn-primary">Back to the page</button>
+</form>
+{% else %}
+<form id="self-heal-again" class="hidden" method="POST" action="{{ form_action }}">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    {% for name, value in form_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}
+    <button type="submit" class="btn btn-primary">Apply again</button>
+</form>
+{% endif %}
+{% endblock %}

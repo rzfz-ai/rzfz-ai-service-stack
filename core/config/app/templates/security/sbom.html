@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block page_title %}Software Bill of Materials{% endblock %}
+
+{% block page_content %}
+<div class="page">
+    <h1>Software Bill of Materials</h1>
+    <p class="lede">The release's SBOM: CVE summary, baseline, and one CycloneDX SBOM per container image.</p>
+</div>
+
+{% include "security/_overview.html" %}
+
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+    <p><a class="btn btn-primary" href="{{ url_for('security.sbom_zip') }}">Download the complete SBOM (ZIP)</a></p>
+    {% if files %}
+    <h3 style="font-size:1rem">Files</h3>
+    <ul class="sec-files">
+        {% for f in files %}<li><a href="{{ url_for('security.sbom_file', rel=f) }}">{{ f }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% if cyclonedx %}
+    <details>
+        <summary>{{ cyclonedx|length }} CycloneDX image SBOMs</summary>
+        <ul class="sec-files">
+            {% for f in cyclonedx %}<li><a href="{{ url_for('security.sbom_file', rel=f) }}">{{ f }}</a></li>{% endfor %}
+        </ul>
+    </details>
+    {% endif %}
+    </div>
+</div>
+
+{% if doc_html %}
+<div class="card markdown-body">
+<div class="card-body">
+{{ doc_html | safe }}
+</div>
+</div>
+{% endif %}
+
+{% include "security/_styles.html" %}
+{% endblock %}
+
+{% block extra_js %}
+    {{ super() }}
+{% include "security/_mermaid_js.html" %}
+{% endblock %}

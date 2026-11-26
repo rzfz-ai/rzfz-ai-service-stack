@@ -1,0 +1,120 @@
+<!-- The stack's own audit trails (#2526): JSON Lines written by AuditLogger
+     (core/common/razzfazz_common/audit_log.py), shipped by
+     scripts/install-wazuh-agent.sh with <label key="rzfz.audit">CONTAINER</label>.
+     The built-in json decoder is enough: every key of an entry becomes a field
+     (event, category, action, target, outcome, risk, error, changes.var, ...).
+     Static fields (action, user, ...) are matched by their element, never by
+     <field name>. IDs 100700-100709, and 100740-100749 for the backup runs.
+
+     Order matters: sibling rules are tried in file order and the first match
+     wins. The backup run's own outcome comes first (a failed nightly is an
+     alert of its own, not a user's refused action), then a failed action (a
+     refused restore is a refusal, level 5, and counts toward the burst), then
+     the specific successes from the most to the least severe. -->
+<group name="rzfz,stack,rzfz_audit,">
+  <rule id="100700" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="rzfz.audit" type="pcre2">.+</field>
+    <description>rzfz.ai audit ($(rzfz.audit)): $(event) on $(target)</description>
+  </rule>
+
+  <!-- #3458: one event per backup run, written by core/backup/run-outcome.sh
+       into backups/.rzfz-audit/backup-audit.log (label rzfz.audit =
+       backup-service). Refused (the space check stopped it) and failed (no
+       archive, or one never marked complete) need no configured notification
+       to be seen: level 10. DEGRADED / PARTIAL (the archive misses something
+       the pre-backup log names): level 6. A clean run stays the base rule. -->
+  <rule id="100740" level="10">
+    <if_sid>100700</if_sid>
+    <field name="event" type="pcre2">^backup\.run$</field>
+    <action type="pcre2">^run\.refused$</action>
+    <description>rzfz.ai backup: the backup run was REFUSED, no archive written: $(error)</description>
+    <group>rzfz_audit_backup,rzfz_audit_failed,</group>
+  </rule>
+  <rule id="100741" level="10">
+    <if_sid>100700</if_sid>
+    <field name="event" type="pcre2">^backup\.run$</field>
+    <field name="outcome" type="pcre2">^failure$</field>
+    <description>rzfz.ai backup: the backup run FAILED: $(error)</description>
+    <group>rzfz_audit_backup,rzfz_audit_failed,</group>
+  </rule>
+  <rule id="100742" level="6">
+    <if_sid>100700</if_sid>
+    <field name="event" type="pcre2">^backup\.run$</field>
+    <field name="outcome" type="pcre2">^degraded$</field>
+    <description>rzfz.ai backup: the backup run is DEGRADED or PARTIAL ($(target))</description>
+    <group>rzfz_audit_backup,</group>
+  </rule>
+
+  <rule id="100701" level="5">
+    <if_sid>100700</if_sid>
+    <field name="outcome" type="pcre2">^failure$</field>
+    <description>rzfz.ai audit: $(event) FAILED on $(target)</description>
+    <group>rzfz_audit_failed,</group>
+  </rule>
+  <rule id="100702" level="9" frequency="5" timeframe="300">
+    <if_matched_sid>100701</if_matched_sid>
+    <same_user />
+    <description>rzfz.ai audit: 5 failed or refused actions by one user within 5 minutes</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <!-- destructive: backups restored or deleted, the stack reset, logs deleted -->
+  <rule id="100703" level="10">
+    <if_sid>100700</if_sid>
+    <field name="event" type="pcre2">^(backup\.(restore|delete)|factory\.reset|logs\.delete)$</field>
+    <description>rzfz.ai audit: destructive action $(event) on $(target)</description>
+    <group>rzfz_audit_destructive,</group>
+  </rule>
+
+  <!-- secrets and credentials: regenerated, revealed, rotated, minted -->
+  <rule id="100704" level="8">
+    <if_sid>100700</if_sid>
+    <field name="category" type="pcre2">^(secrets|identity|settings)$</field>
+    <action type="pcre2">^(regenerate.*|reveal|technical_user\.(rotate_secret_id|mcp_token|mcp_credential|gitea_user))$</action>
+    <description>rzfz.ai audit: secret or credential change ($(event) on $(target))</description>
+    <group>rzfz_audit_secret,</group>
+  </rule>
+
+  <!-- users, roles, groups, technical users and the SSO settings -->
+  <rule id="100705" level="8">
+    <if_sid>100700</if_sid>
+    <field name="category" type="pcre2">^identity$</field>
+    <action type="pcre2">^(?!technical_user\.list$).+</action>
+    <description>rzfz.ai audit: user or role change ($(event) on $(target))</description>
+    <group>rzfz_audit_identity,</group>
+  </rule>
+  <rule id="100709" level="8">
+    <if_sid>100700</if_sid>
+    <field name="category" type="pcre2">^settings$</field>
+    <field name="target" type="pcre2">^auth$</field>
+    <description>rzfz.ai audit: SSO and authentication settings changed</description>
+    <group>rzfz_audit_identity,</group>
+  </rule>
+
+  <!-- a configuration apply or a module switched on or off (COMPOSE_PROFILES) -->
+  <rule id="100706" level="6">
+    <if_sid>100700</if_sid>
+    <field name="event" type="pcre2">^(config\.change|profile\.(enable|disable))$</field>
+    <field name="category" type="pcre2">^(settings|profile)$</field>
+    <description>rzfz.ai audit: configuration applied ($(event) on $(target))</description>
+    <group>rzfz_audit_config,</group>
+  </rule>
+
+  <!-- F-050: the backup manager's own deletion trail goes to its stdout
+       (collected when razzfazz-backup-management is in WAZUH_AGENT_CONTAINERS) -->
+  <rule id="100707" level="10">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^razzfazz-backup-management$</field>
+    <field name="log" type="pcre2">AUDIT: Backup deletion confirmed</field>
+    <description>Backup manager: a backup was deleted</description>
+    <group>rzfz_audit_destructive,</group>
+  </rule>
+  <rule id="100708" level="5">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^razzfazz-backup-management$</field>
+    <field name="log" type="pcre2">F-050: Invalid delete nonce</field>
+    <description>Backup manager: a deletion was refused (bad confirmation)</description>
+    <group>rzfz_audit_failed,</group>
+  </rule>
+</group>

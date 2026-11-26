@@ -1,0 +1,31 @@
+{# #2769 — every security document this box carries, with a release check. #}
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-body">
+    <div style="display:flex;gap:2rem;flex-wrap:wrap;font-size:0.875rem;margin-bottom:0.5rem">
+        <div><strong>This box runs:</strong> <code>{{ overview.box_version or 'unknown' }}</code></div>
+        <div><strong>Enterprise documentation:</strong> {{ 'installed' if overview.enterprise_overlay else 'not installed' }}</div>
+    </div>
+    {% for m in overview.mismatches %}
+    <div class="sec-warn" role="alert">&#9888; {{ m }}</div>
+    {% endfor %}
+    <ul class="sec-docs">
+        <li><a href="{{ url_for('security.index') }}">Security architecture</a></li>
+        {% if overview.assessment %}
+        <li><a href="{{ url_for('security.assessment') }}">Security assessment</a> <span class="sec-muted">({{ overview.assessment.version }})</span></li>
+        {% endif %}
+        {% if overview.sbom %}
+        <li><a href="{{ url_for('security.sbom') }}">Software bill of materials (SBOM)</a>
+            <span class="sec-muted">({{ overview.sbom.cyclonedx }} CycloneDX image SBOMs)</span></li>
+        {% endif %}
+        {% for slug, title in overview.docs %}
+        <li><a href="{{ url_for('security.enterprise_doc', slug=slug) }}">{{ title }}</a></li>
+        {% endfor %}
+    </ul>
+    {% if not overview.enterprise_overlay %}
+    <div class="sec-muted" style="font-size:0.8125rem">
+        The Enterprise documentation package adds the release's security assessment, the SBOM
+        and the security how-tos (identity, MFA, backup encryption, admin recovery).
+    </div>
+    {% endif %}
+    </div>
+</div>

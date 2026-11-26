@@ -1,0 +1,353 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+"""#1226 — allow-list for the ``COMPOSE_FILE`` chain the Portal runs on.
+
+**The hole.** BSB-03 mounts the repo root into ``razzfazz-config`` as ``:ro``
+(ISO 27001 A.8.4), but a handful of narrow ``:rw`` islands live *inside* that
+tree — ``.env`` first among them — and the Portal is allowed to drive
+``docker compose up`` through the socket proxy (#1016). ``COMPOSE_FILE`` is
+read by the compose CLI **out of that very ``.env``** and its entries are
+resolved relative to the project directory. So the ``:ro`` root never had to be
+defeated: anyone who reaches a Portal write path could drop a compose file into
+a rw island (``backups/`` is the obvious one), point ``COMPOSE_FILE`` at it,
+and have the daemon start a service definition of their choosing — arbitrary
+bind mounts, ``privileged: true``, the host root. The read-only mount is an
+A.8.4 claim about the *tree*; it says nothing about a file the Portal itself is
+allowed to write.
+
+**Operator decision E5 (2026-09-05, #979):** allow-list + guard. ``COMPOSE_FILE``
+may only name repo-relative paths inside the ``:ro`` area; the Portal validates
+before every compose run; a consistency guard pins the list. No ACCEPT-RESIDUAL.
+
+**The rule.** An entry is accepted iff *all* of:
+
+1. it is a plain relative path — no leading ``/`` or ``~``, no leading ``-``
+   (which compose would read as an option); a URL is split by the ``:``
+   separator and each half is refused on its own;
+2. it contains no ``..`` segment and normalises to a path inside the repo root;
+3. its basename follows the shipped convention ``compose*.yml`` / ``compose*.yaml``;
+4. the file exists (a dangling entry is a loud refusal, matching
+   ``scripts/lib.sh``'s "never wire a dangling COMPOSE_FILE reference");
+5. it does **not** live under a path the Portal can write — :data:`RW_ISLANDS`.
+
+Rule 5 is the security property; 1–4 keep the error messages honest and stop the
+obvious escapes. The shape is deliberately *not* a literal file list: #448
+documents that an operator may hand-add a module overlay and that a re-init has
+to preserve it, so the allow-list describes a **location**, not an inventory.
+
+**The sanctioned place for a box-local overlay (#3412)** is the stack root,
+named ``compose.local.<name>.yml`` (:data:`LOCAL_OVERLAY_GLOB`). Such a file
+passes rules 1–5 unchanged — it is repo-relative, inside the ``:ro`` tree that
+the Portal cannot write, and named ``compose*.yml`` — so there is no special
+case here and rule 5 is not weakened. ``.gitignore`` keeps it out of version
+control (a clean tree, never in a package), ``rzfz upgrade`` keeps the entry in
+``COMPOSE_FILE`` and ``rzfz status`` lists it. An overlay kept OUTSIDE the stack
+root (an absolute or home-relative entry) stays refused: move it to
+``compose.local.<name>.yml`` and repoint ``COMPOSE_FILE``.
+
+**Not closed by this module** (see the PR text): ``modules/llm/mac-gateway`` is
+rw-mounted as a *directory* and its ``compose.yml`` is pulled in by the root
+``compose.yml``'s ``include:``, so it is loaded on every compose run regardless
+of ``COMPOSE_FILE``. Narrowing that mount to the ``config.yaml`` the Mac panel
+actually rewrites is a separate change against a separate write path.
+"""
+from __future__ import annotations
+
+import os
+import posixpath
+import re
+
+# ── the rw islands inside the :ro root ───────────────────────────────────────
+# Repo-relative, ``/``-separated. Every entry corresponds 1:1 to a ``:rw`` bind
+# of the razzfazz-config service in core/compose.yml — test_1226 derives that
+# list from the compose file and fails if the two drift, so a new rw mount
+# cannot silently widen the attack surface.
+RW_ISLANDS = (
+    '.env',
+    '.env.dify',
+    '.checksums.db',
+    'backups',
+    'certs',
+    'config/manifests/versions.json',
+    'modules/llm/mac-gateway',
+    # #1223 (E4): the post-toggle probe queue. The Portal writes ONE request
+    # JSON per toggle here and the host runner reads it — the narrowest seam
+    # that lets a :ro-mounted Portal ask for something to be run. Named here
+    # because #1505's rule is "every path the Portal can write is a path a
+    # compose file could be staged in": without this entry
+    # `COMPOSE_FILE=compose.yml:.probe-queue/compose.evil.yml` would be
+    # ACCEPTED. The queue is not a compose location, and this is what says so.
+    '.probe-queue',
+    # #2473/#2476: status and state files of the owner check, the secret_id
+    # rotator and the OpenBao purge (no compose location either).
+    '.technical-users-state',
+    '.openbao-state',
+)
+
+# Compose files ship as compose.yml / compose.<variant>.yml / compose.devices.<hw>.yml.
+_COMPOSE_NAME_RE = re.compile(r'\Acompose[A-Za-z0-9._-]*\.ya?ml\Z')
+
+# Verbs that make the daemon ACT on the parsed model. Everything else
+# (config/ps/images/--services/--profiles) only renders or reads.
+STATE_CHANGING_VERBS = frozenset({
+    'up', 'down', 'stop', 'start', 'restart', 'pull', 'run', 'create',
+    'build', 'rm', 'kill', 'scale',
+})
+
+#: #3412: where a box-local overlay belongs — the stack root, ignored by
+#: version control. Accepted by the rule above like any shipped overlay.
+LOCAL_OVERLAY_GLOB = 'compose.local.*.yml'
+
+REMEDY = ("fix COMPOSE_FILE in .env (repo-relative compose*.yml paths inside the "
+          "read-only stack root only; a box-local overlay belongs in the stack root "
+          "as compose.local.<name>.yml), then retry — see #1226")
+
+
+class ComposeFileRejected(RuntimeError):
+    """A COMPOSE_FILE chain that the Portal refuses to run compose against."""
+
+    def __init__(self, reasons):
+        self.reasons = list(reasons)
+        super().__init__('refusing to run docker compose: ' + '; '.join(self.reasons)
+                         + '. ' + REMEDY)
+
+
+def _is_inside(rel_norm: str, island: str) -> bool:
+    """Is the normalised repo-relative path at, or under, ``island``?"""
+    return rel_norm == island or rel_norm.startswith(island + '/')
+
+
+def check_entry(entry: str, stack_root: str) -> str | None:
+    """Reason this single COMPOSE_FILE entry is rejected, or None if allowed."""
+    if not entry or not entry.strip():
+        return None  # empty segments are dropped by the caller, never rejected
+    raw = entry.strip()
+
+    if raw.startswith('-'):
+        return f'{raw!r}: looks like a command-line option, not a path'
+    if '\n' in raw or '\x00' in raw:
+        return f'{raw!r}: contains a newline or NUL byte'
+    if raw.startswith('~'):
+        return f'{raw!r}: not a repo-relative path (home-relative)'
+    if os.path.isabs(raw) or raw.startswith('/') or raw.startswith('\\'):
+        return f'{raw!r}: not a repo-relative path (absolute)'
+
+    unix = raw.replace('\\', '/')
+    if any(seg == '..' for seg in unix.split('/')):
+        return f'{raw!r}: contains a ".." segment'
+
+    rel_norm = posixpath.normpath(unix)
+    if rel_norm.startswith('../') or rel_norm == '..':
+        return f'{raw!r}: escapes the stack root'
+    if rel_norm.startswith('/'):
+        return f'{raw!r}: escapes the stack root'
+
+    name = posixpath.basename(rel_norm)
+    if not _COMPOSE_NAME_RE.match(name):
+        return (f'{raw!r}: not a compose file name '
+                '(expected compose*.yml / compose*.yaml)')
+
+    abs_path = os.path.join(stack_root, *rel_norm.split('/'))
+    # A symlink inside the tree can point at a rw island (or out of the tree
+    # entirely), so judge what the path actually resolves to as well.
+    try:
+        real = os.path.realpath(abs_path)
+        real_root = os.path.realpath(stack_root)
+    except OSError:  # pragma: no cover - realpath on a sane path does not raise
+        return f'{raw!r}: cannot be resolved'
+    if real != real_root and not real.startswith(real_root + os.sep):
+        return f'{raw!r}: resolves outside the stack root ({real})'
+    # THE security rule: the Portal must not be able to write the file it is
+    # about to hand the daemon. Judged on the RESOLVED path, so a symlink
+    # planted in the read-only tree cannot launder an island (or an outside
+    # file) past the check. `realpath` normalises a non-existent path too, so
+    # this covers the dangling case before the existence check below.
+    real_rel = os.path.relpath(real, real_root).replace(os.sep, '/')
+    for island in RW_ISLANDS:
+        if _is_inside(real_rel, island):
+            return (f'{raw!r}: lives under {island!r}, which the Portal can WRITE — '
+                    'a compose file there is attacker-controllable (#1226)')
+
+    if not os.path.isfile(abs_path):
+        return f'{raw!r}: no such file under the stack root'
+    return None
+
+
+def split_chain(compose_file: str) -> list[str]:
+    """The ``:``-joined chain as a list, empty segments dropped."""
+    return [p for p in (compose_file or '').split(':') if p.strip()]
+
+
+def check_compose_file(compose_file: str, stack_root: str) -> list[str]:
+    """Every rejection reason for this chain (empty list = the chain is allowed).
+
+    An EMPTY/unset chain is allowed: compose then uses its own discovery
+    (``compose.yml`` in the project dir), which is in-tree and read-only.
+    """
+    return [r for r in (check_entry(e, stack_root) for e in split_chain(compose_file))
+            if r]
+
+
+def _read_env_compose_file(stack_root: str) -> str:
+    """``COMPOSE_FILE`` as the compose CLI would read it from the project ``.env``.
+
+    Deliberately a line scan, not a dotenv parse: this must agree with
+    ``read_env_value`` in scripts/lib.sh and must never execute the file.
+    """
+    path = os.path.join(stack_root, '.env')
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            value = ''
+            for line in fh:
+                line = line.strip()
+                if line.startswith('COMPOSE_FILE='):
+                    value = line.split('=', 1)[1].strip()
+            return value.strip('"').strip("'")
+    except OSError:
+        return ''
+
+
+#: Variables a docker / docker compose child may inherit from the Portal (#2816).
+#: Everything else (``MAIN_DOMAIN`` ...) is a boot-time value of the Portal
+#: container that outlives an apply; compose gives a shell variable precedence
+#: over ``.env``, so inheriting it would pin every recreated service to the OLD
+#: value of a key the apply just changed. ``STACK_HOST_PATH`` stays: it is the
+#: Portal's own precondition (#2831) and is held equal to the stack root.
+_ENV_EXACT = frozenset({
+    'PATH', 'HOME', 'LANG', 'TZ', 'TMPDIR', 'USER', 'LOGNAME',
+    'COMPOSE_PROJECT_NAME', 'STACK_HOST_PATH', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+})
+_ENV_PREFIX = ('LC_', 'DOCKER_')
+
+
+def compose_env(stack_root: str | None = None, environ=None) -> dict:
+    """The CLEAN environment for every ``docker`` / ``docker compose`` child.
+
+    Only the allow-listed process variables; every other value comes from the
+    stack ``.env`` (compose reads it from the project directory, and
+    :func:`compose_argv` names it with ``--env-file``). ``COMPOSE_FILE`` and
+    ``COMPOSE_PROFILES`` are deliberately NOT inherited: they live in ``.env``.
+    """
+    src = os.environ if environ is None else environ
+    return {k: v for k, v in src.items()
+            if k in _ENV_EXACT or k.startswith(_ENV_PREFIX)}
+
+
+def effective_compose_file(stack_root: str, env=None) -> str:
+    """What compose will actually use: the environment wins over the ``.env``.
+
+    With no explicit ``env`` that is the CLEAN child environment
+    (:func:`compose_env`), i.e. the ``.env`` value."""
+    env = compose_env(stack_root) if env is None else env
+    from_env = env.get('COMPOSE_FILE')
+    if from_env is not None and from_env.strip():
+        return from_env
+    if from_env is not None and not from_env.strip():
+        # An explicitly EMPTY override means "compose's own discovery"; the
+        # .env value must not leak back in (build_preflight relies on this).
+        return ''
+    return _read_env_compose_file(stack_root)
+
+
+def assert_compose_file_allowed(stack_root: str, env=None) -> None:
+    """Raise :class:`ComposeFileRejected` when the effective chain is not allowed."""
+    reasons = check_compose_file(effective_compose_file(stack_root, env), stack_root)
+    if reasons:
+        raise ComposeFileRejected(reasons)
+
+
+class StackHostPathMissing(RuntimeError):
+    """The Portal has no usable host path for the stack directory."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        # Here, not at module level: the shim imports this module for compose_env.
+        from .env_mount import host_command
+        recreate = host_command('docker compose up -d --force-recreate razzfazz-config')
+        super().__init__(
+            'refusing to run docker compose: ' + reason + '. The Portal never falls '
+            'back to its own in-container path: docker would create root-owned empty '
+            'directories on the host for every bind mount and break the containers. '
+            'To fix: make sure .env holds STACK_HOST_PATH=<absolute stack directory on '
+            'the host> (`rzfz upgrade` or `rzfz init` writes it), then recreate the '
+            f'container from the current compose file so it receives the value: '
+            f'`{recreate}`, and retry. If .env already has the right value, the '
+            'container was created without it')
+
+
+def stack_host_path_problem(stack_root: str, env=None) -> str | None:
+    """Why compose must not run from this process, or None when STACK_HOST_PATH is sound.
+
+    Judged on the Portal's own environment (the value it was created with),
+    not on ``.env``: the bind mount that makes the host path visible in here
+    is decided at container creation, so a value that only reached ``.env``
+    afterwards does not change what this process sees. A caller-supplied
+    ``env`` that does not carry the key falls back to the process environment.
+    """
+    value = ''
+    for src in (env, os.environ):
+        if src is not None and (src.get('STACK_HOST_PATH') or '').strip():
+            value = src['STACK_HOST_PATH'].strip()
+            break
+    if not value:
+        return 'STACK_HOST_PATH is unset or empty in the Portal environment'
+    if not os.path.isabs(value):
+        return f'STACK_HOST_PATH={value!r} is not an absolute path'
+    if os.path.normpath(value) != os.path.normpath(stack_root):
+        return (f'STACK_HOST_PATH={value!r} differs from the path the Portal runs '
+                f'compose in ({stack_root!r}), so compose would hand the daemon '
+                'paths that do not exist on the host')
+    if not os.path.isdir(value):
+        return f'STACK_HOST_PATH={value!r} does not exist'
+    return None
+
+
+def _verb(args) -> str:
+    """First non-flag word of a compose argv tail (``--profile x up`` → ``up``)."""
+    skip_value_for = {'--profile', '-p', '--project-name', '--project-directory',
+                      '-f', '--file', '--env-file', '--parallel'}
+    it = iter(args)
+    for a in it:
+        if not isinstance(a, str):
+            continue
+        if a in skip_value_for:
+            next(it, None)
+            continue
+        if a.startswith('-'):
+            continue
+        return a
+    return ''
+
+
+def compose_argv(stack_root: str, *args, env=None, logger=None) -> list:
+    """``['docker', 'compose', *args]`` — after validating the effective chain.
+
+    THE chokepoint: every ``docker compose`` the Portal launches is built here,
+    and test_1226 fails if a raw ``['docker', 'compose', …]`` literal reappears
+    anywhere under ``core/config/app/``.
+
+    A state-changing verb (:data:`STATE_CHANGING_VERBS`) on a rejected chain
+    raises. A read-only verb only warns: refusing there would blank the
+    dashboard of a box whose chain is merely odd, and rendering a config can
+    start nothing.
+    """
+    if _verb(args) in STATE_CHANGING_VERBS:
+        # #2831: before anything else. A state-changing run from a wrong root
+        # creates directories on the host; nothing may be created.
+        problem = stack_host_path_problem(stack_root, env)
+        if problem:
+            raise StackHostPathMissing(problem)
+    reasons = check_compose_file(effective_compose_file(stack_root, env), stack_root)
+    if reasons:
+        verb = _verb(args)
+        if verb in STATE_CHANGING_VERBS:
+            raise ComposeFileRejected(reasons)
+        if logger is not None:
+            logger.warning('COMPOSE_FILE not allow-listed (#1226), running read-only '
+                           '`docker compose %s` anyway: %s', verb or '?',
+                           '; '.join(reasons))
+    # #2816: the values come from the stack .env, named explicitly; the child
+    # runs with compose_env(), so no inherited shell variable can beat it.
+    env_file = os.path.join(stack_root, '.env')
+    pre = ['--env-file', env_file] if os.path.isfile(env_file) else []
+    return ['docker', 'compose', *pre, *args]

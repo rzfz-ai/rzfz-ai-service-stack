@@ -1,0 +1,49 @@
+# wazuh_certs_config.yml — node/cert topology for wazuh-certs-generator.
+# No key material here: this only names which certs to generate for which
+# hostnames; the tool creates the keypairs into the wazuh-certs-data volume at
+# first start (never committed, never baked).
+#
+# `name:` becomes the certificate CN *and* the cert FILE STEM
+# (<name>.pem / <name>-key.pem). It therefore stays the hyphenated compose
+# service name, which is what keeps configs/wazuh_indexer/opensearch.yml's
+# plugins.security.nodes_dn / admin_dn, distribute-certs.sh's published file
+# names and every SSL_CERTIFICATE* path in compose.yml valid.
+#
+# `ip:` becomes the SUBJECT ALTERNATIVE NAME, and it is VALIDATED (#1259).
+# wazuh/wazuh-certs-generator:0.0.2 runs the cert tool it downloads from the
+# URL baked into its own entrypoint — https://packages.wazuh.com/4.8/
+# wazuh-certs-tool.sh — and that tool accepts a value only if it is an IPv4
+# literal or matches
+#
+#   ^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*
+#    ([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])\.([A-Za-z]{2,})$
+#
+# i.e. it needs AT LEAST ONE DOT and a final label of two or more letters.
+# A bare compose service name (`wazuh-indexer`) is neither, so the one-shot
+# died with `ERROR: Invalid IP or DNS wazuh-indexer` on a clean install and
+# #855's gate in distribute-certs.sh then refused to distribute a half-built
+# PKI — every Wazuh container stayed `Created`.
+#
+# So the SANs are the DOTTED spelling (the same one upstream's own reference
+# compose uses for these three nodes), and compose.yml registers each of them
+# as a NETWORK ALIAS on the owning service, so `wazuh.indexer` and
+# `wazuh-indexer` both resolve. Every TLS client that verifies the hostname
+# (indexer healthcheck, manager filebeat + ossec.conf indexer connector,
+# dashboard opensearch.hosts, the post-install probe, the documented operator
+# recipe) dials the DOTTED name — the one that is actually on the cert.
+#
+# ONE SAN PER NODE, AND IT MUST BE A SCALAR. Only the `server` group's `ip:`
+# is read as a list by that tool; for `indexer` and `dashboard` it greps
+# `nodes__<group>__N__ip=`, which a YAML sequence never produces — the value
+# comes back empty and the tool exits 1 the same way. Pinned by
+# tests/unit/consistency/test_1259_wazuh_certs_hostnames.py.
+nodes:
+  indexer:
+    - name: wazuh-indexer
+      ip: wazuh.indexer
+  server:
+    - name: wazuh-manager
+      ip: wazuh.manager
+  dashboard:
+    - name: wazuh-dashboard
+      ip: wazuh.dashboard

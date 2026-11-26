@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# =============================================================================
+# Dify SSRF chaining proxy — squid config TEMPLATE (#277)
+# =============================================================================
+# Rendered box-local by ./render.sh, called from scripts/apply-corporate-proxy.sh
+# (placeholders below are substituted with the corporate WSA host/port, the Dify
+# doc-tools allow-list and the SSRF lists of core/Caddy/ssrf-box.sh)
+# and mounted read-only into the generated `dify-ssrf-chain` sidecar. It exists
+# ONLY on a corporate-proxy box (RAZZFAZZ_CORPORATE_PROXY=1) with Dify enabled.
+#
+# WHY: Dify's marketplace/plugin downloads (dify-api) are pinned to an internal
+# forward proxy (SSRF_PROXY_*). On a normal box that is caddy:8195, whose
+# `forward_proxy` dials targets DIRECTLY and CANNOT chain to a plain-HTTP
+# corporate proxy (caddy rejects `upstream http://…` for non-localhost). Behind a
+# WSA that is the only egress path, that direct dial never connects → plugin
+# downloads fail (#277). This squid sidecar replaces caddy:8195 for Dify while
+# PRESERVING the SSRF ACL:
+#   • internal AI doc-tools (gpustack, docling, …) → reached DIRECTLY,
+#   • every OTHER internal/RFC1918 target → DENIED (SSRF protection),
+#   • public destinations (incl. marketplace.dify.ai) → chained through the WSA.
+# TLS interception is handled by the WSA; Dify validates the re-signed cert
+# against the mounted corporate CA bundle (REQUESTS_CA_BUNDLE, set by the overlay).
+# =============================================================================
+
+http_port 3128
+
+# --- ACLs --------------------------------------------------------------------
+acl Safe_ports port 80 443
+acl SSL_ports  port 443
+acl CONNECT    method CONNECT
+
+# Requests only ever arrive from Dify services on the internal proxy network.
+acl dify_clients src 0.0.0.0/0
+
+# Internal AI doc-tools Dify is explicitly permitted to reach DIRECTLY (never via
+# the WSA — they are on-box). Substituted from DIFY_DOC_TOOLS_SSRF_ALLOW.
+acl doctools dstdomain @@DOCTOOLS_DOMAINS@@
+
+# #2675: the SSRF lists of the caddy:8195 ACL this sidecar replaces, rendered
+# from the SAME source (core/Caddy/ssrf-box.sh): `to_internal` is every range
+# the :8195 acl denies (read from core/Caddy/Caddyfile), `to_box` the box's own
+# addresses (HOST_IP, MAIN_DOMAIN and the names under it as resolved at render time, the
+# operator's DIFY_SSRF_DENY_BOX_OVERRIDE / _EXTRA), `ssrf_allow_ranges` the
+# operator's validated DIFY_SSRF_ALLOW_RANGES, `ssrf_deny_names` /
+# `ssrf_deny_nets` the staging box's DIFY_SSRF_DENY_HOSTS (#2524; names refused
+# before the doc-tools allow, as on :8195). All but `to_internal` are only
+# present when non-empty. Re-run scripts/apply-corporate-proxy.sh after the box's
+# addresses change. Guard: tests/unit/consistency/test_2675_ssrf_chain_matches_caddy.py
+@@SSRF_ACLS@@
+
+# --- upstream: the corporate WSA (plain-HTTP parent proxy) -------------------
+cache_peer @@WSA_HOST@@ parent @@WSA_PORT@@ 0 no-query no-digest default
+
+# --- routing policy ----------------------------------------------------------
+# doc-tools resolve to on-box RFC1918 IPs → must go DIRECT, not through the WSA.
+always_direct allow doctools
+@@SSRF_ALLOW_DIRECT@@
+# everything else (public) is forced through the WSA parent — never direct.
+never_direct  allow all
+
+# --- access policy (first match wins) ----------------------------------------
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+@@SSRF_DENY_NAMES_ACCESS@@
+http_access allow doctools          # internal AI tools (direct)
+@@SSRF_BOX_ACCESS@@
+@@SSRF_ALLOW_ACCESS@@
+http_access deny  to_internal       # SSRF: block all other internal targets
+http_access allow dify_clients      # public destinations (chained via WSA)
+http_access deny all
+
+# --- pure forwarder: no caching ----------------------------------------------
+cache deny all

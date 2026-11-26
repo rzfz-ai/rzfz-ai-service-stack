@@ -1,0 +1,158 @@
+# Stack-wide MCP server registry (M035). Single source of truth for which MCP
+# servers are attached to the stack's AI tools. Synced to consumers by
+# core/mcp/sync.py. Secrets are referenced by .env key (auth.secret_ref), never
+# inlined here. Schema validated by tests/unit/mcp/test_mcp_registry_schema.py.
+version: 1
+servers:
+  - id: cognee
+    description: Cognee shared admin sidecar (DISABLED — superseded by per-user cognee proxies, #36 BLOCKER-2)
+    transport: streamable-http        # stdio | sse | streamable-http
+    url: http://cognee-mcp:8000/mcp
+    command: null                     # stdio only
+    args: []                          # stdio only
+    scope: internal                   # internal | external
+    auth:
+      header: X-Api-Key
+      secret_ref: COGNEE_MCP_API_KEY
+    enabled: false                    # #36 BLOCKER-2 — was true; admin-scoped, unauth from sandboxes
+    consumers: [all]                  # "all" or explicit subset of consumer ids
+    requires_profile: cognee
+
+# MCP gateway servers (#2472/#2086) — served by mcp-manager at /gw/<id>/mcp.
+# Read by mcp-manager (app/services/gateway_registry.py; the Open WebUI emitter
+# of core/mcp/sync.py follows in B10); the `servers:` readers never see them.
+gateway_servers:
+  # #2086: Docling's own MCP server (docling-mcp-server in the pinned
+  # docling-serve image). Reached ONLY through the docling-egress relay
+  # (modules/doc-processing/docling/compose.yml), which admits only the relay
+  # secret; the `docling` guard (mcp-manager app/services/docling_guard.py)
+  # admits two tools, http(s) sources only, per-caller document keys, and
+  # scrubs upstream errors.
+  - id: docling
+    description: Document conversion (Docling) — PDF, Office and HTML to Markdown
+    url: http://docling-egress:8080/mcp
+    credential: none
+    relay_secret_env: DOCLING_RELAY_SECRET
+    guard: docling
+    consumers: [agent, openwebui, dify]
+    technical: true
+    requires_profiles: [docling, mcp]
+    requires_egress: false
+  # #2086/#2472 (B9): cognee stays single-tenant behind the per-user auth
+  # shim. Open WebUI reaches the chat user's OWN instance (looked up by the
+  # user's sub; never another person's, never a technical user's).
+  - id: cognee-personal
+    description: Your private cognee memory (as you)
+    credential: per_user_proxy:cognee-personal
+    consumers: [openwebui]
+    requires_profiles: [cognee, mcp]
+    requires_egress: false
+  - id: cognee-company
+    description: Company brain (cognee, read)
+    credential: per_user_proxy:cognee-company
+    consumers: [openwebui]
+    requires_profiles: [cognee, mcp]
+    requires_egress: false
+  # The company brain for Dify's technical users: only a technical caller
+  # bound to this id (mcp-integration:cognee-company-svc), and only through
+  # the instance an admin provisioned for that technical user
+  # (POST /internal/technical-users/<name>/instances/cognee-company).
+  - id: cognee-company-svc
+    description: Company brain (cognee) for Dify technical users
+    credential: shared_proxy:cognee-company
+    consumers: [dify]
+    technical: true
+    requires_profiles: [cognee, mcp]
+    requires_egress: false
+  # Google through the in-repo pinned razzfazz-mcp-proxy build only
+  # (modules/mcp-manager/mcp-proxy; rulings I4/R2-2): the gateway relays to
+  # the chat user's own instance, launched from exactly that build with the
+  # user's own Google token.
+  - id: google
+    description: Google Workspace (as you)
+    credential: per_user_proxy:google
+    consumers: [openwebui]
+    requires_profiles: [mcp]
+    requires_egress: true
+  # #2554: Gitea as a knowledge base. ONE stateless gitea-mcp (modules/gitea/
+  # compose.yml, no server token) serves every caller AS that caller: the
+  # gateway injects the person's own Gitea OAuth grant (catalog:gitea, keyed
+  # by their sub) or a technical user's own token, never anyone else's.
+  # The `gitea` guard (mcp-manager app/services/gitea_guard.py) admits only
+  # the pinned gitea-mcp's own tools and refuses every branch-content write
+  # whose target is missing, empty or the repository's default branch — read
+  # with the caller's own credential; a failed lookup refuses the write.
+  # pull_request_review_write, actions_run_write and package_write are
+  # refused to technical callers (persons only, like a merge; §9 extension).
+  # gitea-mcp 1.7.0 writes the DEFAULT branch when branch_name is missing
+  # (fixed on main by gitea-mcp#282, unreleased). Re-read the tool registry
+  # and update gitea_guard whenever GITEA_MCP_VERSION moves.
+  - id: gitea
+    description: Gitea knowledge repos — list, read, branch + PR (as the caller)
+    url: http://gitea-mcp:8080/mcp
+    credential: catalog:gitea
+    auth_header: "Bearer {token}"
+    guard: gitea
+    consumers: [agent, openwebui, dify]
+    technical: true
+    requires_profiles: [gitea, mcp]
+    requires_egress: false
+    write_guard: [create_or_update_file, delete_file, create_branch, delete_branch, rename_branch,
+                  pull_request_write, pull_request_review_write, actions_run_write, package_write]
+  # #2472: Jira + Confluence (Atlassian Cloud). ONE stateless mcp-atlassian
+  # (modules/mcp-manager/compose.yml, no credential of its own) serves every
+  # caller AS that caller: a person's own Atlassian OAuth grant
+  # (catalog:atlassian, keyed by their sub), or a technical user's
+  # client-credentials token for its own Atlassian service account
+  # (gateway_credentials._client_credentials_upstream). Needs the internet.
+  - id: atlassian
+    description: Jira & Confluence (as the caller; Dify as its service account)
+    url: http://mcp-atlassian:9000/mcp
+    credential: catalog:atlassian
+    auth_header: "Bearer {token}"
+    consumers: [agent, openwebui, dify]
+    technical: true
+    requires_profiles: [mcp, mcp-atlassian]
+    requires_egress: true
+  # #3429: Atlassian's OFFICIAL remote MCP server (the default for Atlassian).
+  # The gateway calls exactly the catalogue entry's URL (it must equal
+  # personal-mcp-catalog.yaml `atlassian-mcp` remote_mcp.url, and pass that
+  # entry's egress allow-list) with the PERSON's own grant from the box's
+  # dynamic client registration. Persons only: a technical user has no grant
+  # here (Dify service accounts keep the self-hosted `atlassian` above).
+  - id: atlassian-mcp
+    description: Jira & Confluence via Atlassian's official MCP server (as you)
+    url: https://mcp.atlassian.com/v2/mcp
+    credential: catalog:atlassian-mcp
+    auth_header: "Bearer {token}"
+    consumers: [agent, openwebui, dify]
+    technical: false
+    requires_profiles: [mcp]
+    requires_egress: true
+  # #2472: Microsoft 365 through Graph, AS the user: ONE stateless ms365-mcp
+  # (no dynamic client registration, no client secret) gets the person's own
+  # Entra token per request. Never a technical user, never Dify (app-only
+  # Graph rights are tenant-wide). #3433: read-write by default; the `m365`
+  # guard (mcp-manager app/services/m365_guard.py) classes every tool (read /
+  # write / send / delete), audits every call that is not a read, and applies
+  # the M365_MCP_* restrictions an admin turns on (read-only, no sending, no
+  # unattended send/delete, a per-call confirmation in chat).
+  - id: m365
+    description: Microsoft 365 — mail, calendar, OneDrive, SharePoint (as you)
+    url: http://ms365-mcp:3000/mcp
+    credential: catalog:m365
+    auth_header: "Bearer {token}"
+    guard: m365
+    consumers: [agent, openwebui]
+    technical: false
+    requires_profiles: [mcp, mcp-m365]
+    requires_egress: true
+
+# The gateway's concurrency caps (#2472). mcp-manager serves on 64 threads
+# (modules/mcp-manager/manager/gunicorn.conf.py); `total` keeps the rest for
+# the portal, /healthz and Caddy's TLS ask. An invalid block uses these defaults.
+gateway_limits:
+  per_caller: 8               # concurrent relays per caller; 429 beyond
+  total: 48                   # concurrent relays in all; 503 beyond
+  stream_idle_timeout: 300    # seconds a GET stream may stay silent
+  max_body_bytes: 4194304     # largest request body (4 MiB); 413 beyond

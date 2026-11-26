@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Identity - razzfazz.ai</title>
+  <link rel="icon" type="image/svg+xml" href="/branding/rzfz-ai-favicon.svg">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="header-left">
+      <img src="/branding/rzfz-ai-logo.svg" alt="rzfz.ai" class="logo">
+      <h1>MCP identity migration</h1>
+    </div>
+    <div class="user-info"><a href="/">Back</a> &middot; <span>{{ username }}</span></div>
+  </header>
+
+  <p class="intro">
+    Rows saved before 2026.11 that could not be verified as belonging to one
+    person. They are kept encrypted and are used by nobody. Purging one deletes
+    it for good; it is recorded in the audit log. Nothing here is restored to a
+    person: the owner reconnects the integration instead.
+  </p>
+
+  <p class="intro" id="cognee-erasure-note">
+    A quarantined <strong>cognee account</strong> is different: purging it
+    removes only this listing. The cognee account and the memory stored under
+    it stay in cognee, where nothing here can reach them. To erase that data
+    (for a data-protection request or by retention), delete the account and its
+    datasets in cognee yourself after purging.
+  </p>
+
+  <h2>Quarantined rows</h2>
+  {% if quarantined %}
+  <table class="identity-admin" id="quarantined">
+    <thead><tr><th>Former owner (slug)</th><th>Integration</th><th>Kind</th>
+      <th>Created</th><th>Reason</th><th>Quarantined</th><th></th></tr></thead>
+    <tbody>
+    {% for q in quarantined %}
+      <tr data-id="{{ q.id }}">
+        <td>{{ q.user_slug or "-" }}</td>
+        <td>{{ q.mcp_id or "-" }}</td>
+        <td>{{ {"mcp_instances": "proxy instance", "mcp_type_bindings": "agent binding",
+               "mcp_user_secrets": "credential"}.get(q.source_table, q.source_table) }}{% if q.cred_type %} ({{ q.cred_type }}){% endif %}</td>
+        <td>{{ q.created_at or "-" }}</td>
+        <td>{{ q.reason }}</td>
+        <td>{{ q.quarantined_at }}</td>
+        <td>{% if q.source_table == "mcp_cognee_accounts" %}<button type="button" onclick="purge('identity-quarantine', {{ q.id }}, true)">Purge listing</button>
+          <button type="button" class="erase-cognee" onclick="eraseCognee({{ q.id }})">Erase cognee data</button>
+          <div class="none cognee-keeps">The cognee data stays and must be deleted in cognee.</div>
+          {% else %}<button type="button" onclick="purge('identity-quarantine', {{ q.id }})">Purge</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="none">No quarantined rows.</p>
+  {% endif %}
+
+  <h2>People with two memories</h2>
+  <p class="intro">
+    These people used memory under their current identity and also have an
+    older memory account that the migration mapped to them. The memory under
+    the <strong>current</strong> identity is the one served. The other is kept
+    in cognee, not served and not deleted. <em>Restore</em> serves the older
+    one instead (recorded in the audit log). Merging the two is done in cognee.
+  </p>
+  {% if two_memories %}
+  <table class="identity-admin" id="two-memories">
+    <thead><tr><th>Older account (slug)</th><th>Person</th><th>Serving now</th><th></th></tr></thead>
+    <tbody>
+    {% for m in two_memories %}
+      <tr data-slug="{{ m.legacy_slug }}">
+        <td>{{ m.legacy_slug }}</td><td>{{ m.owner_sub }}</td><td>{{ m.serving }}</td>
+        <td>{% if m.serving == "current" %}<button type="button" onclick="restoreMemory('{{ m.legacy_slug }}')">Restore older memory</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="none">Nobody has two memories.</p>
+  {% endif %}
+
+  <h2>Unattributed for more than 30 days</h2>
+  {% if unattributed %}
+  <table class="identity-admin" id="unattributed">
+    <thead><tr><th>Former owner (slug)</th><th>Integration</th><th>Credential</th>
+      <th>Created</th><th></th></tr></thead>
+    <tbody>
+    {% for u in unattributed %}
+      <tr data-id="{{ u.id }}">
+        <td>{{ u.user_slug or "-" }}</td>
+        <td>{{ u.mcp_id }}</td>
+        <td>{{ u.cred_type }}</td>
+        <td>{{ u.created_at }}</td>
+        <td><button type="button" onclick="purge('identity-unattributed', {{ u.id }})">Purge</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="none">No credential has waited more than 30 days for its owner.</p>
+  {% endif %}
+</div>
+
+<div id="status-toast" class="status-toast" role="status" aria-live="polite"></div>
+<script>
+function showStatus(message, ok) {
+  const el = document.getElementById('status-toast');
+  el.textContent = message;
+  el.classList.remove('ok', 'err');
+  el.classList.add(ok ? 'ok' : 'err', 'show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+async function restoreMemory(slug) {
+  if (prompt('This serves the older memory instead of the current one. Nothing is deleted. Type Restore to confirm') !== 'Restore') return;
+  const r = await fetch(`/api/admin/cognee-memories/${encodeURIComponent(slug)}/restore?confirm=Restore`, {method: 'POST'});
+  const data = await r.json().catch(() => ({}));
+  showStatus(r.ok ? 'Restored.' : (data.error || 'Restore failed.'), r.ok);
+  if (r.ok) setTimeout(() => location.reload(), 900);
+}
+async function eraseCognee(id) {
+  if (prompt('This permanently deletes the cognee account and ALL of its memory in cognee. It cannot be undone. Type Erase to confirm') !== 'Erase') return;
+  const r = await fetch(`/api/admin/identity-quarantine/${id}/erase-cognee?confirm=Erase`, {method: 'POST'});
+  const data = await r.json().catch(() => ({}));
+  showStatus(r.ok ? 'Erased.' : (data.message || data.error || 'Erase failed.'), r.ok);
+  if (r.ok) setTimeout(() => location.reload(), 900);
+}
+async function purge(kind, id, cognee) {
+  const what = cognee
+    ? 'This removes the listing only. The cognee account and its memory stay in cognee and must be deleted there. Type Purge to confirm'
+    : 'This deletes the row for good. Type Purge to confirm';
+  if (prompt(what) !== 'Purge') return;
+  const r = await fetch(`/api/admin/${kind}/${id}/purge?confirm=Purge`, {method: 'POST'});
+  const data = await r.json().catch(() => ({}));
+  showStatus(r.ok ? (data.note || 'Purged.') : (data.error || 'Purge failed.'), r.ok);
+  if (r.ok) setTimeout(() => location.reload(), 900);
+}
+</script>
+</body>
+</html>

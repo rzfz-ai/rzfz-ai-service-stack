@@ -1,0 +1,13027 @@
+#!/bin/bash
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# rzfz.ai Stack - Post-Install Provisioning Script
+# ==============================================================================
+# This script provisions a freshly installed rzfz.ai stack with models,
+# service configurations, and integrations. Run after razzfazz-init.sh.
+#
+# Usage:
+#   rzfz post-install --preset standard     # Standard model set
+#   rzfz post-install --preset developer     # Developer model set
+#   rzfz post-install --verify               # Run verification only
+#   rzfz post-install --preset standard --verify  # Provision + verify
+#   rzfz post-install --help
+#
+# Prerequisites:
+#   - razzfazz-init.sh has completed successfully
+#   - Stack is running (docker compose up -d)
+#   - Internet access for model downloads
+#
+# ==============================================================================
+
+set -eo pipefail
+
+# #2543: every repo file this run writes (a git checkout, a package's files,
+# generated config) must be readable by the containers that bind-mount it.
+# Under a CIS-hardened umask (027, or 077) git writes a changed file 0640/0600,
+# and a non-root container whose uid is not the owner then cannot read it:
+# on 0.91 razzfazz-help crash-looped on versions.json after `rzfz upgrade`.
+# Secrets never relied on the umask; they are chmod'ed 600/700 explicitly.
+umask 022
+
+# ------------------------------------------------------------------------------
+# #427: unconditional run log. Every post-install run tees its full output to a
+# timestamped file — "did the image load fail, or was it skipped?" must never
+# again require re-running a 30-minute provisioning step because the console
+# scrollback is gone. Skipped when a parent razzfazz process already captures
+# (upgrade re-exec), so one run = one log.
+# --help/-h/help runs stay un-teed: the command-reference generator captures
+# their stdout verbatim (a tee process-substitution can swallow it on fast
+# exit), and a help call must not mint a junk run log.
+_rzfz_wants_help=false
+for _rzfz_a in "$@"; do case "$_rzfz_a" in -h|--help|help) _rzfz_wants_help=true ;; esac; done
+if [ "$_rzfz_wants_help" = false ] && [ -z "${RZFZ_RUN_LOG:-}" ]; then
+    RZFZ_LOG_DIR="${RZFZ_LOG_DIR:-$HOME/.razzfazz/logs}"
+    # review #653: logs can carry env-adjacent output (set -x under
+    # DEBUG_MODE would land here in full) — operator-only.
+    # #2697: the log is the operator's alone (0600 whatever the umask, set just
+    # before the tee), and the fallback gets an
+    # unpredictable mktemp name in TMPDIR, never a guessable /tmp path.
+    _rzfz_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    if mkdir -p "$RZFZ_LOG_DIR" 2>/dev/null && chmod 700 "$RZFZ_LOG_DIR" 2>/dev/null; then
+        RZFZ_RUN_LOG="$RZFZ_LOG_DIR/razzfazz-post-install-${_rzfz_ts}.log"
+    else
+        RZFZ_LOG_DIR="${TMPDIR:-/tmp}"
+        RZFZ_RUN_LOG="$(mktemp --tmpdir="$RZFZ_LOG_DIR" --suffix=.log "razzfazz-post-install-${_rzfz_ts}-XXXXXX")" || RZFZ_RUN_LOG=/dev/null
+    fi
+    export RZFZ_RUN_LOG
+    # retention: keep the last 10 runs per verb
+    # #667: on the verb's first-ever run the glob matches nothing → ls exits 2
+    # → pipefail + set -e killed the script BEFORE any output. Cleanup must
+    # never kill the run.
+    ls -1t "$RZFZ_LOG_DIR"/razzfazz-post-install-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f -- || true
+    # #2697: 0600 before the tee opens it, and after the trim above, so this
+    # run's own log never counts against the ten kept.
+    if [ "$RZFZ_RUN_LOG" != /dev/null ]; then (umask 077; : >>"$RZFZ_RUN_LOG") 2>/dev/null || true; chmod 600 "$RZFZ_RUN_LOG" 2>/dev/null || true; fi
+    exec > >(tee -a "$RZFZ_RUN_LOG") 2>&1
+    echo "[log] full run log: $RZFZ_RUN_LOG"
+    trap 'echo "[log] full run log: $RZFZ_RUN_LOG"' EXIT
+fi
+
+# Debug mode: set -x for verbose trace output
+DEBUG_MODE=false
+
+# ==============================================================================
+# M026 / S02 #6: source the shared library for colors, print_*, and
+# read_env_value. Note that this script defines its own load_env() and
+# update_env_value() further down — those local definitions intentionally
+# override lib's because their semantics differ here (load_env eval-exports
+# .env into the current shell; update_env_value triggers an env-snapshot
+# side-effect on first call). print_step is also kept locally because it
+# carries a horizontal-rule visual decorator that the long interactive
+# provisioning UX depends on.
+# ==============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# House rule, matching init.sh:86 / upgrade.sh:54 / lifecycle.sh:26 /
+# setup.sh:104 / worker-join.sh:40 / hub-credentials.sh:20 — `rzfz` execs the
+# target WITHOUT changing directory. Without this cd, every `docker compose`
+# call resolves a RELATIVE COMPOSE_FILE chain against the operator's cwd (and
+# most of them are `>/dev/null 2>&1 || true`, so the failure is invisible),
+# ensure_oidc_ca_superset writes ./certs/caddy-ca.pem into the operator's cwd
+# and reads no ./.env, and `read_env_value .env …` silently returns nothing.
+cd "$SCRIPT_DIR"
+# shellcheck source=scripts/lib.sh disable=SC1091
+source "${SCRIPT_DIR}/scripts/lib.sh"
+# #1185/#908: the OWUI backend resolvers, key validation and retrieval
+# reconcile are shared with cli/upgrade.sh — ONE implementation.
+# shellcheck source=scripts/lib-owui.sh disable=SC1091
+source "${SCRIPT_DIR}/scripts/lib-owui.sh"
+# #2578: --refresh re-renders the Synapse config from the template.
+# shellcheck source=scripts/lib-matrix.sh disable=SC1091
+source "${SCRIPT_DIR}/scripts/lib-matrix.sh"
+# #1250b: deploying + verifying the standard model set on a box whose LLM
+# backend is the LLM Manager (no GPUStack to deploy into). Its own sourced
+# library, same shape as lib-owui.sh.
+# shellcheck source=cli/lib-llm-manager-deploy.sh disable=SC1091
+source "${SCRIPT_DIR}/cli/lib-llm-manager-deploy.sh"
+# #2476: the OpenBao identity reconcile (OIDC, role and team policies, the
+# svc-mcp-manager AppRole) and the recovery key's one showing.
+# shellcheck source=cli/lib-openbao.sh disable=SC1091
+source "${SCRIPT_DIR}/cli/lib-openbao.sh"
+# #2595: cognee's admin password moves through the shared set-password helper
+# (cognee's own user-manager; the password on stdin).
+# shellcheck source=cli/lib-set-password.sh disable=SC1091
+source "${SCRIPT_DIR}/cli/lib-set-password.sh"
+# The factory-reset blob must match the admin password in .env.
+# shellcheck source=scripts/lib-delivery-blob.sh disable=SC1091
+source "${SCRIPT_DIR}/scripts/lib-delivery-blob.sh"
+
+# Local print_step preserves the original horizontal-rule decorator above the
+# [STEP] line — lib.sh's print_step has no rule.
+print_step() {
+    echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}[STEP]${NC} $1"
+}
+
+# ==============================================================================
+# #178(c): real per-step completion summary
+# ==============================================================================
+# The end-of-run block used to print a STATIC six-line checklist (six literal
+# `echo "... ✓ ..."` lines, always a pass, regardless of what actually
+# happened in THIS run). A box where Dify provisioning genuinely failed still
+# ended with a green "✓ Dify — plugins installed" — the checklist could not
+# tell "verified good" from "never ran" from "failed ten minutes ago".
+#
+# STEP_STATUS threads the REAL outcome of each major provisioning stage
+# through to the final summary. record_step_status() is a pure reporter — it
+# never fails and never aborts the run (it is a plain array assignment), so
+# it is safe to call from anywhere, including deep inside `set -eo pipefail`
+# code. A stage that never calls record_step_status renders as SKIP, not a
+# silent OK — that is deliberate: "never reached" is a distinct, honest state.
+# ------------------------------------------------------------------------------
+declare -A STEP_STATUS=()
+
+# record_step_status <key> <OK|WARN|FAIL>
+record_step_status() {
+    STEP_STATUS["$1"]="$2"
+}
+
+# _consumer_step_verdict <rc> <step>: prints OK | WARN | FAIL for a consumer
+# step (Dify, Open WebUI). rc 3 is "the models were not served yet". Any other
+# failure while a --reconcile-models relaunch is still pending is the same
+# situation, not a broken box: WARN naming the deployments, and the late
+# re-wire repeats the wiring once they serve. Otherwise a real failure.
+_consumer_step_verdict() {
+    local rc="$1" step="$2"
+    if [ "$rc" -eq 0 ]; then echo OK; return 0; fi
+    if [ "$rc" -eq 3 ]; then echo WARN; return 0; fi
+    if [ -n "${_LLMM_RECONCILE_RELAUNCHING:-}" ]; then
+        print_warning "${step} failed while these models were still relaunching: ${_LLMM_RECONCILE_RELAUNCHING} - recorded as WARN; re-run 'rzfz post-install --refresh' once they serve." >&2
+        echo WARN; return 0
+    fi
+    echo FAIL
+}
+
+# step_status_line <key> <label>: render one "Services configured" row using
+# the REAL recorded outcome for <key>, defaulting to SKIP when nothing was
+# ever recorded for it (profile disabled / stage never reached this run).
+step_status_line() {
+    local key="$1" label="$2"
+    local status="${STEP_STATUS[$key]:-SKIP}"
+    local color="$NC"
+    case "$status" in
+        OK)   color="$GREEN" ;;
+        WARN) color="$YELLOW" ;;
+        FAIL) color="$RED" ;;
+        *)    status="SKIP" ;;
+    esac
+    printf '    %b[%-4s]%b %s\n' "$color" "$status" "$NC" "$label"
+}
+
+# print_services_summary: the real, per-run replacement for the old static
+# checklist. Same six rows, same labels — the only thing that changed is that
+# the status word now comes from what THIS run actually recorded.
+print_services_summary() {
+    echo "  Services configured:"
+    # #1250b: on an LLM-Manager box the models are deployed through the
+    # manager, not GPUStack — the row must name the backend this run used.
+    # Unset (every GPUStack box) keeps the original wording verbatim.
+    # NB: no apostrophe in the ${VAR:-default} below. A single quote inside the
+    # DEFAULT of a parameter expansion opens a quote and breaks the parse — the
+    # first draft of this used "the box's workers" and `bash -n` failed 380 lines
+    # earlier, in unrelated code. The plain assignment of the same string
+    # elsewhere is fine; only the :- default is not.
+    # #2051: the backend row renders the key that was actually RECORDED. Before
+    # the split both backends shared the `gpustack` key, so one row could serve
+    # both; now the manager has its own and the row has to pick.
+    if [ -n "${STEP_STATUS[llm-manager]:-}" ]; then
+        step_status_line llm-manager "${LLM_BACKEND_SUMMARY_LABEL:-LLM Manager — models deployed on its workers}"
+    else
+        step_status_line gpustack  "${LLM_BACKEND_SUMMARY_LABEL:-GPUStack   — API key + models deployed}"
+    fi
+    step_status_line openwebui "Open WebUI — endpoint, audio, embedding, search"
+    step_status_line dify      "Dify       — plugins installed"
+    step_status_line speaches  "Speaches   — STT + TTS models installed"
+    step_status_line lightrag  "LightRAG   — model names in .env"
+    step_status_line cognee    "Cognee     — model names in .env"
+    [ -n "${STEP_STATUS[komodo-prune]:-}" ] && step_status_line komodo-prune "Komodo     — nightly image auto-prune off"
+    return 0
+}
+
+# ==============================================================================
+# Prerequisites
+# ==============================================================================
+check_prerequisites() {
+    local missing=""
+    for cmd in curl python3 docker; do
+        if ! command -v "$cmd" > /dev/null 2>&1; then
+            missing="$missing $cmd"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        print_error "Missing required tools:$missing"
+        print_info "Install with: sudo apt install -y$missing"
+        exit 1
+    fi
+}
+
+# ==============================================================================
+# .env path (SCRIPT_DIR is set above where lib.sh is sourced)
+# ==============================================================================
+ENV_FILE="${SCRIPT_DIR}/.env"
+
+# #949: expand `${IDENTIFIER}` references in an .env value against the
+# variables exported so far — the same sequential interpolation Compose
+# applies to .env itself, so the exported environment and Compose agree.
+# Pure string-walk, NO eval: `$(…)`, backticks, and brace-less `$VAR` pass
+# through byte-for-byte, and a `${…}` whose name is not a plain identifier
+# (`${VAR:-def}`) or not yet set stays literal rather than being emptied.
+_expand_env_refs() {
+    local val="$1" out="" rest name
+    while :; do
+        case "$val" in *'${'*) ;; *) break ;; esac
+        out="$out${val%%'${'*}"
+        rest="${val#*'${'}"
+        case "$rest" in
+            *'}'*) ;;
+            *) val='${'"$rest"; break ;;   # unterminated `${` — keep literal
+        esac
+        name="${rest%%\}*}"
+        val="${rest#*\}}"
+        case "$name" in
+            ''|*[!A-Za-z0-9_]*) out="$out"'${'"$name"'}' ;;
+            *) if [ -n "${!name+x}" ]; then out="$out${!name}"; else out="$out"'${'"$name"'}'; fi ;;
+        esac
+    done
+    printf '%s' "$out$val"
+}
+
+load_env() {
+    if [ ! -f "$ENV_FILE" ]; then
+        print_error ".env not found at $ENV_FILE"
+        print_info "Run razzfazz-init.sh first."
+        exit 1
+    fi
+    # Source .env safely — only export simple KEY=VALUE lines.
+    # 2026-05-09 fix: previous version did `eval "$(... sed 's/^/export /')"`
+    # which broke on values containing shell metachars. Caught on the dev
+    # box where BACKUP_CRON_EXPRESSION="00 03 * * *" caused the `*` to
+    # glob-expand against the current directory and produce a flood of
+    # "export: ‹filename›: not a valid identifier" errors. Now: parse
+    # line-by-line and assign with proper quoting + globbing disabled, so
+    # operator-edited .env values with spaces/`*`/`?` survive.
+    set +e
+    set -f  # disable pathname expansion for the duration of this load
+    while IFS= read -r _line; do
+        # Split on the FIRST '=' only (#2663): `IFS='=' read -r k v` drops one
+        # trailing '=' from the last field, truncating base64 secrets.
+        key="${_line%%=*}"; value="${_line#*=}"
+        # Skip comments and malformed lines.
+        case "$key" in ''|\#*) continue ;; esac
+        # Only accept identifier-shaped keys.
+        case "$key" in
+            [A-Za-z_]*[!A-Za-z0-9_]*) continue ;;
+            [A-Za-z_]*) ;;
+            *) continue ;;
+        esac
+        # Strip surrounding double-quotes if the value is wrapped (operator
+        # convention, not required by .env). Single-quoted values are kept
+        # literal.
+        # #2779: an inline comment is whitespace + '#' OUTSIDE quotes (compose's
+        # own rule); without this `KEY=v  # note` exported "v  # note" and the
+        # exported value shadowed .env in every later compose call.
+        case "$value" in
+            \"*)
+                if [[ "$value" =~ ^\"([^\"]*)\"[[:space:]]*(#.*)?$ ]]; then
+                    value="${BASH_REMATCH[1]}"
+                elif [[ "$value" == \"*\" ]]; then
+                    value="${value#\"}"; value="${value%\"}"
+                fi ;;
+            \'*)
+                if [[ "$value" =~ ^(\'[^\']*\')[[:space:]]*(#.*)?$ ]]; then
+                    value="${BASH_REMATCH[1]}"
+                fi ;;
+            *)
+                value="${value%%[[:space:]]#*}"
+                value="${value%"${value##*[![:space:]]}"}" ;;
+        esac
+        # #949: expand ${VAR} refs before exporting. Without this the RAW
+        # template is exported (`AUTHENTIK_DOMAIN=auth.${MAIN_DOMAIN}`); a
+        # later `docker compose up --force-recreate` prefers the shell env
+        # over .env and does NOT recurse, so the unexpanded literal is baked
+        # into containers — the OWUI OIDC login-500 clean-install regression
+        # (also hit dify/cognee/model-sync/postgres URLs). Sequential
+        # expansion matches Compose's own .env interpolation order.
+        # Single-quoted values stay literal (same rule as the quote-strip
+        # above keeping them verbatim).
+        case "$value" in
+            \'*\') ;;
+            *'${'*) value="$(_expand_env_refs "$value")" ;;
+        esac
+        export "$key=$value"
+    done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | grep -v '[<>]')
+    set +f
+    set -e
+}
+
+update_env_value() {
+    local file="$1" key="$2" value="$3"
+    # Snapshot before first .env change
+    if [ -z "$_ENV_SNAPSHOT_DONE" ]; then
+        if [ -f "${SCRIPT_DIR}/scripts/env-snapshot.sh" ]; then
+            source "${SCRIPT_DIR}/scripts/env-snapshot.sh"
+            env_snapshot "pre-post-install"
+            _ENV_SNAPSHOT_DONE=1
+        fi
+    fi
+    # #1618: post-install carries its OWN update_env_value (the snapshot
+    # hook). It must ask the same question scripts/lib.sh asks, or the two
+    # write different files from the same input.
+    if grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null; then
+        # INODE-PRESERVING (sed -i creates a new inode → breaks razzfazz-config's
+        # single-file .env bind mount → portal module-toggle fails; see
+        # project_config_ui_env_write_broken). cat > truncates the same inode.
+        local _t="${file}.tmp.$$"
+        # #2746: the value goes to awk by environment, never on a command line.
+        if RZFZ_UEV_KEY="$key" RZFZ_UEV_VAL="$value" awk '
+            BEGIN { k = ENVIRON["RZFZ_UEV_KEY"]; v = ENVIRON["RZFZ_UEV_VAL"] }
+            { if (match($0, "^[[:space:]]*(export[[:space:]]+)?" k "=")) print substr($0, 1, RLENGTH) v; else print }
+        ' "$file" > "$_t"; then
+            cat "$_t" > "$file"
+        fi
+        rm -f "$_t"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+    # #1486: load_env() exported EVERY .env line into this process — template
+    # defaults included (`COGNEE_LLM_ENDPOINT=`, `COGNEE_LLM_MODEL=openai/gemma4`
+    # on a fresh install). `docker compose` resolves `${KEY:-default}` from the
+    # environment BEFORE the project .env, so a key written here and rendered by
+    # a `compose up` later in the same run used the STALE exported copy: cognee
+    # came up on gpustack:9090 / gemma4 / nomic-embed on every clean manager box
+    # while .env and `compose config` both said llm-manager / qwen3.6, every
+    # embedding 422'd and --verify stayed green (third instance of the #949 /
+    # #1250 class; #1254 patched one key by hand). Mirror the file into the
+    # exported copy whenever this process already holds the key. Keys never
+    # loaded stay unexported — compose reads those from the file, as before.
+    # rev-B befund 2: only the file this process LOADED may drive its exported
+    # copy. Four call sites write `.env.dify`, and six keys live in both
+    # templates (COMPOSE_PROFILES among them) — mirroring a .env.dify write into
+    # the environment would point every later `docker compose` in this run at a
+    # different profile set.
+    [ "$file" = "$ENV_FILE" ] || return 0
+    if [ -n "${!key+x}" ]; then
+        # rev-B befund 1: expand `${VAR}` refs exactly as load_env does (#949).
+        # Exporting the raw template bakes the literal into the next container:
+        # `.env.example` ships values of that shape (LLM_DOMAIN=llm.${MAIN_DOMAIN}),
+        # so one future caller writing a template value back would reopen #949.
+        local _exported="$value"
+        case "$_exported" in
+            \'*\') ;;
+            *'${'*) _exported="$(_expand_env_refs "$_exported")" ;;
+        esac
+        export "$key=$_exported"
+    fi
+}
+
+# ==============================================================================
+# HTTP Helpers
+# ==============================================================================
+
+# GPUStack runtime detection. Caches in _GPUSTACK_RUNTIME so we only probe once
+# per script run. Returns "0.7" (the only runtime the product ships since
+# #1447 / cutover C7a) or "2.x".
+#
+# #1447: this used to CHOOSE between two code paths. GPUStack 2.x and its `llm`
+# profile are removed, so it now answers a different question — is this box
+# still running a container from before the migration? A `--refresh` on a box
+# whose upgrade died between "code updated" and "containers recreated" finds
+# 2.x listening on the port, and the deploy would otherwise POST a 0.7 payload
+# at a 2.x API and fail one model at a time, 404 by 404.
+#
+# Probe: GET /v2/models without auth. 0.7.x has no /v2/* surface and returns
+# 404; 2.x has /v2/models gated by auth and returns 401. The status code is the
+# signal — no key needed. (/v1/version is a v2-only endpoint despite the /v1
+# prefix and 404s on 0.7.x; measured on 0.91 during M029-S04.)
+#
+# An UNREACHABLE or unexpected answer resolves to 0.7, not to 2.x: 0.7 is what
+# the product ships, and the refusal below exists for the case we can actually
+# recognise.
+gpustack_runtime_version() {
+    if [ -n "${_GPUSTACK_RUNTIME:-}" ]; then
+        echo "$_GPUSTACK_RUNTIME"
+        return
+    fi
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        "http://127.0.0.1:${GPUSTACK_PORT:-9090}/v2/models" 2>/dev/null)
+    case "$code" in
+        401|200) _GPUSTACK_RUNTIME="2.x" ;;
+        *)       _GPUSTACK_RUNTIME="0.7" ;;
+    esac
+    echo "$_GPUSTACK_RUNTIME"
+}
+
+# The GPUStack API prefix. One runtime, one prefix (#1447).
+gpustack_api_prefix() {
+    echo "/v1"
+}
+
+# Refuse, once and with the way out, when a removed runtime is still answering.
+# Called before anything is deployed — a wrong-runtime box must not be told
+# "deploy failed" model by model when the cause is one migration that did not
+# finish.
+_refuse_gpustack_2x() {
+    [ "$(gpustack_runtime_version)" = "2.x" ] || return 0
+    print_error "GPUStack 2.x is answering on port ${GPUSTACK_PORT:-9090}, and 2.x was REMOVED in 2026.09 (#979/#1447)."
+    print_info "  This box still runs a container from before the migration — most likely an upgrade that stopped between updating the code and recreating the containers."
+    print_info "  Finish it: rzfz upgrade   (it migrates a 2.x box to the LLM Manager and re-creates the stack)"
+    print_info "  Then re-run this command."
+    return 1
+}
+
+gpustack_api() {
+    local method="$1" path="$2" data="$3"
+    local url="http://127.0.0.1:${GPUSTACK_PORT:-9090}${path}"
+    # #187: bound EVERY probe so an unresponsive / still-loading gpustack can never
+    # hang post-install indefinitely (the untimed `curl -s` used to block forever on
+    # a CPU box whose embedding model was still downloading). On timeout curl exits
+    # non-zero and prints nothing → the callers' manifest-dim / best-effort fallbacks
+    # take over. Override the max via GPUSTACK_API_TIMEOUT if a slow op needs longer.
+    local _t=(--connect-timeout 5 --max-time "${GPUSTACK_API_TIMEOUT:-30}")
+
+    if [ -n "$GPUSTACK_API_KEY" ]; then
+        if [ -n "$data" ]; then
+            printf '%s' "$data" | curl -s "${_t[@]}" -X "$method" "$url" \
+                -K <(rz_curl_bearer_cfg "$GPUSTACK_API_KEY") \
+                -H "Content-Type: application/json" \
+                --data-binary @- 2>/dev/null
+        else
+            curl -s "${_t[@]}" -X "$method" "$url" \
+                -K <(rz_curl_bearer_cfg "$GPUSTACK_API_KEY") 2>/dev/null
+        fi
+    else
+        # Fall back to basic auth (fresh install, no API key yet)
+        # The password goes through a curl config on a process-substitution fd,
+        # never argv (#2867/#2746); backslash and double quote are escaped for
+        # the config syntax.
+        local admin_pass="${GPUSTACK_ADMIN_PASSWORD:-${AUTHENTIK_BOOTSTRAP_PASSWORD}}"
+        admin_pass=${admin_pass//\\/\\\\}; admin_pass=${admin_pass//\"/\\\"}
+        if [ -n "$data" ]; then
+            printf '%s' "$data" | curl -s "${_t[@]}" -X "$method" "$url" \
+                -K <(printf 'user = "admin:%s"\n' "$admin_pass") \
+                -H "Content-Type: application/json" \
+                --data-binary @- 2>/dev/null
+        else
+            curl -s "${_t[@]}" -X "$method" "$url" \
+                -K <(printf 'user = "admin:%s"\n' "$admin_pass") 2>/dev/null
+        fi
+    fi
+}
+
+# ==============================================================================
+# Wait Helpers
+# ==============================================================================
+wait_for_service() {
+    local name="$1" url="$2" max_wait="${3:-120}"
+    local waited=0 interval=5
+    print_substep "Waiting for $name to be ready ($url)..."
+    while [ $waited -lt $max_wait ]; do
+        if curl -sf --max-time 5 "$url" > /dev/null 2>&1; then
+            print_success "$name is ready."
+            return 0
+        fi
+        sleep $interval
+        waited=$((waited + interval))
+        if [ $((waited % 30)) -eq 0 ]; then
+            print_info "Still waiting for $name... (${waited}s / ${max_wait}s)"
+        fi
+    done
+    print_error "$name did not become ready within ${max_wait}s."
+    print_info "URL: $url"
+    print_info "Try: curl -sf --max-time 5 '$url'"
+    return 1
+}
+
+# #2183: is a GPUStack instance message a SETTLED scheduling verdict? These
+# are what GPUStack writes when no worker can take the model; they do not
+# change by waiting (only by freeing memory or picking another model).
+_gpustack_verdict_is_settled() {
+    local msg="$1"
+    case "$msg" in
+        *"Cannot find a suitable worker combination"*|*"requires approximately"*|*"no worker"*|*"No worker"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+wait_for_model() {
+    local model_name="$1" max_wait="${2:-1800}"  # 30 min default for large models
+    local waited=0 interval=15
+    # The model-instances path (one runtime since #1447, resolved centrally)
+    local prefix
+    prefix=$(gpustack_api_prefix)
+    print_substep "Waiting for model '$model_name' to be ready (downloading + loading)..."
+    while [ $waited -lt $max_wait ]; do
+        local state state_msg
+        # #2183: state AND GPUStack's own message. A PENDING can be a settled
+        # verdict ("Cannot find a suitable worker combination", "requires
+        # approximately … RAM") that no amount of waiting changes — journey C's
+        # 0.79 spent 4 × 3600 s on such verdicts, on every post-install run.
+        state=$(gpustack_api GET "${prefix}/model-instances" | \
+            python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for mi in d.get('items',[]):
+    if mi.get('model_name') == '$model_name':
+        print(mi.get('state','unknown'))
+        print((mi.get('state_message') or '').replace(chr(10), ' ')[:300])
+        break
+else:
+    print('not_found')
+" 2>/dev/null)
+        state_msg=$(printf '%s\n' "$state" | sed -n 2p)
+        state=$(printf '%s\n' "$state" | sed -n 1p)
+
+        case "$state" in
+            running)
+                print_success "Model '$model_name' is running."
+                return 0
+                ;;
+            pending|scheduled)
+                if _gpustack_verdict_is_settled "$state_msg"; then
+                    print_error "Model '$model_name' cannot be placed — GPUStack's verdict is settled, not transient (#2183): ${state_msg}"
+                    print_info "  Pick a model that fits this box in the GPUStack UI or free memory; post-install continues with the next model."
+                    return 1
+                fi
+                if [ $((waited % 60)) -eq 0 ] && [ $waited -gt 0 ]; then
+                    print_info "  Still waiting... ($state, ${waited}s elapsed)"
+                fi
+                ;;
+            downloading|initializing|starting)
+                if [ $((waited % 60)) -eq 0 ] && [ $waited -gt 0 ]; then
+                    print_info "  Still waiting... ($state, ${waited}s elapsed)"
+                fi
+                ;;
+            error|failed)
+                print_error "Model '$model_name' failed to start (state: $state)."
+                return 1
+                ;;
+            not_found)
+                if [ $waited -gt 30 ]; then
+                    print_warning "Model '$model_name' instance not found yet..."
+                fi
+                ;;
+        esac
+        sleep $interval
+        waited=$((waited + interval))
+    done
+    print_error "Model '$model_name' did not become ready within ${max_wait}s."
+    return 1
+}
+
+# ==============================================================================
+# GPUStack Provisioning
+# ==============================================================================
+
+# OWUI_OPENAI_KEYS cannot use the ${GPUSTACK_API_KEY} indirection from .env.example
+# (docker-compose does NOT recursively expand a .env value -> Open WebUI gets the literal
+# string and GPUStack 401s: "GPUStack connection not enabled"/no models). Resolve it to
+# the live key here (runs on BOTH fresh + --refresh, whether the key was just created or
+# validated). Only overwrite when unset or still the literal placeholder, so a
+# multi-backend (mac gateway) override the operator / Config Portal set is preserved.
+_resolve_owui_openai_keys() {
+    local cur
+    # `|| true` is load-bearing: this file runs under `set -eo pipefail`, and a
+    # BARE `x=$(grep … | cut …)` inherits the pipeline's status. When the key is
+    # ABSENT grep exits 1, pipefail propagates it, and the run dies HERE — before
+    # the very next line, which already handles the empty case. (#200; same shape
+    # as the #755 regression fixed in #793.)
+    cur=$(grep -m1 '^OWUI_OPENAI_KEYS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-) || true
+    if [ -z "$cur" ] || [ "$cur" = '${GPUSTACK_API_KEY}' ]; then
+        update_env_value "$ENV_FILE" "OWUI_OPENAI_KEYS" "$GPUSTACK_API_KEY"
+        # OWUI reads OPENAI_API_KEYS from its ENV at startup and the ENV OVERRIDES its
+        # stored config — so if OWUI started earlier in the upgrade with the stale
+        # literal, recreate it now so the resolved key actually reaches the container.
+        docker compose up -d --force-recreate openwebui >/dev/null 2>&1 || true
+    fi
+}
+
+# ==============================================================================
+# #320 (operator option 1): wire the llm-manager line into OWUI + Dify
+# ==============================================================================
+# The manager's /v1 hot path is key-authed, enforced and METERED — so the
+# consumers get minted SERVICE keys (cost-centres stack/openwebui and
+# stack/dify) and chargeback separates operator/customer/service traffic.
+# Runs on --preset AND --refresh; every step is idempotent and non-fatal
+# (a box without the llm-manager profile is untouched).
+# _llm_manager_mint_service_key lives in scripts/lib-owui.sh (#1185).
+
+
+# Set by _llm_manager_enroll_embedded_worker, consumed by the verify suite and
+# by the exit-code hook at the end of this script (#1250a). Values: "" = never
+# attempted (no llm-manager profile / not enforce mode / already enrolled),
+# "ok" = the manager lists a live worker row, "failed" = mint or registration
+# did not succeed.
+LLM_WORKER_ENROLL_STATUS=""
+
+# #1425: the provisioning steps whose FAIL means the box cannot do its core
+# job. Same threshold #1250a set for the embedded-worker enrol — "cannot place
+# a single model" is a FAILED provisioning run, not a green exit with a red row
+# in the summary:
+#   gpustack  THE llm backend (the label covers the Manager branch too). A FAIL
+#             means no model is servable at all.
+#   dify      A Dify with no model provider is a broken box, not a warning —
+#             the propagation at `dify_configure_manager_models || return 1`
+#             says exactly that, and BOTH callers used to undo it.
+# Deliberately NOT included, so this stays the narrow fix it claims to be:
+#   openwebui one consumer's wiring; models stay servable via the API and Dify.
+#   speaches  optional STT/TTS — its FAIL shows in the summary and as the
+#             refresh's last line; a HuggingFace outage must not fail an install.
+#   lightrag / cognee  only ever record OK or WARN, never FAIL.
+# Extending the set is a one-word change here; do it with a reason.
+# #2051 (operator decision, 2026.09-rc1 cut): GPUStack is NOT critical. Since the
+# #1443/#1445 cutover the LLM Manager is the front end of every box and GPUStack is
+# an OPTIONAL backend registered behind it — a box with no `llm-legacy` profile
+# failing post-install "because gpustack" is backwards. What IS critical on a
+# 2026.09 box is whether the MANAGER provisioned, which is what this list was
+# really gating all along: the manager's outcome was recorded under the `gpustack`
+# key (see the split at the three sites below), so the old value gated the right
+# thing under the wrong name. Swapping the name without splitting the key first
+# would have silently stopped gating it at all.
+POST_INSTALL_CRITICAL_STEPS="llm-manager dify ca-bundle"
+
+# #2051: the exit line used to print raw KEYS while the summary printed labels,
+# so an operator read "[FAIL] LLM Manager — …" and then "FAILED: gpustack, dify".
+# One source for both.
+_critical_step_label() {
+    case "$1" in
+        llm-manager) printf '%s' "${LLM_BACKEND_SUMMARY_LABEL:-LLM Manager — models deployed on its workers}" ;;
+        gpustack)    printf '%s' "GPUStack — API key + models deployed" ;;
+        dify)        printf '%s' "Dify — plugins installed" ;;
+        ca-bundle)   printf '%s' "OIDC CA bundle — its consumers are running" ;;
+        *)           printf '%s' "$1" ;;
+    esac
+}
+
+_exit_on_failed_provisioning() {
+    # #1250a rev-B: the exit contract has to hold on EVERY path out of this
+    # script, not only the one that runs off the end. `--refresh` without
+    # `--verify` exits 0 early (DO_VERIFY defaults to false) — and that is
+    # exactly the path the failure message tells the operator to retry with,
+    # and the one `rzfz upgrade` runs. Reporting a 401-looping box as a
+    # successful refresh there would be this same silent-success defect, one
+    # level up. Call this immediately before any early exit.
+    #
+    # #1425 generalises it: the enrol was the only failure that ever reached
+    # the exit code, so a box whose Dify came out with NO model provider still
+    # exited 0 — post-install had printed the defect in full and then declared
+    # success over it (0.91, run 20260904T182401Z). `rzfz upgrade` calls
+    # `--refresh` best-effort and only WARNS on a non-zero exit, so widening
+    # this cannot fail an upgrade.
+    local _step _failed="" _ca_failed=""
+    for _step in $POST_INSTALL_CRITICAL_STEPS; do
+        if [ "${STEP_STATUS[$_step]:-}" = "FAIL" ]; then
+            # The CA bundle step has its own message: its failure is not "cannot serve models".
+            if [ "$_step" = ca-bundle ]; then _ca_failed=1; continue; fi
+            _failed="${_failed:+$_failed, }$(_critical_step_label "$_step")"
+        fi
+    done
+    if [ -n "$_ca_failed" ]; then
+        print_error "post-install FAILED: the OIDC CA bundle consumers did not come back after the bundle reload (see the line naming them above). Recreate them with: docker compose up -d --no-deps --force-recreate <names listed above>, then re-run 'rzfz post-install --refresh'."
+    fi
+    if [ -n "$_failed" ]; then
+        print_error "post-install FAILED: ${_failed} — this box cannot serve models. See the verify report above; re-run 'rzfz post-install --refresh' once the cause is fixed. (#1425)"
+    fi
+    if [ -n "$_failed" ] || [ -n "$_ca_failed" ]; then
+        exit 1
+    fi
+    [ "${LLM_WORKER_ENROLL_STATUS:-}" = "failed" ] || return 0
+    print_error "post-install FAILED: the LLM Manager's embedded worker is not registered (#1250) — no model can be placed on this box."
+    exit 1
+}
+
+_llm_worker_report_interval() {
+    # The agent's report period, in whole seconds. Everything that waits for a
+    # registration is expressed in this unit: the FIRST report only happens one
+    # full interval after the container comes up.
+    local interval="${LLM_WORKER_REPORT_INTERVAL:-30}"
+    case "$interval" in ''|*[!0-9]*) interval=30 ;; esac
+    printf '%s' "$interval"
+}
+
+_llm_worker_registration_budget() {
+    # Seconds to wait for the first ACCEPTED registration. #1250a rev-B: a
+    # hard-coded 60 s could never go green on a box configured with
+    # LLM_WORKER_REPORT_INTERVAL=60 — the first report lands at t+60 — so a
+    # perfectly healthy box would have been reported as a FAILED provisioning
+    # run (and, since rev-A, exited non-zero). Scale with the interval, with a
+    # floor in the same order as the 120 s #1255 allows for the same event.
+    local budget
+    budget=$(( 2 * $(_llm_worker_report_interval) + 30 ))
+    [ "$budget" -lt 90 ] && budget=90
+    printf '%s' "$budget"
+}
+
+_llm_worker_container_name() {
+    # The LLM_WORKER_NAME the RUNNING agent container actually carries. This —
+    # not .env — is the name the agent REPORTS, and therefore the name the
+    # manager keys both the worker row and the command-key HMAC on. Empty when
+    # no such container (or no such variable) exists.
+    docker inspect llm-worker-agent --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^LLM_WORKER_NAME=//p' | head -1 || true
+}
+
+_llm_manager_worker_row() {
+    # Print "<worker id>|<seconds since last heartbeat, or `never`>" for the
+    # worker NAMED $1, or NOTHING when the manager has no row under that name.
+    #
+    # A row is created ONLY by a successful POST /api/workers — the enroll
+    # exchange (/api/workers/enroll) mints a key and creates no row — so a row
+    # proves the registration was accepted AT SOME POINT. Rows are never
+    # deleted, which is why the heartbeat age comes with it: "registered once"
+    # and "is being accepted right now" are different claims, and only the
+    # second one means the box can place a model (#1250a rev-B). Read through
+    # the manager's own session (no new endpoint, no DB credential on the
+    # host), same rationale as the mint.
+    docker exec -i llm-manager python3 - "$1" 2>/dev/null <<'WORKERROWEOF' || true
+import datetime, sys
+sys.path.insert(0, "/app")
+from app.db import session_scope
+from app.models import Worker
+with session_scope() as s:
+    w = s.query(Worker).filter(Worker.name == sys.argv[1].strip()).first()
+    if w is not None:
+        hb = getattr(w, "last_heartbeat", None)
+        if hb is None:
+            age = "never"
+        else:
+            if hb.tzinfo is None:
+                hb = hb.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            age = str(int(max(0, (now - hb).total_seconds())))
+        print("%s|%s" % (w.id, age))
+WORKERROWEOF
+}
+
+_llm_manager_live_worker_id() {
+    # Print the manager's worker id for $1 ONLY while that worker is LIVE, i.e.
+    # it heartbeat recently — which is what "the manager accepts this
+    # credential" actually means. The bare row would only prove the worker
+    # registered once, so a box that registered and then started 401-looping
+    # after a rename or a key rotation would keep reading as healthy (#1250a
+    # rev-B; models.py::Worker.last_heartbeat is written on every accepted
+    # POST /api/workers, including the first).
+    local row id age window
+    row=$(_llm_manager_worker_row "$1")
+    [ -n "$row" ] || return 0
+    id=${row%%|*}
+    age=${row##*|}
+    case "$age" in ''|*[!0-9]*) return 0 ;; esac
+    # Never tighter than the manager's own staleness window
+    # (LLM_MANAGER_WORKER_STALE_SECONDS, default 90 s, api/inventory.py):
+    # below that we would call a worker dead that the manager itself still
+    # schedules on.
+    window=$(( 2 * $(_llm_worker_report_interval) ))
+    [ "$window" -lt 90 ] && window=90
+    [ "$age" -le "$window" ] && printf '%s' "$id"
+    return 0
+}
+
+_llm_manager_await_worker_registration() {
+    # Wait for the agent named $1 to be LIVE in the manager and print its
+    # worker id, or return 1 once _llm_worker_registration_budget is spent.
+    local name="$1" budget waited wid
+    budget=$(_llm_worker_registration_budget)
+    waited=0
+    while :; do
+        wid=$(_llm_manager_live_worker_id "$name")
+        if [ -n "$wid" ]; then
+            printf '%s' "$wid"
+            return 0
+        fi
+        [ "$waited" -ge "$budget" ] && return 1
+        sleep 3
+        waited=$((waited + 3))
+    done
+}
+
+_llm_manager_report_enroll_failure() {
+    # $1 = the name that was expected to register, $2 = the headline. Prints
+    # the OBSERVED state, because the diagnosis is always the same comparison:
+    # the command key is HMAC(node_key, the name the agent REPORTS).
+    local name="$1" headline="$2" env_name ctr_name row age
+    env_name=$(read_env_value "$ENV_FILE" LLM_WORKER_NAME 2>/dev/null || true)
+    ctr_name=$(_llm_worker_container_name)
+    row=$(_llm_manager_worker_row "$name")
+    print_error "$headline"
+    print_info  "  .env      LLM_WORKER_NAME=${env_name:-<empty>}"
+    print_info  "  container LLM_WORKER_NAME=${ctr_name:-<unset>}   (a mismatch IS the 401: the command key is HMAC(node_key, worker name))"
+    if [ -n "$row" ]; then
+        age=${row##*|}
+        case "$age" in
+            never) print_info "  manager: a row for '$name' exists (id ${row%%|*}) that has NEVER heartbeat." ;;
+            *)     print_info "  manager: a row for '$name' exists (id ${row%%|*}) but its last heartbeat is ${age}s old — it registered once and is being REJECTED now." ;;
+        esac
+    else
+        print_info "  manager: no worker row for '$name' at all."
+    fi
+    docker logs --tail 200 llm-manager 2>&1 | grep -iE '401|command-channel credential' | tail -5 | while IFS= read -r _l; do
+        print_info "  manager: $_l"
+    done
+    return 0
+}
+
+_llm_manager_repair_mis_named_worker() {
+    # #1250a rev-B: a box that ALREADY holds a command key is not necessarily a
+    # healthy box. 0.91 holds a key minted for another worker's name while its container
+    # runs as `master`; rev-A returned 0 on sight of the key, so
+    # `rzfz post-install --refresh` — the very command the failure message
+    # recommends, and the one `rzfz upgrade` runs — was a no-op on exactly the
+    # boxes that needed it.
+    #
+    # The repair is deliberately the SMALLEST one that can work: the key is
+    # HMAC(node_key, name) over the name that is in .env, and that name has not
+    # changed, so the key is still valid and is NOT re-minted. Only the
+    # container's environment is re-applied, then the registration is verified
+    # exactly as on the mint path. Idempotent: a container already carrying the
+    # .env name is left completely alone, so this is safe on every --refresh.
+    local ckey="$1" name ctr_name wid
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-worker-agent || return 0
+    name=$(read_env_value "$ENV_FILE" LLM_WORKER_NAME 2>/dev/null || true)
+    # No name in .env means there is nothing to compare the container against,
+    # and no way to know which name the existing key was minted for. Leave it.
+    [ -n "$name" ] || return 0
+    ctr_name=$(_llm_worker_container_name)
+    [ "$ctr_name" = "$name" ] && return 0
+
+    print_warning "Embedded worker runs under the WRONG name (#1250): container LLM_WORKER_NAME=${ctr_name:-<unset>}, .env says '$name'. The command key is HMAC(node_key, the REPORTED name), so every registration is 401-rejected. Recreating the agent with the correct name — no re-mint, the existing key stays valid."
+    export LLM_WORKER_NAME="$name"
+    LLM_WORKER_NAME="$name" LLM_WORKER_COMMAND_KEY="$ckey" \
+        docker compose up -d --no-deps --force-recreate llm-worker-agent >/dev/null 2>&1 || true
+
+    wid=$(_llm_manager_await_worker_registration "$name") || wid=""
+    if [ -n "$wid" ]; then
+        LLM_WORKER_ENROLL_STATUS="ok"
+        print_substep "Embedded worker '$name' re-registered (worker id $wid) after the name repair (#1250)."
+        return 0
+    fi
+    LLM_WORKER_ENROLL_STATUS="failed"
+    _llm_manager_report_enroll_failure "$name" \
+        "Embedded worker '$name' did NOT register within $(_llm_worker_registration_budget)s after the name repair (#1250) — so NO model can be placed on this box."
+    return 1
+}
+
+_llm_manager_enroll_embedded_worker() {
+    # #1079: on an enforce-mode box (#285) the embedded worker-agent has no
+    # per-worker command key — its shared-key registration is 401-rejected on
+    # every report cycle, so a fresh single-box install shows ZERO workers
+    # forever (silent: the worker-agent swallows registration failures by
+    # design). Run the same mint+exchange flow node-init performs for thin
+    # nodes, for the LOCAL embedded worker. Operator privilege via docker
+    # exec (same rationale as _llm_manager_mint_service_key: no new network
+    # endpoint); the enroll exchange itself is token-authenticated
+    # (single-use JTI, #340) against the manager's own loopback.
+    # Idempotent: no-ops unless enforce mode is on, the command key is still
+    # empty, and an embedded worker-agent container actually exists.
+    #
+    # #1250a — MEASURED on 0.91 (clean install of main, Manager-shaped
+    # profiles): this ran, wrote both values to .env, printed "enrolled", and
+    # left a worker-agent running as name `master` holding the key minted for
+    # another worker's name. The manager validates the presented key as
+    # HMAC(node_key, the name the agent REPORTS) → 401 on every cycle, forever,
+    # silently; /api/workers stayed [] and no model could ever be placed.
+    #
+    # CAUSE (reproduced in tests/unit/razzfazz-setup-cli with a fake `docker`
+    # that records the environment each invocation was handed): load_env()
+    # exports EVERY key of .env into this script's environment at startup —
+    # including `LLM_WORKER_NAME=` (empty), which config/.env.example ships.
+    # `docker compose` gives the process environment PRECEDENCE over the .env
+    # FILE and does not re-read the file for an already-set variable, so
+    # `${LLM_WORKER_NAME:-master}` in modules/llm/node-agent/compose.yml
+    # resolved against the set-but-EMPTY exported copy and rendered the
+    # `master` default — even though update_env_value had just written the real
+    # name to the file one line earlier. LLM_WORKER_COMMAND_KEY has no line in
+    # .env.example, so it is NOT exported, and there the fresh file value DID
+    # reach the container: that asymmetry is exactly the observed state. Same
+    # class as the #949 clean-install regression.
+    #
+    # So: resolve the name FIRST, persist it and re-export it BEFORE minting,
+    # pass both values EXPLICITLY on the recreate so the container cannot
+    # diverge from .env, and then VERIFY that a worker actually registered.
+    # CONTRACT CHANGE (#1250a): this function is no longer `return 0` always —
+    # a failed enrolment returns 1, is recorded in LLM_WORKER_ENROLL_STATUS,
+    # and makes post-install exit non-zero. A box whose embedded worker never
+    # registered cannot place a single model, so that is a failed provisioning
+    # run, not a warning. (`rzfz upgrade` already treats a non-zero
+    # post-install --refresh as non-fatal, so this never fails an upgrade.)
+    local mode ckey name out wid
+    mode=$(read_env_value "$ENV_FILE" LLM_MANAGER_COMMAND_KEY_MODE 2>/dev/null || true)
+    [ "$mode" = "enforce" ] || return 0
+    ckey=$(read_env_value "$ENV_FILE" LLM_WORKER_COMMAND_KEY 2>/dev/null || true)
+    if [ -n "$ckey" ]; then
+        # rev-B: a key on disk is NOT proof of a working enrolment — see
+        # _llm_manager_repair_mis_named_worker, which is the no-re-mint repair
+        # for the state 0.91 is in today.
+        _llm_manager_repair_mis_named_worker "$ckey"
+        return $?
+    fi
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-worker-agent || return 0
+
+    # (1) The NAME is decided ONCE, before anything is derived from it, and is
+    #     persisted + re-exported so .env, this shell and Compose all agree.
+    name=$(read_env_value "$ENV_FILE" LLM_WORKER_NAME 2>/dev/null || true)
+    [ -n "$name" ] || name="$(hostname -s 2>/dev/null || echo embedded)"
+    update_env_value "$ENV_FILE" "LLM_WORKER_NAME" "$name"
+    export LLM_WORKER_NAME="$name"
+
+    # (2) Mint the per-worker key for exactly that name.
+    out=$(docker exec -i llm-manager python3 - "$name" <<'ENROLLEOF'
+import json, sys, urllib.request
+sys.path.insert(0, "/app")
+from app.api.enroll import mint_enroll_token
+from app.config import get_settings
+
+name = sys.argv[1].strip()
+settings = get_settings()
+if not settings.node_key:
+    raise SystemExit("no node_key configured")
+token, _exp = mint_enroll_token(name, settings.node_key, 120)
+req = urllib.request.Request(
+    "http://127.0.0.1:8080/api/workers/enroll",
+    data=json.dumps({"token": token}).encode(),
+    headers={"Content-Type": "application/json"})
+resp = json.loads(urllib.request.urlopen(req, timeout=10).read())
+print(resp["command_key"])
+ENROLLEOF
+    ) || out=""
+    if [ -z "$out" ]; then
+        LLM_WORKER_ENROLL_STATUS="failed"
+        print_error "Embedded-worker auto-enroll FAILED for '$name' (#1079/#1250) — no command key could be minted; the worker-agent will keep 401-looping against the manager and NO model can be placed on this box."
+        print_info  "  Retry with: rzfz post-install --refresh   (manual recipe in issue #1079)"
+        return 1
+    fi
+    update_env_value "$ENV_FILE" "LLM_WORKER_COMMAND_KEY" "$out"
+    # NOT exported (rev-B): the recreate below hands the key to that ONE
+    # command explicitly, so an export would only widen the secret's blast
+    # radius — every later child process of this run would inherit it — while
+    # changing nothing about the outcome. The NAME export below/above stays: it
+    # has to correct the stale EMPTY copy load_env put in this shell.
+
+    # (3) Recreate ONLY the agent (broad recreates are a known footgun on
+    #     running stacks), with BOTH values handed to Compose EXPLICITLY in the
+    #     command's environment so a stale exported copy can never shadow them
+    #     again, and --force-recreate so the container is rebuilt from the
+    #     values we just resolved rather than kept on a matching config hash.
+    LLM_WORKER_NAME="$name" LLM_WORKER_COMMAND_KEY="$out" \
+        docker compose up -d --no-deps --force-recreate llm-worker-agent >/dev/null 2>&1 || true
+
+    # (4) VERIFY. The agent registers on its report cycle
+    #     (LLM_WORKER_REPORT_INTERVAL, 30 s by default) after the container
+    #     comes up, and the FIRST report lands a whole interval late — so the
+    #     budget is derived from that interval, never a fixed 60 s (rev-B: a
+    #     box with interval 60 could not have gone green at all).
+    wid=$(_llm_manager_await_worker_registration "$name") || wid=""
+    if [ -n "$wid" ]; then
+        LLM_WORKER_ENROLL_STATUS="ok"
+        print_substep "Embedded worker '$name' enrolled AND registered (worker id $wid) — per-worker command key minted, worker-agent recreated (#1079/#1250)."
+        return 0
+    fi
+
+    LLM_WORKER_ENROLL_STATUS="failed"
+    _llm_manager_report_enroll_failure "$name" \
+        "Embedded worker '$name' did NOT register within $(_llm_worker_registration_budget)s (#1250) — the manager lists no live worker under that name, so NO model can be placed on this box."
+    return 1
+}
+
+_owui_append_endpoint() {
+    # $1=current bases  $2=current keys  $3=url  $4=key
+    # Prints two lines: new bases / new keys. Appends ONLY when the url is
+    # absent; existing multi-backend combos (mac-llm) are preserved verbatim.
+    local bases="$1" keys="$2" url="$3" key="$4"
+    case ";${bases};" in
+        *";${url};"*) printf '%s\n%s\n' "$bases" "$keys"; return 0 ;;
+    esac
+    # #976: an EMPTY existing list (a gpustack-disabled llm-manager box, where
+    # the gpustack default is no longer seeded) must yield the url ALONE — not
+    # ";url" with an empty leading entry, which OWUI would try to query as a
+    # zero-length base URL.
+    if [ -z "$bases" ]; then
+        printf '%s\n%s\n' "$url" "$key"; return 0
+    fi
+    printf '%s;%s\n%s;%s\n' "$bases" "$url" "$keys" "$key"
+}
+
+# ── LLM backend source-of-truth (#976) ───────────────────────────────────────
+# _gpustack_profile_active / _llm_manager_profile_active / _llm_manager_running
+# / _llm_manager_active / _owui_llm_base_url / _owui_llm_key / _owui_rerank_url
+# live in scripts/lib-owui.sh (#1185/#908): the SINGLE place that decides
+# which backend URL + key a consumer gets, shared with cli/upgrade.sh.
+# _owui_llm_key VALIDATES the .env key against the manager before it is
+# used (#1185) — a dead key never overwrites a working in-app one.
+
+# #976: drop any gpustack endpoint (and its paired key) from a ;-joined
+# base/key pair. On a box that MOVED OFF gpustack (e.g. an upgrade that
+# disabled gpustack and enabled llm-manager) the stale gpustack entry was
+# already persisted in OWUI_OPENAI_BASE_URLS, so avoiding-the-seed alone is not
+# enough — the existing dead endpoint must be pruned, else OWUI keeps querying a
+# backend that no longer runs. Prints two lines: filtered bases / filtered keys.
+#
+# #1306: the second thing that must not sit in that list is OPEN WEBUI'S OWN
+# CLOUD DEFAULT. Since #1266/#1252 the container gets an explicitly EMPTY
+# OPENAI_API_BASE_URLS, and Open WebUI resolves an empty entry to
+# `https://api.openai.com/v1` with an empty key. A dead in-stack endpoint was
+# harmless; a cloud endpoint is not — it is visible in the UI, and on an
+# air-gapped appliance it is a statement we do not want to make.
+#
+# The prune is deliberately NARROW: only an api.openai.com entry whose paired
+# key is EMPTY or a placeholder. That shape is the default artefact and nothing
+# else — an operator who deliberately connected OpenAI has a real key there,
+# and their connection survives untouched.
+_owui_strip_gpustack() {
+    local IFS=';'
+    local -a _bs _ks
+    read -ra _bs <<< "$1"
+    read -ra _ks <<< "$2"
+    local ob="" ok="" i b k
+    for i in "${!_bs[@]}"; do
+        b="${_bs[$i]}"
+        [ -z "$b" ] && continue
+        case "$b" in *gpustack:9090*) continue ;; esac
+        k="${_ks[$i]:-}"
+        case "$b" in
+            *api.openai.com*)
+                case "$k" in
+                    ""|CHANGEME*|changeme*|sk-CHANGEME*|"<"*) continue ;;
+                esac
+                ;;
+        esac
+        ob="${ob:+$ob;}$b"
+        ok="${ok:+$ok;}$k"
+    done
+    printf '%s\n%s\n' "$ob" "$ok"
+}
+
+# ==============================================================================
+# #245: observability consumers — Dify OTEL + personal-agent OTLP seam
+# ==============================================================================
+# The observability profile deploys OpenLIT/ClickHouse/otel-collector, but
+# nothing instrumented the LLM surfaces: Dify ships ENABLE_OTEL=false and
+# the agents got no OTLP env. Idempotent on --preset AND --refresh; only
+# ever ENABLES (an operator who set values manually keeps them — this
+# never flips observability off when the profile goes away, it just stops
+# injecting into NEW agents via the emptied seam).
+wire_observability_consumers() {
+    if ! echo "${COMPOSE_PROFILES:-}" | grep -qw "observability"; then
+        # profile off: empty the agent seam so NEW instances stop pointing
+        # at a collector that is not running (existing ones keep their env
+        # until recreate — harmless, the SDK just fails to export).
+        local cur_ep
+        cur_ep=$(read_env_value "$ENV_FILE" OBSERVABILITY_OTEL_AGENTS_ENDPOINT 2>/dev/null || true)
+        if [ -n "$cur_ep" ]; then
+            update_env_value "$ENV_FILE" "OBSERVABILITY_OTEL_AGENTS_ENDPOINT" ""
+            # review #683: the provisioner reads the RUNNING container's
+            # os.environ — without a recreate it keeps injecting the dead
+            # collector into every NEW agent instance.
+            docker compose up -d agent-manager >/dev/null 2>&1 || true
+        fi
+        # LLM-MANAGER-OTEL-OFF-BEGIN (#2003; sliced by
+        # tests/unit/consistency/test_2003_the_manager_seam_agrees.py)
+        # Symmetric with the ON branch below, for the same reason the agents
+        # seam is: a pointer at a collector that is not running. Here it also
+        # costs a restart — app/config.py writes a `callbacks:["otel"]` into the
+        # router config while this is set, so leaving it set after the profile
+        # goes away means the router keeps trying to export on every request.
+        local cur_mgr
+        cur_mgr=$(read_env_value "$ENV_FILE" LLM_MANAGER_OTEL_ENDPOINT 2>/dev/null || true)
+        if [ -n "$cur_mgr" ]; then
+            update_env_value "$ENV_FILE" "LLM_MANAGER_OTEL_ENDPOINT" ""
+            docker compose up -d llm-manager llm-manager-router >/dev/null 2>&1 || true
+        fi
+        # LLM-MANAGER-OTEL-OFF-END
+        return 0
+    fi
+    print_step "Observability: wiring LLM-surface consumers (#245)..."
+    local changed=false
+    # ── agents seam ─────────────────────────────────────────────────────
+    # AGENTS-OTEL-BEGIN (#2015: sliced by tests/unit/consistency/test_2015_*,
+    # which RUNS this and profile_provisioner.agents_otel_updates side by side)
+    local ep
+    ep=$(read_env_value "$ENV_FILE" OBSERVABILITY_OTEL_AGENTS_ENDPOINT 2>/dev/null || true)
+    if [ "$ep" != "http://otel-collector:4318" ]; then
+        update_env_value "$ENV_FILE" "OBSERVABILITY_OTEL_AGENTS_ENDPOINT" "http://otel-collector:4318"
+        docker compose up -d agent-manager >/dev/null 2>&1 || true
+        print_substep "Agent OTLP seam set — new/recreated agent instances emit traces."
+    fi
+    # AGENTS-OTEL-END
+    # OWUI-OTEL-BEGIN (#2015: the Open WebUI seam was wired by the Portal toggle
+    # only. A box upgraded from before #245 still carries OPENLIT_OTLP_ENDPOINT=
+    # http://openlit:4318 — a host with no OTLP receiver — and this path never
+    # healed it, so "rzfz post-install" produced a different box than the toggle.
+    # Same value the toggle writes; `pipelines` reads it at container CREATE time.)
+    local owui_ep
+    owui_ep=$(read_env_value "$ENV_FILE" OPENLIT_OTLP_ENDPOINT 2>/dev/null || true)
+    if [ "$owui_ep" != "http://otel-collector:4318/v1/traces" ]; then
+        update_env_value "$ENV_FILE" "OPENLIT_OTLP_ENDPOINT" "http://otel-collector:4318/v1/traces"
+        if echo "${COMPOSE_PROFILES:-}" | grep -qw "chat"; then
+            docker compose up -d --no-deps --force-recreate pipelines >/dev/null 2>&1 || true
+        fi
+        print_substep "Open WebUI OTLP seam set — pipelines emit traces to the collector (was ${owui_ep:-<empty>})."
+    fi
+    # OWUI-OTEL-END
+    # ── Dify ────────────────────────────────────────────────────────────
+    # DIFY-OTEL-BEGIN  (sliced verbatim by
+    # tests/unit/consistency/test_245_dify_otel_wiring_paths_agree.py, which
+    # RUNS this block and compares the four writes it makes against the Config
+    # Portal's half of the same wiring —
+    # core/config/app/services/profile_provisioner.py::dify_otel_updates.
+    # Keep the banner comments; the slice is anchored on them.)
+    #
+    # Every key is checked on its OWN value. The old shape read ENABLE_OTEL
+    # and, once that said `true`, never looked at the endpoint again — a stale
+    # or hand-edited OTLP_BASE_ENDPOINT could not be healed by this path at
+    # all. Two of the four keys are new; the full reasoning sits next to
+    # dify_otel_updates(), and in short:
+    #   * OTEL_EXPORTER_OTLP_PROTOCOL — modules/dify/compose.yml gives dify-api
+    #     BOTH env files, and the stack's own .env carries `grpc` for the
+    #     collector's EXTERNAL log-export leg (#197). Dify reads the same NAME
+    #     and would build a gRPC exporter against http://otel-collector:4318 —
+    #     the HTTP receiver (gRPC is 4317). Every span dropped, silently.
+    #   * OTEL_SAMPLING_RATE — upstream ships 0.1 for SaaS volume. One workflow
+    #     run is ONE root trace, so nine runs out of ten emit nothing.
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "dify"; then
+        local dify_otel dify_ep dify_proto dify_rate
+        dify_otel=$(read_env_value ".env.dify" ENABLE_OTEL 2>/dev/null || true)
+        if [ "$dify_otel" != "true" ]; then
+            update_env_value ".env.dify" "ENABLE_OTEL" "true"
+            changed=true
+        fi
+        dify_ep=$(read_env_value ".env.dify" OTLP_BASE_ENDPOINT 2>/dev/null || true)
+        if [ "$dify_ep" != "http://otel-collector:4318" ]; then
+            update_env_value ".env.dify" "OTLP_BASE_ENDPOINT" "http://otel-collector:4318"
+            changed=true
+        fi
+        dify_proto=$(read_env_value ".env.dify" OTEL_EXPORTER_OTLP_PROTOCOL 2>/dev/null || true)
+        if [ "$dify_proto" != "http/protobuf" ]; then
+            update_env_value ".env.dify" "OTEL_EXPORTER_OTLP_PROTOCOL" "http/protobuf"
+            changed=true
+        fi
+        # Only the UPSTREAM default is raised — an operator who chose a rate of
+        # their own keeps it.
+        dify_rate=$(read_env_value ".env.dify" OTEL_SAMPLING_RATE 2>/dev/null || true)
+        if [ -z "$dify_rate" ] || [ "$dify_rate" = "0.1" ]; then
+            update_env_value ".env.dify" "OTEL_SAMPLING_RATE" "1.0"
+            changed=true
+        fi
+        # DIFY-OTEL-END
+        if [ "$changed" = true ]; then
+            # #2510: dify-worker-dataset reads .env.dify at create time too.
+            print_substep "Dify OTEL enabled — recreating dify-api/dify-worker/dify-worker-dataset to pick it up."
+            docker compose up -d --force-recreate dify-api dify-worker dify-worker-dataset >/dev/null 2>&1 || true
+        else
+            print_substep "Dify OTEL already enabled."
+        fi
+    fi
+    # ── LLM Manager + its router ────────────────────────────────────────
+    # LLM-MANAGER-OTEL-BEGIN (#2003; sliced by
+    # tests/unit/consistency/test_2003_the_manager_seam_agrees.py, which RUNS
+    # this block and compares its write against the Config Portal's half.
+    # Keep the banner comments; the slice is anchored on them.)
+    #
+    # This was the gap #2003 is about: `.env.example` carried
+    # `LLM_MANAGER_OTEL_ENDPOINT=` with a comment telling the reader to set it
+    # when the profile is on, and NOTHING set it. Since the 2026.09 cutover
+    # every LLM call in the stack goes through the manager, so the one surface
+    # that sees all of them emitted nothing while the dashboards were called
+    # empty. `grep -rn LLM_MANAGER_OTEL_ENDPOINT cli/ core/config/app/ scripts/`
+    # returned no hits at all.
+    #
+    # One value, two consumers: modules/llm/manager/compose.yml forwards it to
+    # the manager AND to llm-manager-router (as OTEL_EXPORTER_OTLP_ENDPOINT),
+    # and app/config.py turns a non-empty value into the router's `otel`
+    # callback. So the router config CHANGES here, which the entrypoint watcher
+    # turns into a LiteLLM restart — the one #1955 measured at ~11 s of refused
+    # connections and has since cushioned. Wiring observability therefore costs
+    # a reload, once, and that is stated rather than discovered.
+    local mgr_ep
+    mgr_ep=$(read_env_value "$ENV_FILE" LLM_MANAGER_OTEL_ENDPOINT 2>/dev/null || true)
+    if [ "$mgr_ep" != "http://otel-collector:4318" ]; then
+        update_env_value "$ENV_FILE" "LLM_MANAGER_OTEL_ENDPOINT" "http://otel-collector:4318"
+        docker compose up -d llm-manager llm-manager-router >/dev/null 2>&1 || true
+        print_substep "LLM Manager + router OTLP seam set — every /v1 call now emits a span (one router reload, #1955)."
+    fi
+    # LLM-MANAGER-OTEL-END
+    print_success "Observability consumer wiring done."
+}
+
+wire_llm_manager_consumers() {
+    # #1445 (C5c) review: these two lines used to be hand-copied predicates.
+    # They behave identically to `_llm_manager_profile_active` /
+    # `_llm_manager_running` TODAY — and that is the problem: the moment the
+    # predicate learns something (federation, another alias, a renamed
+    # profile), a copy stays on the old answer, silently. The guard that pins
+    # this classification could not see them either, because it looks for the
+    # predicate by name.
+    _llm_manager_profile_active || return 0
+    if ! _llm_manager_running; then
+        print_warning "llm-manager profile active but container not running — consumer wiring skipped (re-run 'rzfz post-install --refresh' once it is up)."
+        return 0
+    fi
+    print_step "LLM Manager: wiring OWUI/Dify consumers (#320)..."
+
+    # #1079: make sure the LOCAL embedded worker is enrolled before anything
+    # else — with zero workers every deploy 409s and the console stays empty.
+    # #1250a: the enrol now RETURNS non-zero when the worker did not actually
+    # register. Keep going (the OWUI/Dify key wiring below is independent and
+    # still worth doing) but let the recorded status reach the verify report
+    # and the run's exit code — a bare call would abort here under `set -e`.
+    _llm_manager_enroll_embedded_worker || \
+        print_warning "Embedded-worker enrolment did not complete — see the error above (#1250); post-install will exit non-zero."
+
+    # ── OWUI: service key + second endpoint ─────────────────────────────────
+    # #1185: the key is RESOLVED, not read — _owui_resolve_manager_key validates
+    # the .env value against the manager, adopts a valid key OWUI already holds
+    # when .env is stale (and writes it back), and mints only when nothing valid
+    # exists. A stale .env key must never be seeded over a working config.
+    # #1441 rev-C: this entry IS the manager's URL, so it always carries the
+    # manager's own key — never the ownership-following _owui_llm_key, which on
+    # a dual box (GPUStack owns the models) resolves to GPUStack's key and would
+    # pair http://llm-manager:8080/v1 with a credential the manager 401s.
+    local owui_key
+    owui_key=$(_owui_resolve_manager_key) || owui_key=""
+    if [ -z "$owui_key" ]; then
+        print_warning "Could not mint the OWUI service key — endpoint not appended."
+    fi
+    if [ -n "$owui_key" ]; then
+        local bases keys out orig_bases orig_keys
+        orig_bases=$(read_env_value "$ENV_FILE" OWUI_OPENAI_BASE_URLS 2>/dev/null || true)
+        orig_keys=$(read_env_value "$ENV_FILE" OWUI_OPENAI_KEYS 2>/dev/null || true)
+        bases="$orig_bases"
+        keys="$orig_keys"
+        # #976: on a box that moved OFF gpustack (llm-manager active, no gpustack
+        # profile) PRUNE any stale gpustack endpoint so OWUI stops querying a
+        # dead backend — covers the gpustack→manager transition, not just fresh
+        # installs where the list starts empty.
+        if ! _gpustack_profile_active; then
+            local _stripped
+            _stripped=$(_owui_strip_gpustack "$bases" "$keys")
+            bases=$(printf '%s' "$_stripped" | sed -n 1p)
+            keys=$(printf '%s' "$_stripped" | sed -n 2p)
+        fi
+        # #1445 (C5c): no gpustack seed at all any more. The append below
+        # makes the canonical endpoint the sole entry on EVERY box — the
+        # manager fronts GPUStack (#1442), so a second, backend-named entry
+        # would only be a duplicate of the same models with the wrong key.
+        out=$(_owui_append_endpoint "$bases" "$keys" "$LLM_CANONICAL_ENDPOINT" "$owui_key")
+        local new_bases new_keys
+        new_bases=$(printf '%s' "$out" | sed -n 1p)
+        new_keys=$(printf '%s' "$out" | sed -n 2p)
+        # #1185: append is a no-op when the manager URL is already listed, so
+        # a STALE key at that position survived every run. Pin the entry to
+        # the resolved key — .env and the app config are written as a pair.
+        new_keys=$(_owui_set_endpoint_key "$new_bases" "$new_keys" "$LLM_CANONICAL_ENDPOINT" "$owui_key")
+        # #976: compare against the ORIGINAL .env values, NOT the post-prune
+        # locals — otherwise a run whose ONLY change is the gpustack prune (no
+        # append needed, the manager is already present) would see
+        # new_bases == bases and skip the write, never persisting the prune.
+        if [ "$new_bases" != "$orig_bases" ] || [ "$new_keys" != "$orig_keys" ]; then
+            update_env_value "$ENV_FILE" "OWUI_OPENAI_BASE_URLS" "$new_bases"
+            update_env_value "$ENV_FILE" "OWUI_OPENAI_KEYS" "$new_keys"
+            print_substep "OWUI endpoint list now carries the manager (models auto-discovered via /v1/models)."
+            docker compose up -d --force-recreate openwebui >/dev/null 2>&1 || true
+        else
+            print_substep "OWUI already wired to the manager."
+        fi
+        # #976: the env above is only a FIRST-BOOT seed — OWUI persists its
+        # OpenAI connection in openwebui_db and ignores env on later boots, so an
+        # already-initialised box keeps Admin → Connections pointed at gpustack.
+        # Repoint the PERSISTED connection (base URL + key) to the manager in the
+        # DB so the UI + models actually move. (Superseded in 2026.09 by the
+        # canonical `llm` endpoint, which makes this wiring backend-invariant.)
+        _owui_repoint_persisted_openai_to_manager
+    fi
+
+    # ── Config Portal: its OWN read-only service key (EXO-13 / CFG-14) ─────
+    # The admin dashboard used to authenticate to the manager by BORROWING
+    # LLM_MANAGER_OWUI_KEY (falling back to the Dify key). That is wrong on
+    # three counts: the portal's reads are metered against the stack/openwebui
+    # cost centre and pollute the very usage series the dashboard renders;
+    # rotating or rate-limiting the OWUI key silently darkens the ADMIN GPU
+    # panel with a misleading auth error; and one long-lived credential ends
+    # up spanning two trust domains, so revoking it for a compromised OWUI
+    # also breaks admin observability. Its own cost centre (stack/config-portal)
+    # separates the traffic and makes the key independently revocable.
+    # NOTE: minted with NO allowed_models — an empty allow-list means
+    # unrestricted, which is what an admin "what does this box serve?" panel
+    # needs; the OWUI key may legitimately be model-restricted (#329) and
+    # would show a FILTERED list as if it were the fleet.
+    # #3278: validated, not only "minted when empty" — a factory reset leaves a
+    # dead key in .env, and the portal is recreated whenever the key changed.
+    if llm_manager_resolve_service_key LLM_MANAGER_CONFIG_KEY config-portal; then
+        if [ "$_LLM_SVC_KEY_NEW" = "1" ]; then
+            print_substep "Minted stack/config-portal service key (admin dashboard reads)."
+            docker compose up -d --force-recreate razzfazz-config >/dev/null 2>&1 || true
+        fi
+    else
+        print_warning "Could not mint the Config Portal service key — the dashboard falls back to the OWUI key (EXO-13)."
+    fi
+
+    # ── Dify: service key + register the currently-served chat models ───────
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "dify" || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx dify-api || return 0
+    # #3278: validated (a reset leaves a dead key); a new key reaches Dify's
+    # stored credential through the registration below (#1308 refreshes it).
+    local dify_key=""
+    if llm_manager_resolve_service_key LLM_MANAGER_DIFY_KEY dify; then
+        dify_key="$_LLM_SVC_KEY"
+        if [ "$_LLM_SVC_KEY_NEW" = "1" ]; then print_substep "Minted stack/dify service key."; fi
+    fi
+    [ -n "$dify_key" ] || return 0
+    # review #666: /v1/models proxies the router list WITHOUT a task filter
+    # — registering embed/rerank models as mode=chat would give Dify broken
+    # provider entries. Enumerate CHAT deployments straight from the
+    # manager's rows instead (same docker-exec pattern as the mint), and
+    # keep the implicit key probe as a cheap /v1/models 200-check.
+    if ! curl -fsS -m 10 -o /dev/null -K <(printf 'header = "Authorization: Bearer %s"\n' "$dify_key") \
+        "http://127.0.0.1:${LLM_MANAGER_PORT:-8091}/v1/models" 2>/dev/null; then
+        print_warning "stack/dify service key failed its /v1/models probe — Dify registration skipped."
+        return 0
+    fi
+    local served
+    # -i as above; and "serving now" means a READY instance, not a Deployment
+    # status literal — on the live box every deployment sat at 'pending'
+    # while its engines were ready, so status == "active" enumerated nothing.
+    # Same semantics as the router config's generate_from_db.
+    served=$(docker exec -i llm-manager python3 - <<'CHATEOF'
+import sys
+sys.path.insert(0, "/app")
+from app.db import session_scope
+from app.models import Deployment, DeploymentInstance
+with session_scope() as s:
+    for d in (s.query(Deployment)
+              .filter(Deployment.task == "chat")
+              .join(DeploymentInstance,
+                    DeploymentInstance.deployment_id == Deployment.id)
+              .filter(DeploymentInstance.status == "ready")
+              .distinct()
+              .all()):
+        print(d.model_name)
+CHATEOF
+    ) || served=""
+    if [ -z "$served" ]; then
+        print_substep "Manager serves no models yet — Dify registration deferred to the next --refresh."
+        return 0
+    fi
+    local admin_email
+    admin_email=$(_resolve_dify_admin_email)
+    # #1273: register EACH model with the context the manifest declares for it,
+    # not one flat 32768 for all. A clean install goes through
+    # dify_configure_manager_models, which reads `per_slot_context` per alias;
+    # this path used a single hardcoded value, so a box that was WIRED here (an
+    # upgrade, or any --refresh before the models were deployed) kept 32768 for
+    # a model the manifest gives 262144 — and both paths write the same
+    # credential label, so the wrong value simply stayed. Same manifest helper,
+    # same fallback, one model at a time.
+    local _m _ctx _x _reg_ok=0 _reg_total=0
+    while IFS= read -r _m; do
+        [ -n "$_m" ] || continue
+        _ctx=$(_manifest_per_slot_context "$_m" 32768)
+        _reg_total=$((_reg_total + 1))
+        # #1445 (C5c): the canonical endpoint, not the manager's own host —
+        # every consumer address goes through `llm:8080/v1` since the C5
+        # rochade, and this call site was the last literal.
+        # #1959: in a condition, not bare — the return value is the registration
+        # verdict now, and one unregistrable model must not abort the run.
+        # #3228: the same capability extras dify_configure_manager_models sends.
+        # Without them Dify's update REPLACES the credential with the plugin
+        # defaults (strict, no vision, no structured output). A model a worker
+        # node serves is not in the master's preset rows, so this write is the
+        # only one it gets — the roles come from the manifest by alias.
+        _x=$(_dify_manager_llm_extras "$(_manifest_roles "$_m")")
+        if _dify_register_models "$admin_email" "$dify_key" "$LLM_CANONICAL_ENDPOINT" \
+                "LLM Manager" "$_ctx" "$_m" "llm" "$_x"; then
+            _reg_ok=$((_reg_ok + 1))
+        fi
+    done <<< "$served"
+    # #1959: this line used to read "done." whatever came back. It now says what
+    # actually reached Dify — a box whose admin account no longer matches the
+    # derived address (#183) registers NOTHING, and that must not look green.
+    if [ "$_reg_ok" -eq "$_reg_total" ]; then
+        print_success "LLM Manager consumer wiring done (${_reg_ok}/${_reg_total} models registered with Dify)."
+    elif [ "$_reg_ok" -eq 0 ]; then
+        print_error "LLM Manager consumer wiring: NONE of the ${_reg_total} models registered with Dify — the lines above say why (#1959)."
+        return 1
+    else
+        print_warning "LLM Manager consumer wiring: only ${_reg_ok} of ${_reg_total} models registered with Dify — the lines above say why (#1959)."
+        return 1
+    fi
+}
+
+# Shared python prelude for every helper that runs INSIDE dify-api and touches
+# Dify's own modules. ONE copy, expanded into each helper's program text.
+#   * _rz_model_provider_service(): Dify 1.18 moved ModelProviderService from
+#     services/model_provider_service.py to services/model_provider/service.py;
+#     try the new path, fall back to the old one (before 1.18).
+#   * _rz_call(fn, **kw) / _rz_adapt(obj): call with the keyword arguments the
+#     signature takes (inspect), so one call site serves both generations.
+#   * _rz_guard(helper): an uncaught error (an ImportError above all) prints ONE
+#     FATAL row naming the helper and the last line of the error, secrets
+#     masked, and the process exits non-zero. The callers read that row.
+# No backtick, dollar sign or backslash in here: it is expanded into
+# double-quoted bash strings.
+read -r -d '' _DIFY_PY_COMPAT <<'RZ_PY_COMPAT_EOF' || true
+import inspect as _rz_inspect, os as _rz_os, sys as _rz_sys
+def _rz_model_provider_service():
+    try:
+        from services.model_provider.service import ModelProviderService
+    except ImportError as new_err:
+        try:
+            from services.model_provider_service import ModelProviderService
+        except ImportError:
+            raise ImportError('ModelProviderService: neither services.model_provider.service (Dify 1.18+) nor services.model_provider_service (older) imports: %s' % new_err)
+    return ModelProviderService
+def _rz_call(fn, **kw):
+    params = _rz_inspect.signature(fn).parameters
+    if not any(p.kind is p.VAR_KEYWORD for p in params.values()):
+        kw = {k: v for k, v in kw.items() if k in params}
+    return fn(**kw)
+class _rz_adapt(object):
+    """Proxy: every method call goes through _rz_call (kwargs by signature)."""
+    def __init__(self, target):
+        self._t = target
+    def __getattr__(self, name):
+        fn = getattr(self._t, name)
+        return (lambda **kw: _rz_call(fn, **kw)) if callable(fn) else fn
+def _rz_guard(helper):
+    def _hook(etype, exc, tb):
+        lines = [l for l in str(exc).strip().splitlines() if l.strip()]
+        msg = lines[-1] if lines else ''
+        for name in ('RZ_DIFY_API_KEY',):
+            val = _rz_os.environ.get(name)
+            if val:
+                msg = msg.replace(val, '***')
+        print('FATAL|%s: %s: %s' % (helper, etype.__name__, msg[:200]))
+        _rz_sys.stdout.flush()
+        _rz_sys.__excepthook__(etype, exc, tb)
+    _rz_sys.excepthook = _hook
+RZ_PY_COMPAT_EOF
+
+# #813: ONE Dify chat-model registration path, shared by every OpenAI-compatible
+# 2nd endpoint the stack wires up (the LLM Manager, #320/#666; the Mac gateway).
+# Extracted rather than copied: both callers register through the SAME Dify
+# provider plugin with the same duplicate-tolerant semantics, and two copies of
+# this block would drift the moment one of them learns something the other does
+# not — the review constraint #240 already made once, for _owui_append_endpoint.
+#
+# The GPUStack path further down is deliberately NOT folded in here: it targets a
+# different provider plugin (langgenius/gpustack) with its own credential shape.
+#
+# usage: _dify_register_models <admin_email> <api_key> <endpoint_url> \
+#                              <credential_label> <context_size> <models;list> \
+#                              [model_type] [extra_credentials_json]
+#
+# context_size is a PARAMETER with no discovery behind it, on purpose: an
+# OpenAI-compatible /v1/models response carries no context length (the same
+# no-auto-discovery wall the GPUStack wiring hit), so the value is declared by
+# the caller and wrong-but-declared beats guessed.
+#
+# #1248 added the last two parameters instead of a second registration function:
+# a Manager box needs the SAME provider + credential for its embedding and
+# rerank models too, and a copy of this block per model type is precisely the
+# drift #240/#813 already forbade (tests/unit/.../test_813_* asserts there are
+# exactly TWO create_model_credential sites in this file — this one and the
+# GPUStack provider's). `model_type` defaults to llm, which keeps the two
+# pre-#1248 call sites byte-identical in behaviour; `mode: chat` is sent for llm
+# only, because it is an llm-only credential field. Keys the plugin does not
+# declare for the given model type are dropped by Dify's
+# validate_credential_form_schemas, so an extra flag is safe but never silently
+# authoritative.
+#
+# The raw registration output is also published in _DIFY_REG_LAST_OUTPUT so a
+# caller can tell "nothing registered" from "registered fine" — the pipeline
+# form alone always returned 0 and hid a total failure (the S20 lesson the
+# GPUStack path already learned the hard way).
+#
+# #1959: publishing it was not enough. TWO of the three callers never read it
+# and printed their success line regardless, so a Dify that answered
+# `Admin account not found` — every model unregistered — came out as
+# "[✓] Mac gateway Dify registration done." with rc 0 (measured on 0.91,
+# 2026-09-11). The verdict therefore lives HERE now, one level below the
+# per-type count #1248 rev-B added to dify_configure_manager_models:
+#
+#   _DIFY_REG_TOTAL  models asked for
+#   _DIFY_REG_OK     models that produced a success line
+#   return 0         iff OK == TOTAL
+#
+# Counted are the SUCCESS forms, not the known failure forms. A list of the
+# three errors the embedded Python knows today (`Admin account not found`,
+# `Tenant not found`, `… error: <e>`) is a blocklist, and the next shape Dify
+# invents falls straight through it again; the success lines are ours and we
+# know all of them. It also covers the case that has no line at all — a
+# `docker exec` that never ran.
+#
+# The return value is a verdict, not an abort: every caller consumes it in a
+# condition, because a single unregistrable model must not stop the
+# provisioning run (and `set -e` would do exactly that on a bare call).
+_dify_register_models() {
+    local admin_email="$1" api_key="$2" endpoint_url="$3"
+    local cred_label="$4" context_size="$5" models="$6"
+    local model_type="${7:-llm}" extra_creds="${8:-}"
+    [ -n "$extra_creds" ] || extra_creds='{}'
+    _DIFY_REG_LAST_OUTPUT=""
+    # Nothing asked for is nothing missing — 0 of 0 is a pass, and the counters
+    # are published on this path too so a caller never reads a stale pair.
+    _DIFY_REG_OK=0
+    _DIFY_REG_TOTAL=0
+    [ -n "$models" ] || return 0
+    local _dify_reg_py="${_DIFY_PY_COMPAT}
+_rz_guard('model-registration')
+import json, os, sys
+sys.path.insert(0, '/app/api')
+from app import create_app
+from extensions.ext_database import db
+from models.account import Account, TenantAccountJoin
+ModelProviderService = _rz_model_provider_service()
+_, app = create_app()
+with app.app_context():
+    account = db.session.query(Account).filter(Account.email == sys.argv[1]).first()
+    if not account:
+        print('Admin account not found'); sys.exit(1)
+    tj = db.session.query(TenantAccountJoin).filter(TenantAccountJoin.account_id == account.id).first()
+    if not tj:
+        print('Tenant not found'); sys.exit(1)
+    mps = _rz_adapt(ModelProviderService())
+    provider = 'langgenius/openai_api_compatible/openai_api_compatible'
+    label = sys.argv[5]
+    mtype = sys.argv[7] or 'llm'
+    try:
+        extra = json.loads(sys.argv[8] or '{}')
+    except Exception as exc:
+        print(f'{label} {mtype} extra-credentials unreadable ({exc}) — ignored.')
+        extra = {}
+    for name in sys.argv[4].split(';'):
+        if not name: continue
+        creds = {'api_key': os.environ['RZ_DIFY_API_KEY'],
+                 'endpoint_url': sys.argv[3],
+                 'context_size': sys.argv[6]}
+        if mtype == 'llm':
+            creds['mode'] = 'chat'
+        elif mtype == 'text-embedding':
+            # #1509: the openai_api_compatible plugin declares max_chunks as a
+            # REQUIRED credential-form field for text-embedding (and only for it
+            # — llm and rerank do not have it). Without it the plugin's schema
+            # validator raises ValueError 'Variable max_chunks is required'
+            # BEFORE any network call, so the whole embedding half of the
+            # registration is refused while chat and rerank register fine. That
+            # is a Dify with no embedding model and no embedding default: a
+            # knowledge base cannot index, and nothing says why.
+            # #2505: '1' was the plugin's own declared default (measured on
+            # 0.175, Dify 1.15) and left Dify sending one text per /v1/embeddings
+            # call — the per-request overhead (router + relay + plugin) then
+            # dominates re-index throughput. #1057's manager 429 was about an
+            # ubatch the RUNNER could not take, not the text count per request,
+            # and does not bite here: the runner serving qwen3-embedding on this
+            # stack runs ctx 8192 / --parallel 2, i.e. 4096 tokens per input
+            # slot, and a Dify child chunk sits far below that. Measured on prod
+            # (#2505, box-1, real 'Test Coverage RAG' segments, avg 114 chars):
+            # max_chunks=16 raised sequential re-index throughput 6.3 -> 9.4
+            # texts/s. Written into BOTH the create branch here and, via this
+            # SAME creds dict, the refresh branch below (mps.update_model_
+            # credential) — see the cache note there for why the refresh branch
+            # is the one that actually reaches an EXISTING box.
+            creds['max_chunks'] = '16'
+        creds.update(extra)
+        try:
+            mps.create_model_credential(
+                tenant_id=tj.tenant_id, provider=provider, model=name,
+                model_type=mtype,
+                credentials=creds,
+                credential_name=label)
+            print(f'{label} {mtype} model [{name}] added.')
+        except Exception as e:
+            msg = str(e).lower()
+            if 'already' in msg or 'duplicate' in msg or 'exists' in msg:
+                # #1308: create-or-skip left a ROTATED key behind for good — the
+                # stored credential never learned the new LLM_MANAGER_DIFY_KEY
+                # and every model call 401'd behind three green lines. Refresh
+                # the existing credential instead (Dify 1.17:
+                # update_model_credential, id via the available-credentials list).
+                try:
+                    avail = mps.get_provider_model_available_credentials(
+                        tenant_id=tj.tenant_id, provider=provider, model_type=mtype, model=name)
+                    cid = next((c.credential_id for c in avail
+                                if getattr(c, 'credential_name', None) == label), None)
+                    # Only OUR label is refreshed — a foreign credential on a
+                    # customer box (their own entry) is never overwritten with
+                    # the stack key (review #1387, Befund 6).
+                    if cid is None:
+                        others = ', '.join(str(getattr(c, 'credential_name', '?')) for c in avail) or 'none'
+                        print(f'{label} {mtype} model [{name}] already configured (no credential labelled {label!r} to refresh; present: {others}) - left untouched.')
+                    else:
+                        # #2505 (review amendment on #2505, plan Task C2): a bare
+                        # DB row rewrite does NOT reach an existing box — Dify
+                        # caches provider credentials in Valkey (the same fact
+                        # #2427 hit for provider-level rows). Calling Dify's own
+                        # ModelProviderService.update_model_credential — not a
+                        # raw UPDATE — is what makes the rewritten max_chunks
+                        # (or any credential field) take effect without a manual
+                        # cache flush or a restart: at tag 1.17.1,
+                        # core/entities/provider_configuration.py
+                        # ProviderConfiguration.update_custom_model_credential
+                        # commits the row and then, when this credential is the
+                        # model's currently-ACTIVE one, deletes the matching
+                        # core/helper/model_provider_cache.py ProviderCredentialsCache
+                        # entry — key
+                        # 'provider_model_credentials:v2:tenant_id:<tenant_id>:
+                        # id:<provider_model.id>' — so the next read misses the
+                        # stale Valkey copy and reloads from the row just written.
+                        mps.update_model_credential(
+                            tenant_id=tj.tenant_id, provider=provider, model=name,
+                            model_type=mtype, credentials=creds,
+                            credential_id=cid, credential_name=label)
+                        print(f'{label} {mtype} model [{name}] updated (credential refreshed).')
+                except Exception as e2:
+                    print(f'{label} {mtype} model [{name}] error: refresh failed: {e2}')
+            else:
+                print(f'{label} {mtype} model [{name}] error: {e}')
+"
+    # #2577: the key travels in the exec ENVIRONMENT (named, value never on the argv);
+    # argv slot 2 stays a placeholder so the other positions keep their numbers.
+    _DIFY_REG_LAST_OUTPUT=$(RZ_DIFY_API_KEY="$api_key" docker exec -e RZ_DIFY_API_KEY dify-api python3 -c "$_dify_reg_py" \
+        "$admin_email" "-" "$endpoint_url" "$models" "$cred_label" \
+        "$context_size" "$model_type" "$extra_creds" 2>/dev/null) || true
+    # An `if` (not `[ … ] && …`) is load-bearing: as the last command of the loop
+    # body a failed test makes the while — and the pipeline — return 1, and under
+    # the `set -e` this script declares that aborts the caller before the
+    # `return 0` below. An empty output is a normal outcome (the #813
+    # Mac-gateway harness runs exactly that path).
+    printf '%s\n' "$_DIFY_REG_LAST_OUTPUT" | while IFS= read -r line; do
+        if [ -n "$line" ]; then print_substep "  $line"; fi
+    done
+    # The helper's own crash (an ImportError after a Dify upgrade above all) is
+    # reported as itself, not left to surface as "no usable credential".
+    local _fatal
+    _fatal=$(printf '%s\n' "$_DIFY_REG_LAST_OUTPUT" | grep -m1 '^FATAL|' || true)
+    if [ -n "$_fatal" ]; then
+        print_error "Dify model registration helper crashed: ${_fatal#FATAL|}"
+    fi
+
+    # #1959: the verdict. One line per model, matched as a FIXED string against
+    # the three success forms the embedded Python prints — `grep -F` on purpose,
+    # because model aliases carry dots (`mac-qwen3.6`) that a regex would happily
+    # match against anything.
+    local _name
+    _DIFY_REG_OK=0
+    _DIFY_REG_TOTAL=0
+    while IFS= read -r _name; do
+        [ -n "$_name" ] || continue
+        _DIFY_REG_TOTAL=$((_DIFY_REG_TOTAL + 1))
+        if printf '%s\n' "$_DIFY_REG_LAST_OUTPUT" | grep -qF \
+                -e "${cred_label} ${model_type} model [${_name}] added." \
+                -e "${cred_label} ${model_type} model [${_name}] updated (credential refreshed)." \
+                -e "${cred_label} ${model_type} model [${_name}] already configured"; then
+            _DIFY_REG_OK=$((_DIFY_REG_OK + 1))
+        fi
+    done <<< "$(printf '%s' "$models" | tr ';' '\n')"
+    [ -z "$_fatal" ] || return 1
+    [ "$_DIFY_REG_OK" -eq "$_DIFY_REG_TOTAL" ]
+}
+
+# _dify_pick_default <preferred> <newline-separated candidates>
+# The preferred alias when it is among the candidates, else the first candidate,
+# else empty. A workspace default may only name a model that was actually
+# registered — selecting the manifest default unconditionally is how a box whose
+# always-on set does not contain it ends up with a default nothing can serve.
+_dify_pick_default() {
+    local want="$1" candidates="$2"
+    if [ -n "$want" ] && printf '%s\n' "$candidates" | grep -Fxq "$want"; then
+        printf '%s' "$want"
+        return 0
+    fi
+    printf '%s\n' "$candidates" | awk 'NF {print; exit}'
+}
+
+# usage: _dify_set_default_models <admin_email> <provider> <type=model;type=model;…>
+#
+# The workspace-level "System Model Settings" defaults. Registering a credential
+# is only half the wiring: with no default text-generation / text-embedding /
+# rerank model a new Dify app has no model selected and a knowledge base cannot
+# index at all (the `{"data":null}` the #1248 day-1 tests read back).
+#
+# Model types are the ModelType enum values (llm / text-embedding / rerank);
+# Dify's ModelType.value_of also accepts the legacy origin names, which is why
+# the GPUStack path's 'text-generation' works.
+#
+# Raw output is published in _DIFY_DEF_LAST_OUTPUT so the caller can assert that
+# each default it asked for was really selected.
+_dify_set_default_models() {
+    local admin_email="$1" provider="$2" pairs="$3"
+    _DIFY_DEF_LAST_OUTPUT=""
+    [ -n "$pairs" ] || return 0
+    local _dify_def_py="${_DIFY_PY_COMPAT}
+_rz_guard('default-model-setter')
+import sys
+sys.path.insert(0, '/app/api')
+from app import create_app
+from extensions.ext_database import db
+from models.account import Account, TenantAccountJoin
+ModelProviderService = _rz_model_provider_service()
+_, app = create_app()
+with app.app_context():
+    account = db.session.query(Account).filter(Account.email == sys.argv[1]).first()
+    if not account:
+        print('Admin account not found'); sys.exit(1)
+    tj = db.session.query(TenantAccountJoin).filter(TenantAccountJoin.account_id == account.id).first()
+    if not tj:
+        print('Tenant not found'); sys.exit(1)
+    mps = _rz_adapt(ModelProviderService())
+    for pair in sys.argv[3].split(';'):
+        if not pair or '=' not in pair: continue
+        mtype, mname = pair.split('=', 1)
+        if not mtype or not mname: continue
+        try:
+            mps.update_default_model_of_model_type(
+                tenant_id=tj.tenant_id, model_type=mtype,
+                provider=sys.argv[2], model=mname)
+            print(f'Default {mtype} set to {mname}.')
+        except Exception as e:
+            print(f'Default {mtype} error: {e}')
+"
+    _DIFY_DEF_LAST_OUTPUT=$(docker exec dify-api python3 -c "$_dify_def_py" \
+        "$admin_email" "$provider" "$pairs" 2>/dev/null) || true
+    printf '%s\n' "$_DIFY_DEF_LAST_OUTPUT" | while IFS= read -r line; do
+        if [ -n "$line" ]; then print_substep "  $line"; fi
+    done
+    # The caller asserts every default it asked for ("Default <type> set to"),
+    # so a crashed helper fails there; name the crash itself here.
+    local _fatal
+    _fatal=$(printf '%s\n' "$_DIFY_DEF_LAST_OUTPUT" | grep -m1 '^FATAL|' || true)
+    if [ -n "$_fatal" ]; then
+        print_error "Dify default-model helper crashed: ${_fatal#FATAL|}"
+    fi
+    return 0
+}
+
+# _dify_align_account_timezone <admin_email>
+# Dify hardcodes a new account to America/New_York, so the console renders
+# workflow-run + log timestamps in EDT instead of local time. Idempotent nudge to
+# the stack TZ. Extracted from dify_configure_model by #1248: the Manager branch
+# replaces that whole function on a Manager box, and leaving the nudge inside it
+# would have quietly un-fixed the timezone on exactly the boxes this release
+# rewires.
+_dify_align_account_timezone() {
+    local admin_email="$1" tz="${TZ:-UTC}"
+    [ -n "$admin_email" ] || return 0
+    local _dify_tz_py="
+import sys
+sys.path.insert(0, '/app/api')
+from app import create_app
+from extensions.ext_database import db
+from models.account import Account
+_, app = create_app()
+with app.app_context():
+    account = db.session.query(Account).filter(Account.email == sys.argv[1]).first()
+    if not account:
+        print('Admin account not found'); sys.exit(1)
+    if account.timezone != sys.argv[2]:
+        account.timezone = sys.argv[2]
+        db.session.commit()
+        print(f'Account timezone set to {sys.argv[2]}.')
+"
+    local out
+    out=$(docker exec dify-api python3 -c "$_dify_tz_py" "$admin_email" "$tz" 2>/dev/null) || true
+    if [ -n "$out" ]; then print_substep "  $out"; fi
+    return 0
+}
+
+# #690: RAG consumers (cognee, lightrag) hard-pinned gpustack:9090 — on an
+# llm-manager box nothing listens there and cognee's GRAPH_COMPLETION sat in
+# litellm retry backoff (every /search a timeout, seen live on 0.91). A
+# SEPARATE function (not a tail on wire_llm_manager_consumers): that one
+# early-returns inside its Dify branch, which would silently skip anything
+# appended after it.
+# The canonical in-network LLM endpoint (#979 E1): the manager, port 8080.
+LLM_CANONICAL_ENDPOINT="http://llm:8080/v1"
+
+# #1445 (cutover C5): one table for every consumer post-install wires to the
+# canonical endpoint http://llm:8080/v1 (#979) with a cost-centred service key
+# (stack/<svc>). Columns: svc | profile | env prefix | endpoint keys | key keys.
+# The compose defaults already say the canonical URL and an EMPTY key — this
+# is what fills the key in (and re-points a box that carried GPUStack-era
+# values). lightrag's rerank rides the manager too (#976 proxies /v1/rerank).
+RAZZFAZZ_LLM_CONSUMERS="cognee|cognee|COGNEE|LLM_ENDPOINT,EMBEDDING_ENDPOINT|LLM_API_KEY,EMBEDDING_API_KEY
+lightrag|lightrag|LIGHTRAG|LLM_ENDPOINT,EMBEDDING_ENDPOINT,RERANK_ENDPOINT|LLM_API_KEY,EMBEDDING_API_KEY,RERANK_API_KEY
+paperclip|paperclip|PAPERCLIP|LLM_ENDPOINT|LLM_API_KEY
+ollama-proxy|llm-manager|OLLAMA_PROXY||LLM_API_KEY"
+
+# #1507 — the consumers must end up with the set the box actually SERVES.
+#
+# post-install deploys the model set, waits a bounded window, and only then
+# configures Dify (provider + defaults) and OWUI (model-sync). On a CPU box the
+# chat model routinely outlasts that window: Round 7 on 0.175 ended the wait at
+# `3/4 ready after 540s — waiting on: qwen3.6(pulling)`, the two consumer steps
+# enumerated the three models that WERE ready, and nothing ever re-read the
+# list. Twenty minutes later /api/deployments and /v1/models both served all
+# four while Open WebUI's model list lacked the chat model and Dify had no
+# default model at all — a customer-visible dead end on a healthy box (the
+# #1248 family, by timing rather than by name).
+#
+# This is deliberately NOT another wait inside the deploy: the deploy's window
+# is about "did the box come up", and stretching it delays every install. Here
+# the expensive work is done and only the enumeration is stale, so a second,
+# clearly-labelled pass is cheap and honest — and if the model still is not
+# ready, the operator gets the one command that fixes it.
+# _llmm_all_absent <pending-list> — true when EVERY entry is `name(absent)`,
+# i.e. the manager knows none of the wanted models. _llmm_ready_report writes
+# `absent` only for a name with no deployment row at all.
+_llmm_all_absent() {
+    local list="$1" entry rc=0
+    [ -n "$list" ] || return 1
+    # No pipeline: a `while read` on the right-hand side would run in a
+    # subshell AND drop the last entry (no trailing newline), which is exactly
+    # how the first cut of this predicate said "all absent" for a single
+    # pending model. Split on commas in this shell instead.
+    local _oldifs="$IFS"
+    IFS=','
+    # shellcheck disable=SC2086  # deliberate word split on the comma list
+    for entry in $list; do
+        case "$entry" in
+            *"(absent)") ;;
+            *) rc=1 ;;
+        esac
+    done
+    IFS="$_oldifs"
+    return "$rc"
+}
+
+LLM_MANAGER_LATE_READY_TIMEOUT="${LLM_MANAGER_LATE_READY_TIMEOUT:-900}"
+LLM_MANAGER_LATE_READY_POLL="${LLM_MANAGER_LATE_READY_POLL:-15}"
+
+llm_manager_reconcile_consumers_late() {
+    [ "${_LLMM_DEPLOY_INCOMPLETE:-0}" = "1" ] || return 0
+    _llm_manager_active || return 0
+    # The --refresh arm deploys the `standard` set with no PRESET set at all
+    # (--preset and --refresh are mutually exclusive), so the fallback here is
+    # the same literal that arm passes to llm_manager_deploy_standard_set.
+    local preset="${PRESET:-standard}"
+    local waited=0 pending
+    print_step "Model deploy was incomplete — waiting for the slow model before re-wiring the consumers (#1507)..."
+    while [ "$waited" -lt "$LLM_MANAGER_LATE_READY_TIMEOUT" ]; do
+        pending=$(_llmm_pending_standard_models "$preset")
+        if [ "$pending" = "?" ]; then
+            # No verdict (manifest or manager unreadable) — never silently
+            # claim readiness; nothing is re-wired on a guess, and the tail's
+            # "still waiting on ?" would be noise, so leave here.
+            print_warning "Cannot read the deployment state — leaving the consumer wiring as it is."
+            return 0
+        fi
+        # Every wanted model absent from the manager's deployment list is not
+        # "a slow pull" — it is a box whose served set does not live there at
+        # all (a GPUStack/federated backend, or a deploy the manager refused
+        # outright). Waiting the full window would buy nothing and delay the
+        # install; say what to run instead. Only checked on the FIRST reading:
+        # once something has appeared, a later all-absent reading would be a
+        # deployment being deleted under us, which the tail reports.
+        # #1760: the manager has already said it cannot place these — waiting
+        # is the wrong answer to "impossible". Checked every pass, not only the
+        # first: a row can lose its weight source between readings (a redeploy
+        # that failed), and the operator should hear it then, not 15 minutes on.
+        if _llmm_all_pending_are_unplaceable "$pending" "$(_llmm_unplaceable_standard_models "$preset")"; then
+            print_warning "Not waiting: the manager cannot place ${pending} — no weight source is recorded."
+            print_info "  Re-deploy them from the LLM Manager console (Catalog), then run:"
+            print_info "      rzfz post-install --refresh"
+            print_info "  Dify and Open WebUI keep the previous model set until then (#1507/#1760)."
+            return 0
+        fi
+        if [ "$waited" -eq 0 ] && _llmm_all_absent "$pending"; then
+            print_warning "The LLM Manager's deployment list carries none of the preset's models — not waiting for them here."
+            print_info "  Once the models are served, run 'rzfz post-install --refresh' to re-register Dify's provider + defaults and re-sync Open WebUI's model list (#1507)."
+            return 0
+        fi
+        if [ -z "$pending" ]; then
+            print_success "All deployments ready after ${waited}s — re-wiring Dify + Open WebUI with the full model set."
+            # #2448: the deploy-time verdict (llm-manager FAIL, e.g. a launch that
+            # timed out, #2447) was measured before this recovery. The run has
+            # now seen every deployment ready, so the manager's row says so —
+            # otherwise post-install exits 1 "this box cannot serve models" on a
+            # box that serves them. Only a verdict already recorded is replaced
+            # (a --refresh run gains no new row); the timeout and #1760 branches
+            # below never reach this line and keep the FAIL. The table is read
+            # only when it IS the associative one: in an undeclared or indexed
+            # array, `llm-manager` is arithmetic and `set -u` aborts on `llm`.
+            if declare -p STEP_STATUS 2>/dev/null | grep -q '^declare -A' \
+               && [ -n "${STEP_STATUS[llm-manager]:-}" ]; then
+                record_step_status llm-manager OK
+            fi
+            # Both are idempotent; they are the two steps that ENUMERATE the
+            # served set, so they are exactly the two that went stale.
+            if echo "${COMPOSE_PROFILES:-}" | grep -qw "dify"; then
+                # #2195: the earlier pass may have recorded WARN for a Dify that
+                # had no served models yet. It has them now, and the end-of-run
+                # summary must say so rather than report the state it was
+                # repaired from.
+                if step_dify_provisioning; then
+                    record_step_status dify OK
+                else
+                    print_warning "Dify re-wiring returned non-zero — check 'rzfz post-install --verify'."
+                fi
+            fi
+            recreate_active_model_sync
+            # #2195 rev-B (journey A-prime, 0.91): the model ROWS are a third
+            # enumerating step, and it was missing here. It had run once, early,
+            # while only the reranker was served, so it wrote exactly one row —
+            # and `qwen3-embedding` and `granite-docling` were then offered in
+            # the chat picker, against the stated intent of the line that writes
+            # them. `recreate_active_model_sync` restarts a container; it does
+            # not rewrite the hide-list. The function self-guards on ownership,
+            # the manager, postgres and a non-empty served set, so this is
+            # idempotent on every box that does not need it.
+            owui_reconcile_model_rows || true
+            return 0
+        fi
+        sleep "$LLM_MANAGER_LATE_READY_POLL"
+        waited=$((waited + LLM_MANAGER_LATE_READY_POLL))
+    done
+    print_warning "Still waiting on ${pending} after ${waited}s — Open WebUI and Dify carry an INCOMPLETE model set."
+    print_info "  Once the deployment is ready (rzfz llm status / the console), run:"
+    print_info "      rzfz post-install --refresh"
+    print_info "  That re-registers Dify's provider + defaults and re-syncs OWUI's model list (#1507)."
+    return 0
+}
+
+wire_llm_manager_rag_consumers() {
+    # Same two hand-copied predicates as in wire_llm_manager_consumers above,
+    # same reason for replacing them.
+    _llm_manager_profile_active || return 0
+    _llm_manager_running || return 0
+    local row svc profile env_prefix ep_keys key_keys key_var key changed ek kk want
+    while IFS='|' read -r svc profile env_prefix ep_keys key_keys; do
+        [ -n "$svc" ] || continue
+        echo "${COMPOSE_PROFILES:-}" | grep -qw "$profile" || continue
+        key_var="LLM_MANAGER_$(printf '%s' "$env_prefix")_KEY"
+        # #3278: validated — a dead key after a factory reset is re-minted;
+        # the endpoint/key loop below then rewrites the consumer's entries.
+        if llm_manager_resolve_service_key "$key_var" "$svc"; then
+            key="$_LLM_SVC_KEY"
+            if [ "$_LLM_SVC_KEY_NEW" = "1" ]; then print_substep "Minted stack/$svc service key."; fi
+        else
+            print_warning "Could not mint the stack/$svc service key — $svc keeps its current .env values."
+            continue
+        fi
+        changed=0
+        for ek in $(printf '%s' "$ep_keys" | tr ',' ' '); do
+            want="$LLM_CANONICAL_ENDPOINT"
+            case "$ek" in *RERANK*) want="${LLM_CANONICAL_ENDPOINT}/rerank" ;; esac
+            if [ "$(read_env_value "$ENV_FILE" "${env_prefix}_${ek}" 2>/dev/null || true)" != "$want" ]; then
+                update_env_value "$ENV_FILE" "${env_prefix}_${ek}" "$want"; changed=1
+            fi
+        done
+        for kk in $(printf '%s' "$key_keys" | tr ',' ' '); do
+            if [ "$(read_env_value "$ENV_FILE" "${env_prefix}_${kk}" 2>/dev/null || true)" != "$key" ]; then
+                update_env_value "$ENV_FILE" "${env_prefix}_${kk}" "$key"; changed=1
+            fi
+        done
+        if [ "$changed" = "1" ]; then
+            # recreate only a RUNNING consumer so it re-reads the env
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$svc"; then
+                docker compose up -d --no-deps --force-recreate "$svc" >/dev/null 2>&1 || true
+                print_substep "$svc now talks to the LLM Manager at ${LLM_CANONICAL_ENDPOINT} (recreated)."
+            else
+                print_substep "$svc wired to the LLM Manager at ${LLM_CANONICAL_ENDPOINT} (takes effect on next start)."
+            fi
+        else
+            print_substep "$svc already wired to the LLM Manager."
+        fi
+    done <<< "$RAZZFAZZ_LLM_CONSUMERS"
+    return 0
+}
+
+# #240: enabling mac-llm never wired the gateway into OWUI's second OpenAI
+# endpoint — `config/.env.example` claims the P2 Config Portal toggle writes
+# `OWUI_OPENAI_BASE_URLS`/`OWUI_OPENAI_KEYS` automatically, but nothing did
+# (apply_manager.py #206 only seeds config.yaml). Same shape as the #320
+# llm-manager wiring above: reuse `_owui_append_endpoint` rather than
+# reimplementing its append/idempotency logic. Dify half deferred (#240
+# follow-up) — the manager's Dify path enumerates served CHAT models
+# straight from its own DB rows (review #666); the Mac gateway is a plain
+# LiteLLM proxy with no equivalent cheap enumeration, and half-registering
+# Dify without a model list would be a broken provider entry.
+wire_mac_llm_consumers() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "mac-llm" || return 0
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-mac-gateway; then
+        print_warning "mac-llm profile active but llm-mac-gateway container not running — consumer wiring skipped (re-run 'rzfz post-install --refresh' once it is up)."
+        return 0
+    fi
+    local mac_key
+    mac_key=$(read_env_value "$ENV_FILE" MAC_GATEWAY_MASTER_KEY 2>/dev/null || true)
+    if [ -z "$mac_key" ]; then
+        print_warning "MAC_GATEWAY_MASTER_KEY is empty — Mac gateway endpoint not wired into OWUI (#240)."
+        return 0
+    fi
+    print_step "Mac gateway: wiring OWUI consumer (#240)..."
+
+    # #1235 rev-C: keep the ORIGINAL list for the write comparison below — the
+    # strip rewrites the locals, so comparing against them would hide a strip
+    # whenever the gateway is already listed (append no-op) and leave the dead
+    # gpustack:9090 entry in .env for good. Same shape as the template above.
+    local bases keys out orig_bases orig_keys
+    orig_bases=$(read_env_value "$ENV_FILE" OWUI_OPENAI_BASE_URLS 2>/dev/null || true)
+    orig_keys=$(read_env_value "$ENV_FILE" OWUI_OPENAI_KEYS 2>/dev/null || true)
+    bases="$orig_bases"
+    keys="$orig_keys"
+    # #1235: the same #976 shape as owui_configure_connection above. This used
+    # to default an EMPTY list to gpustack unconditionally, so a mac-llm box
+    # without GPUStack (llm-manager front, or Mac-only) got the dead
+    # gpustack:9090 entry back that #976 removed everywhere else — a queued
+    # connection OWUI keeps polling, with a placeholder key. Seed gpustack only
+    # while a gpustack profile is active; otherwise strip a stale entry and let
+    # the append below make the gateway the sole endpoint.
+    if ! _gpustack_profile_active; then
+        local _stripped
+        _stripped=$(_owui_strip_gpustack "$bases" "$keys")
+        bases=$(printf '%s' "$_stripped" | sed -n 1p)
+        keys=$(printf '%s' "$_stripped" | sed -n 2p)
+    fi
+    if [ -z "$bases" ] && _gpustack_profile_active; then
+        bases="http://gpustack:9090/v1-openai"
+        keys="${keys:-$GPUSTACK_API_KEY}"
+    fi
+    out=$(_owui_append_endpoint "$bases" "$keys" "http://llm-mac-gateway:4000/v1" "$mac_key")
+    local new_bases new_keys
+    new_bases=$(printf '%s' "$out" | sed -n 1p)
+    new_keys=$(printf '%s' "$out" | sed -n 2p)
+    # #1185 class: an already-listed gateway entry keeps its OLD key through
+    # the append (no-op) — pin the entry to the current master key so a
+    # rotated MAC_GATEWAY_MASTER_KEY reaches OWUI.
+    new_keys=$(_owui_set_endpoint_key "$new_bases" "$new_keys" "http://llm-mac-gateway:4000/v1" "$mac_key")
+    if [ "$new_bases" != "$orig_bases" ] || [ "$new_keys" != "$orig_keys" ]; then
+        update_env_value "$ENV_FILE" "OWUI_OPENAI_BASE_URLS" "$new_bases"
+        update_env_value "$ENV_FILE" "OWUI_OPENAI_KEYS" "$new_keys"
+        print_substep "OWUI endpoint list now carries the Mac gateway (models auto-discovered via /v1/models)."
+        docker compose up -d --force-recreate openwebui >/dev/null 2>&1 || true
+    else
+        print_substep "OWUI already wired to the Mac gateway."
+    fi
+    print_success "Mac gateway consumer wiring done."
+}
+
+# #813 (split out of #240): the DIFY half of the Mac-gateway wiring.
+#
+# OWUI needs only an endpoint — it discovers models itself from /v1/models. Dify
+# needs CONCRETE chat models, and review #666 settled how they may be found:
+# /v1/models proxies the router list WITHOUT a task filter, so enumerating from
+# it and guessing by name-shape registers embed/rerank models as mode=chat and
+# leaves broken provider entries behind. The manager side avoids that by
+# enumerating its own DB rows with `Deployment.task == "chat"`; the gateway is a
+# plain LiteLLM proxy with no such table, so the task is DECLARED in its
+# config.yaml (`model_info.mode`, #813) and read back through the generator that
+# writes it — `gen_config.py --chat-models`, which stays the single source of
+# truth instead of the shell re-deriving the rule in yq/grep.
+#
+# A SEPARATE function from wire_mac_llm_consumers, not a tail on it — the #690
+# lesson, stated a few functions above: that one early-returns on an empty
+# MAC_GATEWAY_MASTER_KEY, and anything appended after such a return is silently
+# skipped on exactly the boxes that most need the diagnostic.
+wire_mac_llm_dify_consumer() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "dify" || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx dify-api || return 0
+    if ! echo "${COMPOSE_PROFILES:-}" | grep -qw "mac-llm"; then
+        # #2504: the mac-llm PROFILE is gone, not merely the container being
+        # down for a moment (the check below, unchanged, still returns on that
+        # so a restart never loses the registration). A profile that was
+        # removed means the gateway is retired, and any model still registered
+        # under its credential is unreachable — the same guarded-by-reference
+        # prune every other #2504 removal uses.
+        #
+        # Fix round 1: gated on `llm_manager_owns_standard_set` too — the same
+        # "only run when the manager is the stack's backend" rule #2504's own
+        # spec states. A box still on llm-legacy (GPUStack the active backend,
+        # manager profile off or not fronting it) removes nothing here; #2504
+        # is a manager-era cleanup, not a general-purpose deleter.
+        if llm_manager_owns_standard_set; then
+            _dify_prune_stale_models "langgenius/openai_api_compatible/openai_api_compatible" "Mac LLM Gateway" ""
+        fi
+        return 0
+    fi
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-mac-gateway || return 0
+
+    local mac_key
+    mac_key=$(read_env_value "$ENV_FILE" MAC_GATEWAY_MASTER_KEY 2>/dev/null || true)
+    if [ -z "$mac_key" ]; then
+        print_warning "MAC_GATEWAY_MASTER_KEY is empty — Mac gateway chat models not registered with Dify (#813)."
+        return 0
+    fi
+
+    local gw_dir="${SCRIPT_DIR}/modules/llm/mac-gateway"
+    if [ ! -f "${gw_dir}/config.yaml" ]; then
+        # config.yaml is per-box and gitignored; the gateway cannot even start
+        # without it, so this is the "operator has not declared any Mac yet"
+        # case, not an error.
+        print_warning "${gw_dir}/config.yaml not found — no Mac chat models to register with Dify (#813)."
+        return 0
+    fi
+
+    print_step "Mac gateway: registering chat models with Dify (#813)..."
+    local served
+    served=$(python3 "${gw_dir}/gen_config.py" --chat-models < "${gw_dir}/config.yaml" 2>/dev/null) || served=""
+    if [ -z "$served" ]; then
+        # Empty stdout with exit 0 is the generator's documented "none yet";
+        # a broken call exits non-zero and lands here too, which is why this
+        # says "deferred" rather than claiming there are none.
+        print_substep "Gateway config declares no chat models — Dify registration deferred to the next --refresh."
+        return 0
+    fi
+
+    local admin_email
+    admin_email=$(_resolve_dify_admin_email)
+    # 32768 mirrors the LLM-Manager path's declared value. There is nothing to
+    # discover it from: Ollama's OpenAI-compatible /v1/models reports no context
+    # length, so this is a declared default an operator can correct in Dify.
+    # #1959: the call site the defect was MEASURED on. `Admin account not found`
+    # printed as a substep between two progress lines, and this function said
+    # "done" underneath it with rc 0.
+    if _dify_register_models "$admin_email" "$mac_key" "http://llm-mac-gateway:4000/v1" \
+            "Mac LLM Gateway" "32768" "$(printf '%s' "$served" | tr '\n' ';')"; then
+        print_success "Mac gateway Dify registration done (${_DIFY_REG_OK}/${_DIFY_REG_TOTAL} chat models registered)."
+    elif [ "${_DIFY_REG_OK:-0}" -eq 0 ]; then
+        print_error "Mac gateway Dify registration registered NONE of the ${_DIFY_REG_TOTAL} chat models — the lines above say why (#1959)."
+        return 1
+    else
+        print_warning "Mac gateway Dify registration incomplete: ${_DIFY_REG_OK} of ${_DIFY_REG_TOTAL} chat models registered — the lines above say why (#1959)."
+        return 1
+    fi
+}
+
+ensure_gpustack_api_key() {
+    print_step "GPUStack: Ensuring API key exists..."
+    
+    # Disable errexit for this function — we handle errors ourselves
+    set +e
+    
+    if [ -n "$GPUSTACK_API_KEY" ]; then
+        # Verify the existing key works
+        local resp
+        resp=$(gpustack_api GET "/v1-openai/models" 2>/dev/null)
+        if echo "$resp" | python3 -c "import sys,json; json.load(sys.stdin)['data']" > /dev/null 2>&1; then
+            print_success "Existing API key is valid."
+            _resolve_owui_openai_keys
+            set -e
+            return 0
+        fi
+        print_warning "Existing API key is invalid. Creating new one..."
+    fi
+    
+    # Create new API key via basic auth
+    print_substep "Creating GPUStack API key..."
+    local admin_pass="${GPUSTACK_ADMIN_PASSWORD:-${AUTHENTIK_BOOTSTRAP_PASSWORD}}"
+    if [ -z "$admin_pass" ]; then
+        print_error "No admin password found (GPUSTACK_ADMIN_PASSWORD or AUTHENTIK_BOOTSTRAP_PASSWORD)."
+        set -e
+        return 1
+    fi
+    
+    # Force basic auth (clear API key temporarily)
+    local saved_key="$GPUSTACK_API_KEY"
+    GPUSTACK_API_KEY=""
+
+    # The api-keys path (one runtime since #1447, resolved centrally)
+    local prefix
+    prefix=$(gpustack_api_prefix)
+
+    # Delete existing key if present (can't retrieve value of existing keys)
+    local existing_id
+    existing_id=$(gpustack_api GET "${prefix}/api-keys" | python3 -c "
+import sys, json
+try:
+    for k in json.load(sys.stdin).get('items', []):
+        if k.get('name') == 'razzfazz-post-install':
+            print(k['id']); break
+except: pass
+" 2>/dev/null)
+
+    if [ -n "$existing_id" ]; then
+        print_info "Removing old key (id=$existing_id)..."
+        gpustack_api DELETE "${prefix}/api-keys/$existing_id" > /dev/null 2>&1
+        sleep 1
+    fi
+
+    # Create fresh key
+    local key_resp
+    key_resp=$(gpustack_api POST "${prefix}/api-keys" '{"name":"razzfazz-post-install"}')
+    
+    local new_key
+    new_key=$(echo "$key_resp" | python3 -c "
+import sys, json
+try:
+    print(json.load(sys.stdin).get('value', ''))
+except: print('')
+" 2>/dev/null)
+    
+    GPUSTACK_API_KEY="$saved_key"
+    
+    if [ -z "$new_key" ] || [ "$new_key" = "None" ]; then
+        print_error "Failed to create API key."
+        print_info "Response: $(echo "$key_resp" | head -c 300)"
+        set -e
+        return 1
+    fi
+    
+    GPUSTACK_API_KEY="$new_key"
+    update_env_value "$ENV_FILE" "GPUSTACK_API_KEY" "$new_key"
+    export GPUSTACK_API_KEY="$new_key"
+    _resolve_owui_openai_keys
+    print_success "API key created and saved to .env."
+    set -e
+}
+
+# ── #184 P1 / WS7b — offline local-GGUF helpers ──────────────────────────────
+# The gpustack-data volume mounts at /var/lib/gpustack in the gpustack container;
+# OFFLINE-sideloaded GGUFs live under $RAZZFAZZ_LOCAL_MODELS_DIR there. When the
+# box is offline, models are registered with source=local_path pointing at that
+# path (never huggingface.co) — see core/llm/model_source.py.
+
+# _local_model_path <huggingface_filename>: print the in-container GGUF path.
+_local_model_path() {
+    printf '%s/%s\n' "$RAZZFAZZ_LOCAL_MODELS_DIR" "${1#/}"
+}
+
+# _local_gguf_present <huggingface_filename>: return 0 if at least one GGUF
+# matching <filename> (which may be a glob or carry a sub-dir) exists under
+# $RAZZFAZZ_LOCAL_MODELS_DIR INSIDE the running gpustack container. The check
+# runs there, not on the host, because the volume is a docker named volume.
+_local_gguf_present() {
+    local filename="$1" path
+    path="$(_local_model_path "$filename")"
+    docker exec gpustack sh -c "ls -1 ${path} 2>/dev/null | head -n1 | grep -q ." 2>/dev/null
+}
+
+# ── Appliance offline models: stage baked GGUFs into the gpustack-data volume ──
+# The appliance ISO (build-appliance-usb.sh --offline-package) bakes the offline
+# package — INCLUDING the model GGUFs (models/ subtree; that's what makes the ISO
+# tens-of-GB) — onto the box at $APPLIANCE_OFFLINE_PKG. Firstboot leaves the package
+# untouched; `rzfz init` loads its images/ before compose-up. Models are NOT staged
+# earlier (firstboot / init pre-compose) because pre-creating the gpustack-data
+# volume would trip razzfazz-init.sh's existing-install guard. So we stage them
+# HERE, after the stack is up, into
+# $RAZZFAZZ_LOCAL_MODELS_DIR via `docker cp` into the running gpustack — mirroring
+# the offline `rzfz upgrade --package` path (cli/upgrade.sh WS7a). deploy_all_models
+# then registers them source=local_path with ZERO downloads. Idempotent (skips when
+# the volume is already populated), non-fatal, and harmless online (the GGUFs just
+# sit in the volume until an offline deploy references them).
+APPLIANCE_OFFLINE_PKG="${APPLIANCE_OFFLINE_PKG:-/opt/razzfazz-appliance/razzfazz-offline.tar.gz}"
+
+stage_baked_appliance_models() {
+    [ -f "$APPLIANCE_OFFLINE_PKG" ] || return 0
+    # #2227: the runtime is whichever models container runs on THIS box
+    # (gpustack on a legacy box, llm-worker-agent on an LLM-Manager box).
+    if [ -z "$(razzfazz_models_runtime)" ]; then
+        print_warning "Baked appliance package present but neither gpustack nor llm-worker-agent is running — skipping model staging (re-run 'rzfz post-install' once the stack is up)."
+        return 0
+    fi
+    # #2440: idempotency is per FILE against the package's models/ subtree
+    # (index consulted, no scan) — a populated volume is NOT "already staged":
+    # a package that ADDS a model or projector must still land it. Checked
+    # BEFORE the expensive extract so a complete re-run stays instant.
+    local _idx0 _prefix0 pkg_ggufs missing_ggufs n_pkg n_missing
+    _idx0="$(appliance_pkg_index "$APPLIANCE_OFFLINE_PKG")" || _idx0=""
+    pkg_ggufs=""; missing_ggufs=""
+    if [ -n "$_idx0" ] && _prefix0="$(appliance_pkg_prefix "$_idx0" models)"; then
+        pkg_ggufs=$(grep -E "^${_prefix0}/.*\.gguf$" "$_idx0" 2>/dev/null | sed 's#.*/##' | sort -u)
+    fi
+    if [ -n "$pkg_ggufs" ]; then
+        missing_ggufs=$(razzfazz_models_volume_missing "$pkg_ggufs")
+        n_pkg=$(printf '%s\n' "$pkg_ggufs" | sed '/^$/d' | wc -l | tr -d ' ')
+        n_missing=$(printf '%s\n' "$missing_ggufs" | sed '/^$/d' | wc -l | tr -d ' ')
+        if [ "$n_missing" -eq 0 ]; then
+            print_info "All ${n_pkg} baked model GGUF(s) of the package are already in the box's models volume — nothing to stage."
+            return 0
+        fi
+        print_substep "${n_missing} of ${n_pkg} baked model GGUF(s) are not in the models volume yet: $(printf '%s' "$missing_ggufs" | tr '\n' ' ')"
+    elif razzfazz_models_volume_populated; then
+        # No index (unreadable package): the old coarse rule, said out loud.
+        print_warning "Package index unavailable — cannot compare per file; the models volume is populated, so staging is skipped (re-check with 'rzfz verify-models')."
+        return 0
+    fi
+    print_step "Appliance: staging baked model GGUFs into ${RAZZFAZZ_LOCAL_MODELS_DIR} (offline, zero-download)..."
+    # Transient-space warning (extract needs ~the models/ subtree size in /var/tmp;
+    # the package size is a conservative upper bound). Non-fatal — let it try.
+    local avail_kb pkg_kb
+    avail_kb=$(df -Pk /var/tmp 2>/dev/null | awk 'NR==2{print $4}')
+    pkg_kb=$(du -k "$APPLIANCE_OFFLINE_PKG" 2>/dev/null | cut -f1)
+    if [ -n "$avail_kb" ] && [ -n "$pkg_kb" ] && [ "$avail_kb" -lt "$pkg_kb" ]; then
+        print_warning "Low free space in /var/tmp ($((avail_kb/1024/1024)) GiB) for extracting the baked models (~up to $((pkg_kb/1024/1024)) GiB) — staging may fail; free space or stage manually."
+    fi
+    local tmp
+    tmp="$(mktemp -d /var/tmp/rzfz-appliance-models.XXXXXX)" || { print_warning "mktemp failed — skipping model staging."; return 0; }
+    # ONE scan of the archive extracts just the models/ subtree (members can be
+    # anywhere in the tar, so tar reads the whole file — a one-time install cost).
+    # #428: index consulted first — the old two-attempt extract was the
+    # identical full 63 GB scan run twice (tar normalizes ./, so attempt two
+    # could never succeed where one failed), ~10 min per post-install run.
+    local _idx _prefix
+    _idx="$(appliance_pkg_index "$APPLIANCE_OFFLINE_PKG")" || _idx=""
+    if [ -n "$_idx" ] && ! _prefix="$(appliance_pkg_prefix "$_idx" models)"; then
+        print_info "Baked appliance package carries no models/ subtree (index consulted — no scan wasted). An air-gapped box gets ZERO models from this stick (#426)."
+        rm -rf "$tmp"
+        return 0
+    fi
+    if [ -n "$_idx" ] && tar xzf "$APPLIANCE_OFFLINE_PKG" -C "$tmp" "$_prefix" 2>/dev/null; then
+        # #782: same physical medium, same risk #755 closed for the upgrade
+        # package. `docker cp` copies a symlink through as a symlink, so a
+        # prepared models/ subtree would plant one inside the gpustack volume.
+        #
+        # Operator decision 2026-08-26: DISCARD the payload, do not abort — the
+        # step is best-effort and an installation must not be stoppable by a
+        # prepared stick. Reported separately from "no models/ subtree", so the
+        # operator is not told a poisoned package was merely an images-only one.
+        # Tri-state + `set -eo pipefail`: a bare assignment inherits the CLEAN
+        # status (1) and would abort here. Same regression as #755/#793.
+        _bad=""; _link_rc=0
+        _bad="$(razzfazz_find_escaping_links "$tmp")" || _link_rc=$?
+        if [ -n "$_bad" ] || [ "$_link_rc" -eq 2 ]; then
+            [ -n "$_bad" ] || _bad="(could not inspect ${tmp})"
+            print_warning "Baked appliance package contains symlinks pointing OUTSIDE the package — NOT staging its models (#782):"
+            printf '%s\n' "$_bad" | sed "s|^${tmp}/|    |" >&2
+            print_warning "  The package is not trustworthy; do not reuse this medium. Offline model deploy will report missing GGUFs."
+            rm -rf "${tmp:?}/models" 2>/dev/null || true
+            rm -rf "$tmp"
+            return 0
+        fi
+        # #2440: stage only what the volume lacks — a file already present (by
+        # name) is not copied again, so a re-run touches nothing it need not.
+        if [ -n "${missing_ggufs:-}" ]; then
+            local _f _b
+            while IFS= read -r _f; do
+                _b=$(basename "$_f")
+                printf '%s\n' "$missing_ggufs" | grep -qxF "$_b" || rm -f "$_f"
+            done < <(find "$tmp/models" -type f -name '*.gguf' 2>/dev/null)
+        fi
+        if ls "$tmp"/models/* >/dev/null 2>&1; then
+            if razzfazz_stage_package_models "$tmp/models"; then
+                print_success "Baked model GGUFs staged into the box's models volume (#2227)."
+            fi
+        else
+            print_info "Baked appliance package carries no models/ subtree (images-only package) — nothing to stage."
+        fi
+    else
+        print_warning "Could not extract models/ from ${APPLIANCE_OFFLINE_PKG} — offline model deploy may report missing GGUFs. Re-check with 'rzfz verify-models'."
+    fi
+    rm -rf "$tmp"
+}
+
+# #2280: the appliance's per-class model bundle (build-appliance-usb.sh
+# --model-bundle bakes it here beside a base package, which carries no models).
+# Staged at the same two moments as the baked package's own models — right
+# before the model deploy, once the runtime's container runs — so the deploy
+# finds every default weight by name and downloads nothing. Class, signature
+# (when the fleet key is installed), records and per-file pins are checked
+# before anything is copied (razzfazz_apply_model_bundle). Never fatal: a
+# refused or unstageable bundle is said out loud, and the deploy then reports
+# what is missing. Idempotent per file, so a re-run copies nothing twice.
+APPLIANCE_MODEL_BUNDLE="${APPLIANCE_MODEL_BUNDLE:-/opt/razzfazz-appliance/razzfazz-models.tar.gz}"
+stage_appliance_model_bundle() {
+    [ -f "$APPLIANCE_MODEL_BUNDLE" ] || return 0
+    if [ -z "$(razzfazz_models_runtime)" ]; then
+        print_warning "Model bundle ${APPLIANCE_MODEL_BUNDLE} present but no models runtime is running — re-run 'rzfz post-install' once the stack is up (#2280)."
+        return 0
+    fi
+    print_step "Appliance: staging the hardware class's model bundle (${APPLIANCE_MODEL_BUNDLE})..."
+    local rc=0
+    MODEL_BUNDLE_SHA256="${MODEL_BUNDLE_SHA256:-}" razzfazz_apply_model_bundle "$APPLIANCE_MODEL_BUNDLE" || rc=$?
+    case "$rc" in
+        0) print_success "Model bundle staged into the box's models volume (#2280)." ;;
+        2) print_warning "The model bundle at ${APPLIANCE_MODEL_BUNDLE} was refused (see above) — no models staged from it."
+           print_warning "  Apply this box's bundle (class $(razzfazz_box_hardware_class 2>/dev/null || echo '<class>')): APPLIANCE_MODEL_BUNDLE=/path/to/razzfazz-<version>-models-<class>.tar.gz rzfz post-install --refresh" ;;
+        *) print_warning "The model bundle could not be staged — re-run 'rzfz post-install' once the stack is up (#2280)." ;;
+    esac
+    return 0
+}
+
+deploy_model() {
+    local name="$1" repo="$2" filename="$3" category="$4"
+    shift 4
+    local backend_params="$1" extra_json="${2:-}" mmproj_filename="${3:-}"
+
+    # #1447 (cutover C7a): one runtime, one schema. The dual-track branching
+    # (0.7.x legacy vs 2.x experimental) is gone with the `llm` profile. A box
+    # still answering 2.x is refused here, before the first POST — see
+    # _refuse_gpustack_2x for why one refusal beats a per-model 404.
+    _refuse_gpustack_2x || return 1
+    local prefix
+    prefix=$(gpustack_api_prefix)
+
+    # Check if model already exists
+    local existing
+    existing=$(gpustack_api GET "${prefix}/models" | \
+        python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for m in d.get('items',[]):
+    if m['name'] == '$name':
+        print(m['id'])
+        break
+else:
+    print('')
+" 2>/dev/null)
+
+    if [ -n "$existing" ]; then
+        print_info "Model '$name' already exists (id=$existing). Skipping deployment."
+        return 0
+    fi
+
+    # #184 P1 / WS7b — offline: register from the local GGUF (source=local_path),
+    # never huggingface.co. Assert the sideloaded GGUF is present first so a
+    # missing bundle fails CLEAR (pointing at verify-models) instead of GPUStack
+    # silently trying to reach the internet. Online/proxied keeps source=huggingface.
+    local _off="0"
+    if razzfazz_is_offline; then
+        _off="1"
+        if ! _local_gguf_present "$filename"; then
+            print_error "Offline: GGUF for '$name' not found at $(_local_model_path "$filename") in the gpustack-data volume."
+            print_info  "  Obtain an offline package with the models from your razzfazz.ai contact (Enterprise) or sideload via settings.<domain> → LLM/Models, then re-run. Check with 'rzfz verify-models'."
+            return 1
+        fi
+    fi
+
+    # Build backend_parameters JSON array (same on both runtimes)
+    local bp_json="[]"
+    if [ -n "$backend_params" ]; then
+        bp_json=$(echo "$backend_params" | python3 -c "
+import sys,json
+params = sys.stdin.read().strip().split()
+print(json.dumps(params))
+" 2>/dev/null)
+    fi
+
+    # #138: vision mmproj sidecar. Offline the HF cache path in --mmproj (or
+    # GPUStack's HF auto-detect) can never work — rewrite/add --mmproj to the
+    # sideloaded local-models/<repo>/ copy. If the sidecar wasn't bundled,
+    # STRIP the param instead: llama-box aborts on a nonexistent --mmproj
+    # path, and a text-only model beats no model. Online is a no-op.
+    if [ -n "$mmproj_filename" ]; then
+        local mmproj_mode="online"
+        if [ "$_off" = "1" ]; then
+            if _local_gguf_present "${repo}/${mmproj_filename}"; then
+                mmproj_mode="offline"
+            else
+                mmproj_mode="strip"
+                print_warning "Offline: vision sidecar for '$name' not found at $(_local_model_path "${repo}/${mmproj_filename}") — deploying TEXT-ONLY. Obtain an offline package with the models from your razzfazz.ai contact (Enterprise) and re-run."
+            fi
+        fi
+        local _bp_new
+        _bp_new=$(RZFZ_BP="$bp_json" RZFZ_REPO="$repo" RZFZ_MMPROJ="$mmproj_filename" \
+            RZFZ_MODE="$mmproj_mode" LLM_LIB_DIR="$SCRIPT_DIR/core/llm" python3 -c "
+import json, os, sys
+sys.path.insert(0, os.environ['LLM_LIB_DIR'])
+import model_source
+print(json.dumps(model_source.apply_mmproj(
+    json.loads(os.environ['RZFZ_BP']), os.environ['RZFZ_REPO'],
+    os.environ['RZFZ_MMPROJ'], mode=os.environ['RZFZ_MODE'])))
+" 2>/dev/null) && [ -n "$_bp_new" ] && bp_json="$_bp_new" || true  # keep prior params if the rewrite helper fails (set -e)
+    fi
+
+    # #2146: cpu_offloading follows the box. A CPU-only worker (HARDWARE=cpu:
+    # the gpustack cpu image, no /dev/kfd, no /dev/dri) has nothing but CPU to
+    # place a model on; a hardcoded False told GPUStack the model may not be
+    # offloaded to CPU on a worker that has only CPU, so EVERY model was
+    # unplaceable by construction ("Cannot find a suitable worker
+    # combination"), a 0.98 GiB embedding model included — measured on 0.79
+    # (ga.15 baseline, 30 GB RAM, 3.1 TB disk). A GPU box keeps False: models
+    # stay on the GPU, and the kworker-storm reasoning below still holds.
+    local _cpu_offload
+    _cpu_offload=$(llm_cpu_offloading_value)   # #2184: observed first, HARDWARE as the hint
+
+    local payload
+    # Payload for GPUStack 0.7.x: no cluster_id, no backend name — 0.7.x has a
+    # single bundled llama-box and routes by category alone. backend_parameters
+    # still carry the model tunings (ctx-size, parallel, flash-attn, cache
+    # types). The 2.x arm that stood beside this one is gone with #1447.
+    # Legacy v0.7.x: simpler schema. No cluster_id, no backend name —
+    # 0.7.x has a single bundled llama-box and uses categories alone for
+    # routing. Still passes backend_parameters so model tunings (ctx-size,
+    # parallel, flash-attn, cache types) carry over.
+    print_substep "Deploying model '$name' from $repo (runtime=0.7.x, legacy schema)..."
+    payload=$(LLM_LIB_DIR="$SCRIPT_DIR/core/llm" RZFZ_OFFLINE="$_off" python3 -c "
+import json, os, sys
+sys.path.insert(0, os.environ['LLM_LIB_DIR'])
+import model_source
+model = {
+    'name': '$name',
+    'categories': ['$category'],
+    'replicas': 1,
+    'backend_parameters': $bp_json,
+    'cpu_offloading': $_cpu_offload,
+    'placement_strategy': 'spread',
+    # restart_on_error=False: when a worker briefly drops out of master's
+    # heartbeat (e.g. during the Strix Halo amdgpu kworker storm at model
+    # load), master would otherwise re-spawn the model on another worker,
+    # which triggers ANOTHER load storm there → cascade. With False the
+    # existing instance stays placed; once the worker's heartbeat catches
+    # up, the same instance comes back ready. See memory
+    # project_strix_halo_kworker_storm.md.
+    'restart_on_error': False,
+}
+# #184 P1 / WS7b: online → source=huggingface (+ repo/filename); offline →
+# source=local_path pointing at the sideloaded GGUF. One place decides the split.
+model.update(model_source.model_source_fields('$filename', '$repo', offline=os.environ.get('RZFZ_OFFLINE') == '1'))
+extra = '$extra_json'
+if extra:
+    model.update(json.loads(extra))
+print(json.dumps(model))
+" 2>/dev/null)
+    local resp
+    resp=$(gpustack_api POST "${prefix}/models" "$payload")
+
+    local model_id
+    model_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+
+    if [ -z "$model_id" ]; then
+        print_error "Failed to deploy model '$name'."
+        print_info "Response: $(echo "$resp" | head -c 300)"
+        return 1
+    fi
+
+    # 0.7.x auto-exposes a deployed model on /v1-openai — no explicit route,
+    # which is what the removed 2.x arm had to create by hand (rc6.7 #45).
+    print_success "Model '$name' deployed (id=$model_id). Download starting..."
+}
+
+# M033 S19: single source-of-truth model enumerator. Emits one TAB-separated
+# row per model that ships under the given preset + active profiles, read from
+# core/llm/standard-models.yaml. Columns: alias  repo  filename  category  bp.
+# EVERY consumer (deploy_all_models / wait_for_all_models / Dify registration /
+# update_model post-deploy config) reads THIS, so no site can hardcode-drift
+# from the YAML again — the qwen3.5-vs-qwen3.6 class of bug (S19) that hung the
+# post-install wait-loop on a model name that doesn't exist.
+#
+# Preset filter:
+#   - models with `presets: [standard, developer]` (or empty) ship to both
+#   - `presets: [standard]` ships only under standard, etc.
+#   - `requires_profile: docling` ships only when the docling profile is active
+# Each field that could contain shell metacharacters (the backend_parameters
+# joined string, the filename) is just data passed straight through.
+# #2460: the hardware the catalogue is evaluated for. The box's .env HARDWARE,
+# EXCEPT on a CPU box whose GPUStack has a READY worker with GPU devices — a
+# master that serves through GPU workers (prod: HARDWARE=cpu, qwen3.6 on the AMD
+# worker 10.163) is the cluster's family, or the #2158 CPU catalogue scales its
+# running chat model to 0 and swaps every consumer to the 4B. An exported
+# RZFZ_CATALOG_HARDWARE (set once by sync_consumers) wins. Silent: callers use
+# it inside $(...).
+_catalog_hardware() {
+    # `--measured`: print 1 when the LLM Manager's worker list names a joined GPU
+    # worker (the only thing that may change the stored family), else 0 (#2536 N1).
+    local _measured=0
+    [ "${1:-}" = "--measured" ] && _measured=1
+    if [ "$_measured" = 0 ] && [ -n "${RZFZ_CATALOG_HARDWARE:-}" ]; then
+        printf '%s' "$RZFZ_CATALOG_HARDWARE"; return 0
+    fi
+    local hw workers
+    hw=$(read_env_value "$ENV_FILE" HARDWARE 2>/dev/null) || hw=""
+    # #2512: a `fleet` master hosts no models — the catalogue is evaluated for
+    # the GPU workers joined to the LLM Manager (never for the CPU master, never
+    # `cpu`: no 4B on a fleet). This is what makes prod's forced
+    # RZFZ_CATALOG_HARDWARE=amd unnecessary; a still-set override wins above.
+    if [ "$(llm_master_role "$ENV_FILE" 2>/dev/null)" = "fleet" ]; then
+        local _mw="" _master
+        if declare -F _llmm_admin_api >/dev/null 2>&1; then
+            _mw=$(_llmm_admin_api GET /api/workers 2>/dev/null) || _mw=""
+        fi
+        _master=$(read_env_value "$ENV_FILE" LLM_WORKER_NAME 2>/dev/null) || _master=""
+        # #2536: no worker list = no measurement. Keep the family measured last
+        # time instead of answering the unmeasured default (it would flap).
+        # #2536 N1: an empty list, or one with no joined GPU worker (master only,
+        # pending, external), is no measurement either — keep the stored family.
+        local _kept
+        _kept=$(read_env_value "$ENV_FILE" LLM_FLEET_FAMILY 2>/dev/null) || _kept=""
+        case "$_kept" in amd|nvidia|apple) ;; *) _kept="" ;; esac
+        MEASURED="$_measured" KEPT="$_kept" HW="$hw" W="$_mw" MASTER="${_master:-master}" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import json, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+try:
+    rows = json.loads(os.environ.get('W') or '[]')
+except Exception:
+    rows = []
+if isinstance(rows, dict):
+    rows = rows.get('workers') or rows.get('items') or []
+if not isinstance(rows, list):
+    rows = []
+gpu = hc.fleet_gpu_workers(rows, os.environ.get('MASTER', ''))
+if os.environ.get('MEASURED') == '1':
+    print('1' if gpu else '0', end='')
+elif not gpu and os.environ.get('KEPT'):
+    print(os.environ['KEPT'], end='')
+else:
+    print(hc.fleet_family(os.environ.get('HW', ''), rows, os.environ.get('MASTER', '')), end='')
+" 2>/dev/null || { [ "$_measured" = 1 ] && printf '0' || printf '%s' "amd"; }
+        return 0
+    fi
+    [ "$_measured" = 1 ] && { printf '0'; return 0; }
+    workers=$(gpustack_api GET "$(gpustack_api_prefix)/workers" 2>/dev/null) || workers=""
+    HW="$hw" W="$workers" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import json, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+try:
+    items = (json.loads(os.environ.get('W') or '{}') or {}).get('items') or []
+except Exception:
+    items = []
+print(hc.cluster_family(os.environ.get('HW', ''), items), end='')
+" 2>/dev/null || printf '%s' "$hw"
+}
+
+# #2460: resolve the catalogue hardware ONCE in the current shell, export it for
+# core/llm/sync.py and every later $(...) call, and say so when it differs from
+# the box's HARDWARE — the operator sees why a CPU master keeps qwen3.6.
+_export_catalog_hardware() {
+    [ -n "${RZFZ_CATALOG_HARDWARE:-}" ] && return 0
+    local _hw _chw
+    _hw=$(read_env_value "$ENV_FILE" HARDWARE 2>/dev/null) || _hw=""
+    _chw=$(_catalog_hardware)
+    [ -n "$_chw" ] || return 0
+    export RZFZ_CATALOG_HARDWARE="$_chw"
+    # #2536 item 16: the containers that read .env (the Agent Manager's model
+    # lists) cannot ask the LLM Manager for the fleet's family. Persist it,
+    # and recreate the one reader when it changed.
+    # Only a MEASURED family is persisted: when the manager gives no worker list
+    # the stored value stays (explicit probe, not inferred from the value amd).
+    if [ "$(llm_master_role "$ENV_FILE" 2>/dev/null)" = "fleet" ]; then
+        local _prev_ff _answered=""
+        _prev_ff=$(read_env_value "$ENV_FILE" LLM_FLEET_FAMILY 2>/dev/null) || _prev_ff=""
+        # #2536 N1: persist only when the list names a joined GPU worker.
+        [ "$(_catalog_hardware --measured)" = 1 ] && _answered=1
+        if [ -n "$_answered" ] && [ "$_prev_ff" != "$_chw" ]; then
+            update_env_value "$ENV_FILE" LLM_FLEET_FAMILY "$_chw"
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx agent-manager; then
+                docker compose up -d --no-deps --force-recreate agent-manager >/dev/null 2>&1 \
+                    || print_warning "agent-manager recreate returned non-zero — its model lists follow LLM_FLEET_FAMILY=${_chw} at its next recreate (#2536)."
+            fi
+        fi
+    fi
+    if [ "$_chw" != "$_hw" ] && [ "$(llm_master_role "$ENV_FILE" 2>/dev/null)" = "fleet" ]; then
+        print_info "LLM_MASTER_ROLE=fleet: this master hosts no models — the model catalogue is evaluated for the joined GPU workers (${_chw}), not HARDWARE=${_hw} (#2512)."
+    elif [ "$_chw" != "$_hw" ]; then
+        print_info "HARDWARE=${_hw}, but GPUStack serves through a READY ${_chw} worker — the model catalogue is evaluated for ${_chw}, not the CPU master (#2460)."
+    fi
+}
+
+# _model_replicas <name>: the replicas GPUStack reports for a registered model
+# (empty when it is not registered). #2460: what the log says is MEASURED.
+_model_replicas() {
+    local n="$1" prefix
+    prefix=$(gpustack_api_prefix)
+    gpustack_api GET "${prefix}/models" | N="$n" python3 -c "
+import sys, json, os
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+for m in d.get('items', []):
+    if m.get('name') == os.environ['N']:
+        print(m.get('replicas', 0)); break
+" 2>/dev/null
+}
+
+_model_rows_for_preset() {
+    local preset="$1" hw
+    local active_profiles="${COMPOSE_PROFILES:-}"
+    # #2158: the box's hardware class decides which entries are always-on here
+    # (the GPUStack branch and the consumer registrations run on the box's own
+    # worker); the manager-native deploy uses the worker the manager reports.
+    hw=$(_catalog_hardware)   # #2460: the cluster's family, not the CPU master's
+    PRESET="$preset" PROFILES="$active_profiles" HW="$hw" ENVF="${ENV_FILE:-}" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 - <<'PYEOF'
+import os, sys
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML not available — install python3-yaml or adjust the script.", file=sys.stderr)
+    sys.exit(2)
+sys.path.insert(0, os.path.dirname(os.environ["YAML_PATH"]))
+import hardware_catalog as hc   # #2158: the one hardware rule
+
+preset = os.environ["PRESET"]
+profiles = set((os.environ.get("PROFILES", "") or "").split(","))
+yaml_path = os.environ["YAML_PATH"]
+
+with open(yaml_path) as f:
+    spec = yaml.safe_load(f) or {}
+
+# Map YAML role(s) → GPUStack category. Models can declare multiple roles;
+# pick the first one that maps to a known GPUStack category.
+ROLE_TO_CATEGORY = {
+    "embedding": "embedding",
+    "reranker": "reranker",
+    # everything else (chat / coding / general / vision-* etc.) goes to llm
+}
+
+def category_for(roles):
+    for r in roles:
+        if r in ROLE_TO_CATEGORY:
+            return ROLE_TO_CATEGORY[r]
+    return "llm"
+
+for alias, m in (spec.get("models") or {}).items():
+    presets = m.get("presets") or ["standard", "developer"]
+    if preset not in presets:
+        continue
+    needs_profile = m.get("requires_profile")
+    if needs_profile and needs_profile not in profiles:
+        continue
+    repo = m.get("huggingface_repo_id", "")
+    filename = m.get("huggingface_filename", "")
+    if not (repo and filename):
+        # Skip placeholder/aspirational models (no GGUF yet).
+        continue
+    bp = " ".join(m.get("backend_parameters") or [])
+    roles = m.get("roles") or []
+    cat = category_for(roles)
+    # Column 6 = comma-joined roles. The GPUStack deploy *category* (col 4)
+    # sends doc-conversion models like granite-docling to "llm", but the
+    # Dify/OWUI chat-registration sites must key on the `chat` ROLE so they
+    # don't register a non-chat model as a selectable chat LLM (S19).
+    # Col 7 = auto_start ("true"/"false"). auto_start:false models are registered
+    # then scaled to 0 replicas (deployed last, on-demand — ga.1 Issue I) so the
+    # sole always-on default (qwen3.6 at ctx=1M par=4) keeps the VRAM and the box
+    # is chat-functional without waiting on a multi-GB spare download.
+    # #2727: an existing box's pinned embedding stays always-on (Dify's default
+    # must be able to follow it).
+    auto_start = str(hc.entry_auto_start_on_box(spec, alias, os.environ.get("HW"),
+                                                os.environ.get("ENVF") or None)).lower()
+    # Col 8 = vision mmproj sidecar filename ('' for text-only models). #138:
+    # deploy_model needs it to rewrite --mmproj at the local-models copy on
+    # offline boxes. Shared derivation with the packaging enumerator.
+    sys.path.insert(0, os.path.dirname(yaml_path))
+    import expected_models as _em
+    mmproj = _em.mmproj_filename(m)
+    print("\t".join([alias, repo, filename, cat, bp, ",".join(roles), auto_start, mmproj]))
+PYEOF
+}
+
+# scale_model_to_zero <name>: PUT the gpustack model with replicas=0 so it stays
+# registered + its GGUF cached on disk, but no instance runs (0 VRAM). Best-effort:
+# a failure leaves the model running (the pre-2026.06 behavior) and only warns.
+scale_model_to_zero() {
+    local name="$1" prefix mid payload
+    prefix=$(gpustack_api_prefix)
+    mid=$(gpustack_api GET "${prefix}/models" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for m in d.get('items',[]):
+    if m.get('name')=='$name': print(m.get('id','')); break
+" 2>/dev/null)
+    [ -z "$mid" ] && { print_warning "scale-to-0: model '$name' not found (left as-is)."; return 0; }
+    payload=$(gpustack_api GET "${prefix}/models/$mid" | python3 -c "
+import sys,json
+m=json.load(sys.stdin); m['replicas']=0
+for k in ('id','created_at','updated_at','deleted_at'): m.pop(k,None)
+print(json.dumps(m))
+" 2>/dev/null)
+    if [ -n "$payload" ] && gpustack_api PUT "${prefix}/models/$mid" "$payload" >/dev/null 2>&1; then
+        print_substep "Model '$name' scaled to 0 replicas (downloaded, not running)."
+    else
+        print_warning "scale-to-0 for '$name' failed (best-effort — model left running; stop it from the GPUStack UI)."
+    fi
+}
+
+# _model_exists <name>: true if a GPUStack model with this name is already
+# registered. Used by deploy_all_models PASS 1 so a RE-RUN doesn't block an hour
+# in wait_for_model on an auto_start:false model that was pre-downloaded + scaled
+# to 0 in a prior run (no instance will ever appear at replicas=0 → 3600s timeout).
+_model_exists() {
+    local n="$1" prefix
+    prefix=$(gpustack_api_prefix)
+    gpustack_api GET "${prefix}/models" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print('yes' if any(m.get('name')=='$n' for m in d.get('items',[])) else '')
+" 2>/dev/null | grep -q yes
+}
+
+deploy_all_models() {
+    local preset="$1"
+    print_step "GPUStack: Deploying models (preset: $preset)..."
+
+    # Appliance offline install: stage the baked model GGUFs into the gpustack-data
+    # volume BEFORE deploy (so the source=local_path split below finds them). No-op
+    # when there's no baked package (normal online installs). See the function.
+    stage_baked_appliance_models
+    # #2280: and the appliance's per-class model bundle (no-op without one).
+    stage_appliance_model_bundle
+
+    # #184 P1 / WS7b: OFFLINE no longer skips model deployment wholesale (the
+    # WS2b behaviour) — it registers from the GGUFs sideloaded into the
+    # gpustack-data volume ($RAZZFAZZ_LOCAL_MODELS_DIR) via source=local_path
+    # (deploy_model handles the payload split). GPUStack never reaches
+    # huggingface.co. A model whose GGUF wasn't bundled is SKIPPED with a clear
+    # pointer — not a 1 h wait-loop on a download that can't happen offline.
+    # Online/proxied is unchanged (source=huggingface, GGUF pulled at load).
+    local _offline=false
+    if razzfazz_is_offline; then
+        _offline=true
+        print_info "Offline (RAZZFAZZ_NETWORK_MODE=offline): deploying models from local GGUFs in the gpustack-data volume (${RAZZFAZZ_LOCAL_MODELS_DIR}); models not bundled are skipped. Verify with 'rzfz verify-models'."
+    fi
+
+    # Model set read from standard-models.yaml via _model_rows_for_preset (S19).
+    local model_list
+    model_list=$(_model_rows_for_preset "$preset")
+
+    if [ -z "$model_list" ]; then
+        print_warning "No models to deploy for preset '$preset' — check standard-models.yaml."
+        return 0
+    fi
+
+    # Two passes: PASS 1 (pass=true) deploys the ALWAYS-ON models (qwen3.6 default +
+    # embedding + reranker) FIRST so the box becomes chat-functional as soon as
+    # qwen3.6 is running — wait_for_all_models below blocks on exactly these. PASS 2
+    # (pass=false) then registers the auto_start:false spares (gemma4, coder-next)
+    # and scales them to 0 WITHOUT waiting on their download.
+    #
+    # ga.1 (Issue I) reorder rationale: the previous order (spares first — download
+    # the 26.9 GB gemma4 + wait, then deploy qwen3.6) meant qwen3.6 wasn't even
+    # submitted until the spare downloads finished → box unusable for ~1.5-2 h. The
+    # spares are on-demand extras; they must not gate time-to-chat. Deploying them
+    # last + scaling to 0 immediately (below) also avoids briefly loading a second
+    # large model into VRAM alongside the running qwen3.6 (host-OOM on the
+    # unified-memory Strix Halo — project_gemma4_swa_full_oom_trap), which the old
+    # "spares while VRAM is free" ordering was working around.
+    # Parse with `cut -fN` not `IFS=$'\t' read` (read collapses empty tab fields — S19).
+    local pass
+    for pass in true false; do
+        while IFS= read -r _row; do
+            [ -z "$_row" ] && continue
+            local alias repo filename category backend_params auto_start mmproj
+            alias=$(printf '%s' "$_row" | cut -f1)
+            repo=$(printf '%s' "$_row" | cut -f2)
+            filename=$(printf '%s' "$_row" | cut -f3)
+            category=$(printf '%s' "$_row" | cut -f4)
+            backend_params=$(printf '%s' "$_row" | cut -f5)
+            auto_start=$(printf '%s' "$_row" | cut -f7)
+            mmproj=$(printf '%s' "$_row" | cut -f8)
+            [ "$auto_start" = "false" ] || auto_start=true   # default true when col absent
+            [ -z "$alias" ] && continue
+            [ "$auto_start" != "$pass" ] && continue
+            # Detect prior existence BEFORE deploy purely for the log line below
+            # (a re-run leaves the spare already registered + at 0 replicas).
+            local _pre_exists=false
+            if [ "$pass" = "false" ] && _model_exists "$alias"; then
+                _pre_exists=true
+            fi
+            # #184 P1 / WS7b: offline, only deploy models whose GGUF is actually
+            # sideloaded — skip the rest cleanly so wait_for_all_models doesn't
+            # block on a download that can't run offline.
+            if [ "$_offline" = true ] && ! _local_gguf_present "$filename"; then
+                print_info "Offline: skipping '$alias' — no local GGUF at $(_local_model_path "$filename"). Obtain an offline package with the models from your razzfazz.ai contact (Enterprise) or sideload; check 'rzfz verify-models'."
+                continue
+            fi
+            deploy_model "$alias" "$repo" "$filename" "$category" "$backend_params" "" "$mmproj"
+            if [ "$pass" = "false" ]; then
+                # ga.1 (Issue I): NEVER block on a spare's download and NEVER let it
+                # sit at replicas=1 (which would try to load it into VRAM next to the
+                # running qwen3.6). Scale to 0 immediately so it's registered +
+                # visible in the GPUStack UI; the GGUF downloads on demand the first
+                # time an operator starts it from the UI. This is what removes the
+                # ~1.5-2 h time-to-chat block. --skip-wait no longer changes spare
+                # behaviour here (spares are always non-blocking now).
+                # #2460: a model that EXISTED before this run is never scaled down.
+                # The spare rule keeps a FRESH registration from loading next to
+                # the chat model; it must not stop an operator's running
+                # deployment (0.79, 2026-09-23: qwen3.6 1→0 while this line said
+                # "leaving at 0"). The log reports the measured replicas.
+                if [ "$_pre_exists" = true ]; then
+                    local _rep
+                    _rep=$(_model_replicas "$alias")
+                    if [ "${_rep:-0}" = "0" ]; then
+                        print_info "auto_start:false model '$alias' already present at 0 replicas (measured) — left as is."
+                    else
+                        print_info "auto_start:false model '$alias' already present with ${_rep} replica(s) (measured) — an existing deployment is never scaled down (#2460)."
+                    fi
+                else
+                    print_info "auto_start:false model '$alias' registered (on-demand: not pre-downloaded; starts from the GPUStack UI)."
+                    scale_model_to_zero "$alias"
+                fi
+            fi
+        done <<< "$model_list"
+    done
+
+    print_success "All models for preset '$preset' submitted (always-on deployed first; auto_start:false spares registered on-demand)."
+}
+
+wait_for_all_models() {
+    local preset="$1"
+    print_step "GPUStack: Waiting for all models to be ready..."
+    print_info "This can take 30-60 minutes depending on download speeds."
+    
+    # S19: wait for exactly the models deploy_all_models submitted, read from
+    # the same standard-models.yaml enumerator. No hardcoded list to drift —
+    # this is the site that hung on the non-existent "qwen3.5" alias.
+    # Each row: alias \t repo \t filename \t category \t bp \t roles
+    local rows
+    rows=$(_model_rows_for_preset "$preset")
+
+    local failed_critical="" failed_optional=""
+    while IFS= read -r _row; do
+        [ -z "$_row" ] && continue
+        local model roles auto_start filename
+        model=$(printf '%s' "$_row" | cut -f1)
+        filename=$(printf '%s' "$_row" | cut -f3)
+        roles=$(printf '%s' "$_row" | cut -f6)
+        auto_start=$(printf '%s' "$_row" | cut -f7)
+        # auto_start:false models are registered + scaled to 0 in deploy_all_models
+        # (on-demand, ga.1 Issue I) — don't wait for them to be "running" (they aren't).
+        [ "$auto_start" = "false" ] && continue
+        # #184 P1 / WS7b: offline, deploy_all_models only registers models whose
+        # GGUF was bundled — don't wait on one that was skipped (it never appears).
+        if razzfazz_is_offline && ! _local_gguf_present "$filename"; then
+            print_info "Offline: not waiting on '$model' — its GGUF was not bundled (skipped at deploy). Check 'rzfz verify-models'."
+            continue
+        fi
+        if ! wait_for_model "$model" 3600; then
+            # chat + embedding are CRITICAL — the stack is unusable without
+            # them. Everything else (reranker, etc.) is OPTIONAL and must not
+            # abort the rest of provisioning (OWUI / Dify / Speaches config).
+            if echo ",$roles," | grep -qE ',chat,|,embedding,'; then
+                failed_critical="$failed_critical $model"
+            else
+                failed_optional="$failed_optional $model"
+            fi
+        fi
+    done <<< "$rows"
+
+    if [ -n "$failed_optional" ]; then
+        print_warning "Optional model(s) failed to start:$failed_optional — continuing provisioning (stack stays usable; re-deploy from the GPUStack UI later)."
+    fi
+    if [ -n "$failed_critical" ]; then
+        print_error "CRITICAL model(s) failed to start:$failed_critical — chat/embedding unavailable."
+        return 1
+    fi
+    # #178 review (LOW, folded in): an optional-only failure is not a clean
+    # pass — return a distinct code (2) so the call site can record gpustack
+    # as WARN instead of OK, keeping the OK/WARN/FAIL vocabulary consistent
+    # with how LightRAG/Cognee already report a degraded-but-not-fatal outcome.
+    if [ -n "$failed_optional" ]; then
+        return 2
+    fi
+    print_success "All models are running."
+    return 0
+}
+
+# ── #429: prefetch auto_start:false spare GGUFs (online boxes) ───────────────
+# ga.1 (Issue I) took the spares off the critical path; that left ONLINE
+# installs permanently incomplete, and a box later switched to offline can
+# NEVER fetch them. This closes the gap without touching the ga.1 timeline:
+# AFTER the always-on models are up, a BACKGROUND job downloads the missing
+# spare GGUFs.
+#
+# #640 review (empirical): GPUStack caches in the OFFICIAL
+# huggingface_hub layout (models--{org}--{repo}/{blobs,snapshots,refs}) — so
+# the download runs INSIDE the gpustack container via huggingface_hub
+# (snapshot_download, a GPUStack dependency): layout guaranteed correct incl.
+# resume, glob patterns handled natively (allow_patterns), no /var/tmp
+# staging, no docker cp. Container name is detected (#278 variants:
+# gpustack | gpustack-legacy | gpustack-cpu), and the log lives under the
+# invoking user's home — post-install does not run as root (review SF1/SF2).
+PREFETCH_LOG="${HOME}/.razzfazz/model-prefetch.log"
+PREFETCH_LOCK="${HOME}/.razzfazz/model-prefetch.lock"
+
+_gpustack_container() {
+    local c
+    for c in gpustack gpustack-legacy gpustack-cpu; do
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c"; then
+            printf '%s\n' "$c"; return 0
+        fi
+    done
+    return 1
+}
+
+_hf_cached_present() {
+    # $1 container, $2 repo, $3 filename (may be a glob / carry a sub-dir).
+    # Checks the OFFICIAL hub layout (snapshots/<rev>/<file>) plus the flat
+    # legacy form, mirroring expected_models.model_present.
+    local cn="$1" repo="$2" fn="${3#/}" hub
+    hub="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
+    docker exec "$cn" sh -c         "ls -1 /var/lib/gpustack/cache/huggingface/${hub}/snapshots/*/${fn}               /var/lib/gpustack/cache/huggingface/${repo}/${fn} 2>/dev/null | head -n1 | grep -q ." 2>/dev/null
+}
+
+prefetch_spare_ggufs() {
+    local preset="$1"
+    razzfazz_is_offline && return 0
+    [ "${SKIP_MODEL_PREFETCH:-false}" = "true" ] && { print_info "Spare-model prefetch skipped (SKIP_MODEL_PREFETCH=true)."; return 0; }
+    local cn
+    cn=$(_gpustack_container) || return 0
+    mkdir -p "${HOME}/.razzfazz" 2>/dev/null || return 0
+    local rows _row alias repo filename auto_start missing=""
+    rows=$(_model_rows_for_preset "$preset")
+    while IFS= read -r _row; do
+        [ -z "$_row" ] && continue
+        alias=$(printf '%s' "$_row" | cut -f1)
+        repo=$(printf '%s' "$_row" | cut -f2)
+        filename=$(printf '%s' "$_row" | cut -f3)
+        auto_start=$(printf '%s' "$_row" | cut -f7)
+        [ "$auto_start" = "false" ] || continue
+        if _hf_cached_present "$cn" "$repo" "$filename" || _local_gguf_present "$filename"; then
+            continue
+        fi
+        missing="${missing}${alias}\t${repo}\t${filename}\n"
+    done <<< "$rows"
+    if [ -z "$missing" ]; then
+        print_info "All auto_start:false spare GGUFs already present — nothing to prefetch."
+        return 0
+    fi
+    print_step "Prefetching spare model GGUFs in the background (log: ${PREFETCH_LOG})..."
+    print_info "Chat is already up — this does not block. 'rzfz verify-models' flips the spares from deferred to present as downloads finish."
+    printf '%b' "$missing" | nohup env PREFETCH_CN="$cn"         flock -n "$PREFETCH_LOCK"         bash -c '
+        while IFS=$(printf "\t") read -r alias repo filename; do
+            [ -z "$alias" ] && continue
+            echo "[prefetch] $(date -Is) $alias ($repo :: $filename)"
+            # snapshot_download inside the gpustack container: official hub
+            # layout, native glob handling, built-in resume. #640 re-review
+            # (empirical, 0.208): GPUStack passes cache_dir PROGRAMMATICALLY —
+            # models-- sits DIRECTLY under .../huggingface, no hub/ level.
+            # HF_HOME would make hf_hub write to .../hub/models--… (one level
+            # too deep, invisible to GPUStack AND our matchers); HF_HUB_CACHE
+            # targets the model cache itself.
+            if docker exec -e HF_HUB_CACHE=/var/lib/gpustack/cache/huggingface "$PREFETCH_CN"                 python3 -c "
+import sys
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id=sys.argv[1], allow_patterns=[sys.argv[2]])
+" "$repo" "${filename#/}"; then
+                echo "[prefetch] done: $alias"
+            else
+                echo "[prefetch] FAILED: $alias (re-run rzfz post-install to retry)"
+            fi
+        done
+        echo "[prefetch] $(date -Is) all spares processed."
+        ' >> "$PREFETCH_LOG" 2>&1 &
+    disown 2>/dev/null || true
+}
+
+# Resolve the always-on default chat alias from standard-models.yaml
+# (`defaults.chat`). This is the single model every consumer (Dify/Onyx/
+# OpenWebUI default + the verify smoke) should wire as its default
+# text-generation model. auto_start:false models (gemma4, qwen3-coder-next)
+# are registered but scaled to 0 replicas (on-demand) — wiring them as the live
+# default 503s on credential validation, so they must NOT be the default.
+_default_chat_alias() {
+    local a
+    # #2158: the box's hardware class may override the default (a CPU box
+    # cannot place the fleet default chat model).
+    a=$(HW="$(_catalog_hardware)" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import yaml, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+print(hc.defaults_for(yaml.safe_load(open(os.environ['YAML_PATH'])), os.environ.get('HW')).get('chat', ''))
+" 2>/dev/null)
+    echo "${a:-qwen3.6}"
+}
+
+# Resolve the fleet-standard embedding alias from standard-models.yaml
+# (`defaults.embedding`). qwen3-embedding (8K ctx, dim 4096) replaced nomic
+# (2048-tok cap) as the standard — Dify's default text-embedding must follow it
+# so newly-created knowledge bases use the same model as cognee/lightrag/OWUI RAG.
+_default_embedding_alias() {
+    local a
+    # #2158: the box's hardware class may override the default (a CPU box
+    # cannot place the fleet default chat model).
+    # #2727: an existing box keeps the embedding its vector stores were built on.
+    a=$(HW="$(_catalog_hardware)" ENVF="${ENV_FILE:-}" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import yaml, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+print(hc.defaults_for(yaml.safe_load(open(os.environ['YAML_PATH'])), os.environ.get('HW'), os.environ.get('ENVF') or None).get('embedding', ''))
+" 2>/dev/null)
+    echo "${a:-qwen3-embedding}"
+}
+
+# The declared output dimension of the fleet-standard embedding model. Callers
+# that must state a dim to a consumer (Onyx's search-settings, #1786) read it
+# from the manifest instead of carrying a literal: `768` was nomic's, and a dim
+# that disagrees with what the endpoint really emits is the #70 failure —
+# pgvector tables built at one width, vectors arriving at another, inserts
+# failing with nothing in the run output to explain why.
+_default_embedding_dim() {
+    local d
+    # #2727: the dimension of the model THIS box uses (class default or the
+    # existing box's own), never the fleet default's.
+    d=$(HW="$(_catalog_hardware)" ENVF="${ENV_FILE:-}" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import yaml, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+spec = yaml.safe_load(open(os.environ['YAML_PATH']))
+alias = hc.defaults_for(spec, os.environ.get('HW'), os.environ.get('ENVF') or None).get('embedding', '')
+print(spec['models'].get(alias, {}).get('embedding_dimensions', ''))
+" 2>/dev/null)
+    printf '%s' "$d" | grep -Eq '^[0-9]+$' || d=""
+    # EMPTY when the manifest cannot be read — deliberately NOT a literal
+    # fallback (review of #1793). A dimension is not a name: a wrong alias makes
+    # a consumer point at a model that is not there and the failure is loud,
+    # while a wrong dimension builds the pgvector tables at one width and lets
+    # vectors arrive at another — inserts fail with nothing in the run output to
+    # explain it (#70). The caller must decide, and `_default_embedding_alias`
+    # keeps its literal fallback because a name has no such property.
+    # Same shape as the LightRAG path, which warns and leaves the value as-is
+    # rather than writing a number it cannot justify.
+    printf '%s' "$d"
+}
+
+# _manifest_per_slot_context <alias> <fallback>
+# `models.<alias>.per_slot_context` from standard-models.yaml — the usable
+# context of ONE request slot (ctx-size ÷ parallel), which is exactly what an
+# OpenAI-compatible consumer's `context_size` credential means. #1248 needs it
+# because a Dify provider entry carries a DECLARED context (no discovery exists —
+# see _dify_register_models) and the manifest is the only place that knows the
+# real number: hardcoding it is how the GPUStack branch ended up declaring 32768
+# for a qwen3-embedding that serves 8192 (#1058's batch/ubatch fix moved it).
+_manifest_per_slot_context() {
+    local alias="$1" fallback="$2" v
+    v=$(ALIAS="$alias" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import os, yaml
+spec = yaml.safe_load(open(os.environ['YAML_PATH'], encoding='utf-8')) or {}
+m = (spec.get('models') or {}).get(os.environ['ALIAS']) or {}
+print(m.get('per_slot_context') or '')
+" 2>/dev/null) || v=""
+    printf '%s' "${v:-$fallback}"
+}
+
+# _manifest_roles <alias> → `models.<alias>.roles` from standard-models.yaml,
+# comma-joined, or nothing. Looked up by ALIAS, whatever the preset: #3228 needs
+# the roles of a model the manager serves from a worker node, which is not in the
+# master's preset rows (`_model_rows_for_preset` filters by preset), and the
+# vision capability Dify gates on is decided by these roles.
+_manifest_roles() {
+    ALIAS="$1" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import os, yaml
+spec = yaml.safe_load(open(os.environ['YAML_PATH'], encoding='utf-8')) or {}
+m = (spec.get('models') or {}).get(os.environ['ALIAS']) or {}
+print(','.join(str(r) for r in (m.get('roles') or [])))
+" 2>/dev/null || true
+}
+
+# _dify_manager_llm_extras <roles> → the extra credential JSON for a chat model
+# the LLM Manager serves, as Dify's openai_api_compatible plugin reads it (#1966,
+# #1979; the reasons are at the call site in dify_configure_manager_models).
+# #3228: ONE copy for every path that writes the LLM Manager credential. The
+# `--refresh` wiring (wire_llm_manager_consumers) used to write it WITHOUT these
+# keys; Dify's update REPLACES the stored credential, so every upgrade put a
+# worker-served qwen3.6 back to strict / no vision / no structured output, and
+# nothing restored it.
+_dify_manager_llm_extras() {
+    local roles="$1" extra
+    extra='{"max_tokens_to_sample":"8192","agent_thought_support":"supported","compatibility_mode":"extended","function_calling_type":"tool_call","stream_function_calling":"supported","structured_output_support":"supported"'
+    case ",${roles}," in
+        *,vision,*|*,vision-*) extra="${extra},\"vision_support\":\"support\"}" ;;
+        *)                     extra="${extra},\"vision_support\":\"no_support\"}" ;;
+    esac
+    printf '%s' "$extra"
+}
+
+# #2420 — the embedding dimension is MEASURED from the model the consumer is
+# configured with, and the pair is kept consistent on every post-install run,
+# `--refresh` included.
+#
+# Measured on 0.208 after the 2026.09-ga.1 upgrade: COGNEE_EMBEDDING_MODEL was
+# still the pre-2026-06-19 `nomic-embed-text` (768 dims, an explicit value the
+# set-if-empty defaults never touch) while COGNEE_EMBEDDING_DIM read 4096; every
+# vector write failed the pgvector check, cognee caught it "failed open", and
+# cognify/search both returned 200 over a brain that was permanently empty.
+# The upgrade's `--refresh` never reached update_env_model_config, so nothing
+# ever compared the two. The same alias returns 2560 on prod's backend and 4096
+# on 0.208's, so the number cannot be defaulted: it is asked of the endpoint
+# that will serve the consumer, AFTER the models are up (the --preset path's
+# probe runs before the engines exist and silently takes the manifest number),
+# and when that endpoint does not serve the configured model at all, the model
+# moves to the fleet default first.
+# EMBED_DIM-BEGIN
+# _measure_embedding_dim <alias> → prints the vector length the box's LLM
+# endpoint emits for <alias>, or nothing. The manager (canonical, #1445) is
+# asked first with the consumer key post-install minted; GPUStack second on a
+# box that still runs it standalone.
+_measure_embedding_dim() {
+    local alias="$1" key dim=""
+    [ -n "$alias" ] || return 0
+    key="${LLM_MANAGER_OWUI_KEY:-}"
+    [ -n "$key" ] || key=$(read_env_value "${ENV_FILE:-.env}" LLM_MANAGER_OWUI_KEY 2>/dev/null) || key=""
+    if [ -n "$key" ]; then
+        dim=$(curl -sf --max-time 30 -K <(printf 'header = "Authorization: Bearer %s"\n' "$key") -H "Content-Type: application/json" \
+            "http://127.0.0.1:${LLM_MANAGER_PORT:-8091}/v1/embeddings" \
+            -d "{\"model\":\"${alias}\",\"input\":\"x\"}" 2>/dev/null \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['data'][0]['embedding']))" 2>/dev/null) || dim=""
+    fi
+    if ! printf '%s' "$dim" | grep -Eq '^[0-9]+$'; then
+        dim=$(gpustack_api POST /v1-openai/embeddings "{\"model\": \"$alias\", \"input\": \"x\"}" 2>/dev/null \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['data'][0]['embedding']))" 2>/dev/null) || dim=""
+    fi
+    printf '%s' "$dim" | grep -Eq '^[0-9]+$' && printf '%s' "$dim"
+    return 0
+}
+
+# reconcile_embedding_dims — for every RAG consumer whose profile is active,
+# make <PREFIX>_EMBEDDING_DIM equal the measured length of <PREFIX>_EMBEDDING_MODEL;
+# a configured model the endpoint does not serve is replaced by the fleet
+# default alias first. Writes only on a difference; says what it did.
+reconcile_embedding_dims() {
+    local default_alias
+    default_alias=$(_default_embedding_alias); [ -n "$default_alias" ] || default_alias="qwen3-embedding"
+    local pair profile prefix model_key dim_key model dim measured changed=0
+    for pair in "cognee:COGNEE" "lightrag:LIGHTRAG"; do
+        profile="${pair%%:*}"; prefix="${pair#*:}"
+        echo "${COMPOSE_PROFILES:-}" | grep -qw "$profile" || continue
+        model_key="${prefix}_EMBEDDING_MODEL"; dim_key="${prefix}_EMBEDDING_DIM"
+        model=$(read_env_value "$ENV_FILE" "$model_key"); dim=$(read_env_value "$ENV_FILE" "$dim_key")
+        [ -n "$model" ] || model="$default_alias"
+        measured=$(_measure_embedding_dim "$model")
+        if [ -z "$measured" ] && [ "$model" != "$default_alias" ]; then
+            # The configured model is not served here (0.208: nomic-embed-text
+            # against a manager that serves qwen3-embedding). The default is.
+            measured=$(_measure_embedding_dim "$default_alias")
+            if [ -n "$measured" ]; then
+                print_warning "  ${profile}: ${model_key}=${model} is not served by this box's LLM endpoint — switched to the fleet default ${default_alias} (#2420)."
+                update_env_value "$ENV_FILE" "$model_key" "$default_alias"
+                model="$default_alias"; changed=1
+            fi
+        fi
+        if [ -z "$measured" ]; then
+            print_warning "  ${profile}: could not measure the embedding dimension of ${model} — ${dim_key} left at '${dim}' (verify it matches the served model, #2420)."
+            continue
+        fi
+        if [ "$dim" != "$measured" ]; then
+            print_warning "  ${profile}: ${dim_key}=${dim:-<empty>} but ${model} emits ${measured}-dim vectors — realigned to ${measured} (#2420). Vectors indexed at the old width must be re-indexed."
+            update_env_value "$ENV_FILE" "$dim_key" "$measured"
+            [ "$prefix" = "LIGHTRAG" ] && update_env_value "$ENV_FILE" "LIGHTRAG_EMBEDDING_SEND_DIM" "false"
+            changed=1
+        else
+            print_substep "  ${profile}: ${model} → ${measured} dims, ${dim_key} agrees."
+        fi
+    done
+    [ "$changed" -eq 0 ] || print_success "Embedding model/dimension pairs realigned (consumers re-read .env at the restart below)."
+    return 0
+}
+# EMBED_DIM-END
+
+# #2815 — the chat model cognee/lightrag are configured with must be one the
+# LLM Manager serves. `rzfz init` leaves the template default (openai/gemma4,
+# qwen3.6), and only the full post-install ever replaced it (update_env_model_config);
+# the upgrade's `--refresh` did not, so a CPU box (which serves only the 4B chat
+# model) answered every cognify call with 400 "Invalid model name" while cognee
+# retried with backoff for ever and the brain stayed empty.
+# CHAT_MODEL-BEGIN
+# _write_consumer_chat_models <alias> - the ONE place the RAG consumers' chat
+# model keys are written (cognee's litellm route needs the `openai/` prefix).
+_write_consumer_chat_models() {
+    local alias="$1"
+    update_env_value "$ENV_FILE" "LIGHTRAG_LLM_MODEL" "$alias"
+    update_env_value "$ENV_FILE" "COGNEE_LLM_MODEL" "openai/$alias"
+}
+
+# _served_model_ids <key-prefix> -> one served model id per line (the manager's
+# /v1/models, asked with the consumer's own key), or nothing.
+_served_model_ids() {
+    local prefix="$1" key
+    key=$(read_env_value "${ENV_FILE:-.env}" "LLM_MANAGER_${prefix}_KEY" 2>/dev/null) || key=""
+    [ -n "$key" ] || key=$(read_env_value "${ENV_FILE:-.env}" LLM_MANAGER_OWUI_KEY 2>/dev/null) || key=""
+    [ -n "$key" ] || return 0
+    curl -s --max-time 10 -K <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
+        "http://127.0.0.1:${LLM_MANAGER_PORT:-8091}/v1/models" 2>/dev/null \
+        | python3 -c 'import sys, json
+for m in json.load(sys.stdin).get("data", []):
+    print(m.get("id", ""))' 2>/dev/null || true
+}
+
+# reconcile_consumer_chat_models - for every RAG consumer whose profile is
+# active: keep a configured chat model the manager serves (an operator's custom
+# choice included); replace one it does not serve (the template default) with
+# the hardware-aware default chat alias, when the manager serves THAT. Nothing
+# is written when the served list cannot be read. A changed consumer that is
+# running is recreated so it re-reads .env. cognee-mcp reads no model name.
+reconcile_consumer_chat_models() {
+    _llm_manager_profile_active || return 0
+    local default_alias spec profile prefix mprefix model bare served new changed=0
+    default_alias=$(_default_chat_alias)
+    for spec in "cognee:COGNEE:openai/" "lightrag:LIGHTRAG:"; do
+        profile="${spec%%:*}"; spec="${spec#*:}"; prefix="${spec%%:*}"; mprefix="${spec#*:}"
+        echo "${COMPOSE_PROFILES:-}" | grep -qw "$profile" || continue
+        model=$(read_env_value "$ENV_FILE" "${prefix}_LLM_MODEL" 2>/dev/null) || model=""
+        bare="${model#openai/}"
+        served=$(_served_model_ids "$prefix")
+        if [ -z "$served" ]; then
+            print_warning "  ${profile}: the LLM Manager's served model list could not be read - ${prefix}_LLM_MODEL='${model}' left as is."
+            continue
+        fi
+        if [ -n "$bare" ] && printf '%s\n' "$served" | grep -qxF -- "$bare"; then
+            print_substep "  ${profile}: ${prefix}_LLM_MODEL=${model} is served."
+            continue
+        fi
+        if ! printf '%s\n' "$served" | grep -qxF -- "$default_alias"; then
+            print_warning "  ${profile}: ${prefix}_LLM_MODEL='${model}' is not served and neither is the default chat model ${default_alias} (served: $(printf '%s' "$served" | tr '\n' ' ' | sed 's/ $//')) - left as is; re-run 'rzfz post-install --refresh' once it serves."
+            continue
+        fi
+        new="${mprefix}${default_alias}"
+        print_warning "  ${profile}: ${prefix}_LLM_MODEL='${model}' is not served by the LLM Manager - set to ${new}."
+        update_env_value "$ENV_FILE" "${prefix}_LLM_MODEL" "$new"
+        changed=1
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$profile"; then
+            docker compose up -d --no-deps --force-recreate "$profile" >/dev/null 2>&1 \
+                || print_warning "  ${profile}: recreate returned non-zero - recreate it to pick up the new model."
+        fi
+    done
+    [ "$changed" -eq 0 ] || print_success "RAG consumer chat models realigned to what the LLM Manager serves."
+    return 0
+}
+# CHAT_MODEL-END
+
+update_env_model_config() {
+    local preset="$1"
+    print_step "Updating .env with model configuration..."
+
+    # M031 S3: aliases come from standard-models.yaml's `defaults` block
+    # (e.g. defaults.chat → qwen3.6, defaults.embedding → qwen3-embedding).
+    # Cognee's COGNEE_LLM_MODEL needs the litellm `openai/` prefix; the
+    # other consumers want bare aliases.
+    # #2158/#2727: both come through the hardware-aware resolver (a CPU box's
+    # chat default is the 4B model, its embedding the 0.6B, 1024-dim; #3214: that
+    # holds on a fresh box now that .env.example no longer pins the 8B).
+    local chat_alias embed_alias
+    chat_alias=$(_default_chat_alias)
+    embed_alias=$(_default_embedding_alias)
+
+    if [ -z "$chat_alias" ] || [ -z "$embed_alias" ]; then
+        print_warning "standard-models.yaml defaults.chat/embedding missing — falling back to baseline (qwen3.6 + qwen3-embedding)."
+        chat_alias="${chat_alias:-qwen3.6}"
+        embed_alias="${embed_alias:-qwen3-embedding}"
+    fi
+
+    # LightRAG
+    _write_consumer_chat_models "$chat_alias"   # LIGHTRAG_LLM_MODEL + COGNEE_LLM_MODEL (#2815)
+    update_env_value "$ENV_FILE" "LIGHTRAG_EMBEDDING_MODEL" "$embed_alias"
+    # LIGHTRAG_EMBEDDING_DIM MUST track the embedding model. Historically this was
+    # left at nomic's 768 after the model switched to qwen3-embedding, so LightRAG
+    # built *_768d pgvector tables while the endpoint emits 4096-dim vectors →
+    # every document insert failed on a dimension mismatch. The GPUStack/llama-box
+    # endpoint IGNORES the OpenAI `dimensions` param, so the ONLY reliable source
+    # of truth is the endpoint's actual output length — probe it here; fall back to
+    # the manifest's declared dim only when the endpoint isn't reachable yet.
+    # #187: only probe the LIVE endpoint when models were actually deployed. With
+    # --skip-models (the default on CPU boxes now) nothing is loaded, so a live probe
+    # can only ever time out — skip straight to the manifest dim below.
+    local embed_dim=""
+    if [ "${SKIP_MODELS:-false}" = false ]; then
+        embed_dim=$(_measure_embedding_dim "$embed_alias") || true   # #2420: manager first, then GPUStack; #1076: bare assignment under set -e
+    else
+        print_substep "Skipping live embedding probe (--skip-models); using manifest dim for $embed_alias."
+    fi
+    if ! printf '%s' "$embed_dim" | grep -Eq '^[0-9]+$'; then
+        embed_dim=$(YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" EMBED_ALIAS="$embed_alias" python3 -c "
+import yaml, os
+m = yaml.safe_load(open(os.environ['YAML_PATH']))['models'].get(os.environ['EMBED_ALIAS'], {})
+print(m.get('embedding_dimensions', ''))
+" 2>/dev/null)
+        [ -n "$embed_dim" ] && print_warning "LightRAG embed-dim: endpoint unreachable, using manifest dim $embed_dim for $embed_alias (verify it matches the live endpoint)."
+    fi
+    if printf '%s' "$embed_dim" | grep -Eq '^[0-9]+$'; then
+        update_env_value "$ENV_FILE" "LIGHTRAG_EMBEDDING_DIM" "$embed_dim"
+        # The endpoint ignores `dimensions`; sending it is misleading.
+        update_env_value "$ENV_FILE" "LIGHTRAG_EMBEDDING_SEND_DIM" "false"
+        print_success "LightRAG embed-dim set to $embed_dim (native $embed_alias output)."
+        # #178(c): only record a real outcome when the profile is actually
+        # enabled — a box without `lightrag` should read SKIP, not OK, for a
+        # stage whose env vars this function writes unconditionally anyway.
+        if echo "${COMPOSE_PROFILES:-}" | grep -qw "lightrag"; then
+            record_step_status lightrag OK
+        fi
+    else
+        print_warning "LightRAG embed-dim could not be determined; leaving LIGHTRAG_EMBEDDING_DIM as-is (check it matches $embed_alias)."
+        if echo "${COMPOSE_PROFILES:-}" | grep -qw "lightrag"; then
+            record_step_status lightrag WARN
+        fi
+    fi
+
+    # Cognee (needs openai/ prefix for litellm routing)
+    update_env_value "$ENV_FILE" "COGNEE_EMBEDDING_MODEL" "$embed_alias"
+    # #413: cognee needs the SAME measured dim LightRAG just got. It used to
+    # receive only the two model names, so its pgvector tables were built from a
+    # static default — correct only for as long as the deployed embedding
+    # variant happened to match that constant. It did not: cognee built 768-dim
+    # tables while the endpoint emitted 4096, every insert failed, and the
+    # knowledge graph stayed empty forever while the container reported healthy
+    # and the API answered 200. The dim is variant-dependent (the same alias
+    # measured 2560 on prod and 4096 on 0.91), so the probe above — not a
+    # constant — is the only trustworthy source. #70 wired that probe for
+    # LightRAG and stopped there.
+    if printf '%s' "$embed_dim" | grep -Eq '^[0-9]+$'; then
+        update_env_value "$ENV_FILE" "COGNEE_EMBEDDING_DIM" "$embed_dim"
+        print_success "Cognee embed-dim set to $embed_dim (native $embed_alias output)."
+        if echo "${COMPOSE_PROFILES:-}" | grep -qw "cognee"; then
+            record_step_status cognee OK
+        fi
+    else
+        print_warning "Cognee embed-dim could not be determined; leaving COGNEE_EMBEDDING_DIM as-is (check it matches $embed_alias)."
+        if echo "${COMPOSE_PROFILES:-}" | grep -qw "cognee"; then
+            record_step_status cognee WARN
+        fi
+    fi
+
+    # Model Sync (uses the same API key)
+    # GPUSTACK_API_KEY already set by ensure_gpustack_api_key
+
+    print_success ".env updated with model names (chat=$chat_alias, embedding=$embed_alias)."
+}
+
+# ==============================================================================
+# M031 S3: sync_consumers — push standard-models.yaml to every consumer
+# ==============================================================================
+# After the GPUStack deploy, ensure every gpustack-consuming service
+# (Open WebUI, Dify, Cognee, moltis, hermes) is reconciled to what the
+# YAML says — model aliases, per-model context windows, embedding
+# dimensions. core/llm/sync.py is idempotent: it inspects the live state
+# and only writes diffs.
+#
+# Cognee is invoked separately when its profile is active so the .env
+# changes (LLM_ARGS max_tokens hint) take effect at the next cognee
+# container restart.
+sync_consumers() {
+    print_step "Reconciling LLM consumers via core/llm/sync.py..."
+    _export_catalog_hardware   # #2460: sync.py evaluates the catalogue for the cluster
+
+    if [ ! -f "$SCRIPT_DIR/core/llm/sync.py" ]; then
+        print_warning "core/llm/sync.py not present — skipping consumer reconciliation."
+        return 0
+    fi
+
+    # Build target list dynamically based on which profiles are active.
+    # gpustack itself is reconciled by deploy_all_models above, so we
+    # only need the consumer-side targets here.
+    local targets="openwebui"
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "dify"; then targets="$targets,dify"; fi
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "cognee"; then targets="$targets,cognee"; fi
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "lightrag"; then targets="$targets,lightrag"; fi
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "agents"; then
+        # The per-user agent types are reachable via the agents profile.
+        # Each sync_<agent> function iterates over running instances; safe to
+        # call even when no instances exist (returns "no running instances").
+        targets="$targets,moltis,hermes,paperclip"
+    fi
+
+    print_substep "Targets: $targets"
+    if python3 "$SCRIPT_DIR/core/llm/sync.py" --target "$targets" 2>&1 | sed 's/^/  /'; then
+        print_success "Consumer reconciliation complete."
+    else
+        print_warning "core/llm/sync.py reported issues — review the output above."
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# cognee API helpers (#1249)
+# ------------------------------------------------------------------------------
+# cognee creates its admin user in the FastAPI *lifespan*: `cognee/api/client.py`
+# calls `get_default_user()`, which falls through to `create_default_user()` and
+# reads DEFAULT_USER_EMAIL / DEFAULT_USER_PASSWORD — the two keys
+# modules/knowledge/cognee/compose.yml feeds from COGNEE_ADMIN_PASSWORD (no
+# fallback since #2595). On a FRESH volume that lifespan
+# first runs the alembic migrations, creates the database and initialises the
+# ladybug graph store, so uvicorn is not serving yet — the compose healthcheck
+# budgets 180s for exactly that (`start_period`).
+#
+# #1249: the mint gated on `docker ps --format … | grep -qx cognee`, i.e. on
+# RUNNING, not on SERVING, and a login against a not-yet-serving container came
+# back EMPTY — which the code reported as "cognee pw divergence", impossible on
+# a clean install (cli/init.sh writes COGNEE_ADMIN_PASSWORD before the first
+# `docker compose up -d`). On an llm-manager box it is not even a rare race:
+# wire_llm_manager_rag_consumers force-recreates cognee at Step 1 of
+# post-install, seconds before this runs.
+#
+# The helpers talk to cognee's own API from INSIDE the container (curl is part
+# of the cognee image — verified in cognee/cognee:1.4.0 and the pinned 1.5.3),
+# so neither a published host port nor a host proxy exemption is needed. Every
+# call is --max-time bounded: the pre-#1249 calls had NO timeout and cognee
+# binds its port before it serves, so they could hang for minutes. Each helper
+# prints ONE parseable line, "<http-status>|<value>|<body excerpt>", so a
+# failure can be reported with cognee's own answer instead of a guess.
+_cognee_health_code() {
+    local out
+    out=$(docker exec cognee sh -c \
+        'curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:8000/health' \
+        2>/dev/null || true)
+    printf '%s' "${out:-000}" | tr -cd '0-9' | tail -c 3
+}
+
+# Credentials travel on the STDIN of `docker exec -i` and are read by a small
+# Python urllib client INSIDE the container (python3 is part of the cognee
+# image). Neither the docker client's argv nor any in-container command line
+# ever holds a password or token: the scripts below are constant text, and the
+# secret is never expanded into a curl argument. The form body is URL-encoded
+# in Python, so operator-typed specials (& = + %) stay intact. Each script
+# prints "<body>\n<3-digit status>" (000 = no answer) on stdout and its
+# transport error on stderr, the shape the callers parse.
+# COGNEE_HTTP_PY-BEGIN
+# shellcheck disable=SC2016
+_COGNEE_HTTP_PY_HEAD='
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+BASE = os.environ.get("RZ_COGNEE_URL", "http://localhost:8000")
+def send(req):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=15) as r:
+            code, body = r.status, r.read()
+    except urllib.error.HTTPError as e:
+        code, body = e.code, e.read()
+    except Exception as e:
+        sys.stderr.write("cognee request failed: %s: %s\n" % (type(e).__name__, e))
+        code, body = 0, b""
+    sys.stdout.write(body.decode("utf-8", "replace") + "\n%03d" % code)
+data = sys.stdin.read()
+'
+# shellcheck disable=SC2016
+_COGNEE_LOGIN_PY="${_COGNEE_HTTP_PY_HEAD}"'
+em, _, pw = data.partition("\n")
+send(urllib.request.Request(BASE + "/api/v1/auth/login", method="POST",
+     data=urllib.parse.urlencode({"username": em, "password": pw}).encode(),
+     headers={"Content-Type": "application/x-www-form-urlencoded"}))
+'
+# shellcheck disable=SC2016
+_COGNEE_MINT_PY="${_COGNEE_HTTP_PY_HEAD}"'
+send(urllib.request.Request(BASE + "/api/v1/auth/api-keys", method="POST",
+     data=json.dumps({"name": "cognee-mcp"}).encode(),
+     headers={"Content-Type": "application/json", "Authorization": "Bearer " + data.strip()}))
+'
+# COGNEE_HTTP_PY-END
+
+_cognee_login() {
+    # rev-B (review F2): stderr must NOT join the stream whose LAST LINE is
+    # parsed as the HTTP status.
+    local em="$1" pw="$2" raw full status body tok err
+    err=$(mktemp 2>/dev/null || echo "/tmp/rzfz-cognee-$$.err")
+    raw=$(printf '%s\n%s' "$em" "$pw" \
+        | docker exec -i cognee python3 -c "$_COGNEE_LOGIN_PY" 2>"$err" || true)
+    status=$(printf '%s' "$raw" | tail -n1 | tr -cd '0-9' | tail -c 3)
+    full=$(printf '%s' "$raw" | sed '$d')
+    tok=$(printf '%s' "$full" | python3 -c \
+        'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)
+    body=$(printf '%s%s' "$full" "$(cat "$err" 2>/dev/null || true)" | tr -d '\r\n' | head -c 200)
+    rm -f "$err"
+    printf '%s|%s|%s\n' "${status:-000}" "$tok" "$body"
+}
+
+_cognee_mint_api_key() {
+    # rev-B (review F2): see _cognee_login — stderr is captured separately so
+    # the status parse only ever sees the script's own status line.
+    local tok="$1" raw full status body key err
+    err=$(mktemp 2>/dev/null || echo "/tmp/rzfz-cognee-$$.err")
+    raw=$(printf '%s' "$tok" \
+        | docker exec -i cognee python3 -c "$_COGNEE_MINT_PY" 2>"$err" || true)
+    status=$(printf '%s' "$raw" | tail -n1 | tr -cd '0-9' | tail -c 3)
+    full=$(printf '%s' "$raw" | sed '$d')
+    key=$(printf '%s' "$full" | python3 -c \
+        'import sys,json;print(json.load(sys.stdin).get("key",""))' 2>/dev/null || true)
+    body=$(printf '%s%s' "$full" "$(cat "$err" 2>/dev/null || true)" | tr -d '\r\n' | head -c 200)
+    rm -f "$err"
+    printf '%s|%s|%s\n' "${status:-000}" "$key" "$body"
+}
+
+# What the RUNNING container was created with — a container recreate re-reads
+# .env, an existing DB user is never re-hashed (see cli/set-admin-password.sh
+# ::apply_cognee), so these two can legitimately disagree. That makes the
+# mismatch a DECIDABLE cause rather than a guess.
+_cognee_seed_password() {
+    docker inspect cognee --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^DEFAULT_USER_PASSWORD=//p' | head -n1 || true
+}
+
+# Mint COGNEE_MCP_API_KEY. Returns 0 only when the key was actually written.
+# Every command substitution is `|| true`-guarded: `--refresh` calls
+# provision_mcp_registry UNGUARDED under `set -eo pipefail`, where a bare
+# non-zero assignment aborts the whole refresh before ensure_mcp_manager_secret
+# / reconcile_authentik_bindings / run_security_selfcheck ever run.
+# #1806: cognee signs its session tokens with FASTAPI_USERS_JWT_SECRET, fed from
+# COGNEE_JWT_SECRET (compose). An EMPTY value is not a fallback to a default —
+# cognee reads os.getenv(name, "super_secret"), so empty means an EMPTY HMAC key
+# (trivially forgeable), and cognee's API is exempt from the SSO gate (F-034).
+# init/upgrade generate the secret, but a box wired by hand (or mid-migration)
+# can reach here with it empty. Refuse to proceed rather than mint an MCP key
+# for a cognee whose sessions anyone can forge. Returns non-zero; the caller
+# already treats a cognee readiness failure as non-fatal + actionable.
+cognee_require_jwt_secret() {
+    local v
+    v="$(read_env_value "$ENV_FILE" COGNEE_JWT_SECRET 2>/dev/null || true)"
+    if [ -z "$v" ]; then
+        print_warning "cognee: COGNEE_JWT_SECRET is empty — cognee would sign session tokens with an EMPTY key, and its API is exempt from the SSO gate (#1806). Refusing to wire cognee."
+        print_info "  Fix: rzfz setup --regenerate-secrets  (or set COGNEE_JWT_SECRET in .env), then: rzfz post-install --refresh"
+        return 1
+    fi
+    return 0
+}
+
+_provision_cognee_mcp_key() {
+    local em live_em target cap abp seed_pw
+    local ready_max waited code res status body tok key attempt pw
+
+    cognee_require_jwt_secret || return 1
+
+    em="razzfazz-ai-admin@$(read_env_value "$ENV_FILE" MAIN_DOMAIN 2>/dev/null || true)"
+    cap="$(read_env_value "$ENV_FILE" COGNEE_ADMIN_PASSWORD 2>/dev/null || true)"
+    abp="$(read_env_value "$ENV_FILE" AUTHENTIK_BOOTSTRAP_PASSWORD 2>/dev/null || true)"
+
+    # 1) Readiness: SERVING, not merely running.
+    # Budget = SLEEP time, not wall clock (review F3): each probe may add up
+    # to its own --max-time on top, so the worst case is about double. Same
+    # shape as _llm_manager_await_worker_registration (#1254).
+    # The default is pinned to the cognee service's compose start_period by
+    # tests/unit/consistency/test_1249_cognee_timeout_matches_compose.py —
+    # a comment alone let a 180 -> 5 mutation survive the whole suite.
+    ready_max="${COGNEE_MCP_READY_TIMEOUT:-180}"
+    waited=0
+    code="$(_cognee_health_code)"
+    while [ "$code" != "200" ]; do
+        if [ "$waited" -ge "$ready_max" ]; then
+            print_warning "cognee is running but never answered /health 200 within ${ready_max}s (last status ${code}) — COGNEE_MCP_API_KEY not minted."
+            print_info "  step: readiness. This is NOT a password problem: cognee creates its admin user in its startup lifespan (on a fresh volume: DB migrations + graph init first), so a login before that returns nothing."
+            print_info "  Check: docker inspect -f '{{.State.Health.Status}}' cognee ; docker logs --tail 50 cognee"
+            print_info "  Then re-run: rzfz post-install --refresh"
+            return 1
+        fi
+        [ "$waited" = "0" ] && print_substep "Waiting for cognee to serve /health before the admin login (max ${ready_max}s)..."
+        sleep 5
+        waited=$((waited + 5))
+        code="$(_cognee_health_code)"
+    done
+
+    # cognee's OWN view of the admin address (same probe cli/set-admin-password.sh
+    # uses) — authoritative over the .env-derived guess.
+    live_em=$(docker exec cognee python3 -c \
+        "from cognee.base_config import get_base_config; print(get_base_config().default_user_email or '')" \
+        2>/dev/null | head -n1 || true)
+    target="${live_em:-$em}"
+
+    # 2) Login. Both .env candidates, retried on a transient (000/5xx) answer:
+    #    a 4xx is a credential verdict and retrying it only wastes time.
+    #    NOT fallback-when-empty (ga.6): a set-but-wrong COGNEE_ADMIN_PASSWORD
+    #    must not block the AUTHENTIK_BOOTSTRAP_PASSWORD attempt.
+    tok=""; status="000"; body=""
+    for attempt in 1 2 3; do
+        for pw in "$cap" "$abp"; do
+            [ -z "$pw" ] && continue
+            res="$(_cognee_login "$target" "$pw")"
+            status="${res%%|*}"; res="${res#*|}"
+            tok="${res%%|*}"; body="${res#*|}"
+            [ -n "$tok" ] && break 2
+            [ "$cap" = "$abp" ] && break   # identical → don't retry the same pw
+        done
+        case "$status" in
+            000|5*) sleep $((attempt * 5)) ;;
+            *)      break ;;
+        esac
+    done
+
+    if [ -z "$tok" ]; then
+        seed_pw="$(_cognee_seed_password)"
+        print_warning "cognee admin login failed — COGNEE_MCP_API_KEY not minted, so the cognee-mcp sidecar stays unauthenticated (agents get no cognee memory)."
+        print_info "  step: login  email: ${target}  http: ${status}  body: ${body:-<empty>}"
+        if [ -n "$live_em" ] && [ "$live_em" != "$em" ]; then
+            print_info "  cause: cognee seeded '${live_em}' while .env implies '${em}' — the admin addresses disagree."
+            print_info "  Fix: align MAIN_DOMAIN / DEFAULT_USER_EMAIL, then: cli/set-admin-password.sh cognee"
+        elif [ -z "$cap" ] && [ -z "$abp" ]; then
+            print_info "  cause: COGNEE_ADMIN_PASSWORD and AUTHENTIK_BOOTSTRAP_PASSWORD are BOTH empty in .env — cognee seeded its upstream default admin instead."
+            print_info "  Fix: set COGNEE_ADMIN_PASSWORD in .env, then: cli/set-admin-password.sh cognee"
+        elif [ -n "$seed_pw" ] && [ "$seed_pw" != "$cap" ] && [ "$seed_pw" != "$abp" ]; then
+            print_info "  cause: the RUNNING container was created with a DEFAULT_USER_PASSWORD that matches neither .env candidate (a password rotation after cognee's first boot)."
+            print_info "  Fix: cli/set-admin-password.sh cognee   (updates the hash through cognee's own user-manager)"
+        else
+            print_info "  cause: .env and the container agree on the seed password, so the stored hash was changed after cognee's first boot."
+            print_info "  Fix: cli/set-admin-password.sh cognee   (updates the hash through cognee's own user-manager)"
+        fi
+        return 1
+    fi
+
+    # 3) Mint.
+    res="$(_cognee_mint_api_key "$tok")"
+    status="${res%%|*}"; res="${res#*|}"
+    key="${res%%|*}"; body="${res#*|}"
+    if [ -z "$key" ]; then
+        print_warning "cognee api-key mint failed — COGNEE_MCP_API_KEY not minted (the admin login itself succeeded)."
+        print_info "  step: mint  http: ${status}  body: ${body:-<empty>}"
+        return 1
+    fi
+    update_env_value "$ENV_FILE" "COGNEE_MCP_API_KEY" "$key"
+    print_success "Minted COGNEE_MCP_API_KEY for cognee-mcp sidecar."
+    # cognee-mcp reads API_TOKEN=${COGNEE_MCP_API_KEY} at container CREATE, so a
+    # sidecar that started before the mint is still holding an empty token —
+    # exactly the "MCP server dead for agents" symptom. Recreate that ONE
+    # service by name (never a blanket `up -d` on a loaded box).
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx cognee-mcp; then
+        docker compose up -d --no-deps --force-recreate cognee-mcp >/dev/null 2>&1 \
+            || print_warning "cognee-mcp recreate returned non-zero — the new key takes effect at its next start."
+    fi
+    return 0
+}
+
+# ==============================================================================
+# MCP registry (M035 P1)
+# ==============================================================================
+# Mint a cognee API key for the cognee-mcp sidecar (COGNEE_MCP_API_KEY) so it
+# can authenticate to cognee in API mode, then validate the MCP registry. The
+# key lets MCP agents (Moltis/Hermes/OpenCode) use cognee as memory via
+# http://cognee-mcp:8000/mcp. Idempotent: skips if the key is already set.
+# #2404 — the upstream Cognee development account must not be a standing
+# credential on a delivered box.
+#
+# Measured on 0.208 (2026.09-ga.1): `default_user@example.com` / the upstream
+# documented password authenticated with HTTP 200 and a usable session, the
+# row was a SUPERUSER, and the shipped frontend pre-filled the pair on the
+# sign-in form. cognee:8000 is reachable from every container on the stack
+# network and on the loopback publication, neither of which passes Authentik.
+# The stack's own identity is razzfazz-ai-admin@<domain>; the upstream row is
+# a leftover of an earlier cycle's bootstrap and must not exist as a login.
+#
+# Contract: on every post-install run with cognee active, (1) the upstream
+# account, if present, is DEACTIVATED and stripped of superuser (not deleted:
+# cognee's data rows may reference it; an inactive fastapi-users row cannot
+# log in and stays reversible); (2) every other superuser that is not the
+# stack identity is REPORTED, never changed (an operator's own account is
+# theirs); (3) the upstream pair is then probed and must be refused.
+# COGNEE_DEFAULT_ACCOUNT-BEGIN
+# #2906: ONE implementation, shared with the Configuration Portal's enable:
+# module_hooks.cognee_post_start (deactivate through the users table, then a
+# real login probe with the public pair; the apply fails if it still works).
+cognee_reconcile_default_account() {
+    case "${COMPOSE_PROFILES:-}" in *cognee*) ;; *) return 0 ;; esac
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx cognee || return 0
+    if python3 "${SCRIPT_DIR}/core/config/app/services/module_hooks.py" post-start cognee --stack "${SCRIPT_DIR}"; then
+        print_success "cognee: the upstream development account is no login."
+        return 0
+    fi
+    print_error "cognee: the upstream development account may still authenticate — a superuser session without Authentik (#2404). 'rzfz status' reports it."
+    return 1
+}
+# COGNEE_DEFAULT_ACCOUNT-END
+
+# #2595: cognee's admin password is its OWN secret. Until 2026.11 the compose
+# files fell back to AUTHENTIK_BOOTSTRAP_PASSWORD when COGNEE_ADMIN_PASSWORD was
+# empty, and init set it to the install password, which is also the Authentik
+# admin's. Either way cognee, Open WebUI and mcp-manager held a write
+# credential for the whole directory.
+#
+# Contract, on every post-install run with cognee serving:
+#   * COGNEE_ADMIN_PASSWORD set, distinct, and accepted: nothing to do.
+#   * set and distinct, but cognee still has the Authentik admin's password
+#     (upgrade minted the key after cognee's first boot): cognee's admin is
+#     moved to the .env value through cognee's own user-manager.
+#   * empty or equal to the Authentik admin's: a new random value is set in
+#     cognee first, the login with it is VERIFIED, and only then is .env
+#     written and the services holding the old value recreated.
+# The current credential must be proven by a login before anything changes,
+# and a failed verification puts the proven one back, so no step can leave
+# .env naming a password cognee does not accept, and a 0600 pending file
+# carries the candidate across a crash between the set and the .env write. No
+# password is printed or placed in an argv (the set goes through stdin and
+# `docker exec -e NAME`, the logins through stdin).
+# COGNEE_ADMIN_ROTATION-BEGIN
+_cognee_login_ok() {   # <email> <password> -> 0 when cognee issues a token
+    local res
+    res="$(_cognee_login "$1" "$2")"
+    res="${res#*|}"
+    [ -n "${res%%|*}" ]
+}
+
+_cognee_set_admin_password() {   # <email>; the password on stdin
+    rzfz_set_password_for_app cognee "$1" >/dev/null 2>&1
+}
+
+# The candidate password of a rotation in flight, written (mode 0600) BEFORE
+# cognee's admin is changed and removed only after .env holds it. A run that
+# dies between the two (power loss, Ctrl-C) leaves cognee on a password that is
+# in this file and nowhere else; the next run logs in with it and finishes.
+_cognee_pending_file() { printf '%s/.cognee-admin-pending' "${SCRIPT_DIR:-.}"; }
+
+_cognee_write_pending() {   # the password on stdin
+    local f; f="$(_cognee_pending_file)"
+    ( umask 077 && cat > "$f.tmp" && mv -f "$f.tmp" "$f" ) 2>/dev/null
+}
+
+# The running consumers must hold what .env holds. Compared for EQUALITY only;
+# names are printed, values never. Recreates the ones that differ, by name.
+_cognee_recreate_drifted() {
+    local cap="$1" pair svc var have
+    local -a drifted=()
+    # #2948: openwebui no longer holds the cognee admin password (its pipe is retired).
+    for pair in cognee:DEFAULT_USER_PASSWORD mcp-manager:COGNEE_ADMIN_PASSWORD; do
+        svc="${pair%%:*}"; var="${pair#*:}"
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$svc" || continue
+        have="$(docker inspect "$svc" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | sed -n "s/^${var}=//p" | head -n1 || true)"
+        [ "$have" = "$cap" ] || drifted+=("$svc")
+    done
+    [ "${#drifted[@]}" -gt 0 ] || return 0
+    print_substep "cognee admin password: recreating ${drifted[*]} (their environment differs from .env)."
+    docker compose up -d --no-deps --force-recreate "${drifted[@]}" >/dev/null 2>&1 \
+        || print_warning "recreating ${drifted[*]} returned non-zero — they pick up the password at their next start."
+}
+
+cognee_reconcile_admin_password() {
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx cognee; then
+        print_warning "cognee not running — its admin password was not checked."
+        return 0
+    fi
+    local cap abp em target ready_max waited code new pend pf
+    pf="$(_cognee_pending_file)"
+    cap="$(read_env_value "$ENV_FILE" COGNEE_ADMIN_PASSWORD 2>/dev/null || true)"
+    abp="$(read_env_value "$ENV_FILE" AUTHENTIK_BOOTSTRAP_PASSWORD 2>/dev/null || true)"
+
+    ready_max="${COGNEE_MCP_READY_TIMEOUT:-180}"
+    waited=0
+    code="$(_cognee_health_code)"
+    while [ "$code" != "200" ]; do
+        if [ "$waited" -ge "$ready_max" ]; then
+            print_warning "cognee never answered /health 200 within ${ready_max}s — its admin password was not checked; re-run: rzfz post-install --refresh"
+            return 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        code="$(_cognee_health_code)"
+    done
+    em="razzfazz-ai-admin@$(read_env_value "$ENV_FILE" MAIN_DOMAIN 2>/dev/null || true)"
+    target=$(docker exec cognee python3 -c \
+        "from cognee.base_config import get_base_config; print(get_base_config().default_user_email or '')" \
+        2>/dev/null | head -n1 || true)
+    target="${target:-$em}"
+
+    # 1) An interrupted rotation: cognee may already hold the pending password.
+    if [ -s "$pf" ]; then
+        pend="$(cat "$pf" 2>/dev/null || true)"
+        if [ -n "$pend" ] && [ "$pend" != "$cap" ] && _cognee_login_ok "$target" "$pend"; then
+            if ! update_env_value "$ENV_FILE" "COGNEE_ADMIN_PASSWORD" "$pend"; then
+                print_error "cognee: could not write COGNEE_ADMIN_PASSWORD to .env; the pending password is kept for the next run."
+                return 1
+            fi
+            rm -f "$pf"
+            print_success "cognee: finished an interrupted admin-password rotation (verified by a login)."
+            _cognee_recreate_drifted "$pend"
+            return 0
+        fi
+        rm -f "$pf"
+    fi
+
+    if [ -n "$cap" ] && [ "$cap" != "$abp" ]; then
+        if _cognee_login_ok "$target" "$cap"; then
+            _cognee_recreate_drifted "$cap"
+            return 0
+        fi
+        if [ -n "$abp" ] && _cognee_login_ok "$target" "$abp"; then
+            # .env already holds the target, so a crash after the set is
+            # recovered by the next run's first login.
+            if printf '%s' "$cap" | _cognee_set_admin_password "$target" \
+                    && _cognee_login_ok "$target" "$cap"; then
+                print_success "cognee: admin moved off the Authentik admin password to COGNEE_ADMIN_PASSWORD."
+                _cognee_recreate_drifted "$cap"
+                return 0
+            fi
+            printf '%s' "$abp" | _cognee_set_admin_password "$target" || true
+            print_error "cognee: could not move the admin to COGNEE_ADMIN_PASSWORD; it keeps its previous password. Run: cli/set-admin-password.sh cognee"
+            return 1
+        fi
+        print_warning "cognee: COGNEE_ADMIN_PASSWORD does not log in (see the login diagnosis below). Run: cli/set-admin-password.sh cognee"
+        return 1
+    fi
+
+    if [ -z "$abp" ]; then
+        print_warning "cognee: COGNEE_ADMIN_PASSWORD and AUTHENTIK_BOOTSTRAP_PASSWORD are both empty — nothing proves the current admin credential, so nothing was changed. Set COGNEE_ADMIN_PASSWORD, then: cli/set-admin-password.sh cognee"
+        return 1
+    fi
+    if ! _cognee_login_ok "$target" "$abp"; then
+        print_warning "cognee: the admin does not log in with the Authentik admin password either; its password was left as it is. Run: cli/set-admin-password.sh cognee"
+        return 1
+    fi
+    print_substep "cognee: giving the admin its own password (it was the Authentik admin's)..."
+    new="$(generate_password 24)"
+    if ! printf '%s' "$new" | _cognee_write_pending; then
+        print_error "cognee: could not write the pending-password file; nothing was changed."
+        return 1
+    fi
+    if ! printf '%s' "$new" | _cognee_set_admin_password "$target" \
+            || ! _cognee_login_ok "$target" "$new"; then
+        printf '%s' "$abp" | _cognee_set_admin_password "$target" || true
+        rm -f "$pf"
+        print_error "cognee: the new admin password did not verify; .env is unchanged and cognee keeps its previous password."
+        return 1
+    fi
+    if ! update_env_value "$ENV_FILE" "COGNEE_ADMIN_PASSWORD" "$new"; then
+        printf '%s' "$abp" | _cognee_set_admin_password "$target" || true
+        rm -f "$pf"
+        print_error "cognee: could not write COGNEE_ADMIN_PASSWORD to .env; cognee was set back to its previous password."
+        return 1
+    fi
+    rm -f "$pf"
+    _cognee_recreate_drifted "$new"
+    print_success "cognee: the admin has its own password now (COGNEE_ADMIN_PASSWORD, verified by a login)."
+    return 0
+}
+# COGNEE_ADMIN_ROTATION-END
+
+provision_mcp_registry() {
+    case "${COMPOSE_PROFILES:-}" in *cognee*) ;; *) return 0 ;; esac
+    print_step "MCP registry: provisioning cognee-mcp credentials..."
+    # #2404: before minting anything, the upstream development account must
+    # not be a login on this box. A failure here is reported, never fatal to
+    # the refresh (the mint below still runs; the posture check in `rzfz
+    # status` keeps it visible).
+    cognee_reconcile_default_account || print_warning "cognee default-account reconcile reported a problem (see above)"
+    # #2595: before the mint, cognee's admin must hold its own password.
+    cognee_reconcile_admin_password || print_warning "cognee admin-password reconcile reported a problem (see above)"
+    local key_missing=0
+    if [ -n "$(read_env_value "$ENV_FILE" COGNEE_MCP_API_KEY 2>/dev/null || true)" ]; then
+        print_info "COGNEE_MCP_API_KEY already set."
+    elif ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx cognee; then
+        print_warning "cognee not running — skipping COGNEE_MCP_API_KEY mint."
+        key_missing=1
+    else
+        _provision_cognee_mcp_key || key_missing=1
+    fi
+    # Validate the MCP registry (non-fatal advisory).
+    if [ -f "$SCRIPT_DIR/core/mcp/sync.py" ]; then
+        python3 "$SCRIPT_DIR/core/mcp/sync.py" --check 2>&1 | sed 's/^/  /' \
+            || print_warning "MCP registry validation reported issues."
+    fi
+    # #1249: that validation checks core/mcp/mcp-servers.yaml and knows nothing
+    # about COGNEE_MCP_API_KEY — its "mcp registry: valid" line printed straight
+    # after a failed mint made the step read as a success. The missing key gets
+    # the last word instead (and --verify fails on it, see the cognee section of
+    # run_verification).
+    if [ "$key_missing" = "1" ]; then
+        print_warning "cognee-mcp has NO credential: COGNEE_MCP_API_KEY is empty (the registry line above validates the YAML only). MCP agents have no cognee memory backend until this is minted."
+    fi
+    # Never leak a trailing non-zero (the `if [ -f … ]` guard above returns 1
+    # when core/mcp/sync.py is absent) up to a bare `set -e` caller.
+    return 0
+}
+# Personal MCP Manager (#36): mint the AES-256-GCM master key + DB password if
+# absent (idempotent — does NOT rotate an existing key, which would orphan every
+# already-encrypted credential). Mirrors the ensure-if-missing pattern used for
+# other secrets on upgrade/refresh paths.
+ensure_mcp_manager_secret() {
+    case "${COMPOSE_PROFILES:-}" in *mcp*|*agents*) ;; *) return 0 ;; esac
+    # #2419: agent-manager (agents profile) presents MCP_INTERNAL_TOKEN too, so
+    # an agents-only box needs it minted before mcp is ever enabled. The token is
+    # handled first; everything below stays mcp-only.
+    # #61 NEW-3: the shared service-to-service secret gating mcp-manager's
+    # /internal/* routes (agent-manager presents it on every agent launch to
+    # fetch the per-user MCP wiring). It is minted by init.sh on a fresh box, but
+    # an mcp-enabled box that was UPGRADED (not freshly init'd) never ran init's
+    # regenerate_all_secrets, so the key stayed empty → /internal fails closed
+    # (401) → wiring breaks (the per-proxy bearer never reaches the user's
+    # agents). Mint-if-absent here so the self-heal path populates it. Same hex
+    # width as init's `generate_hex_secret 32` (64 hex chars).
+    if [ -z "$(read_env_value "$ENV_FILE" MCP_INTERNAL_TOKEN)" ]; then
+        update_env_value "$ENV_FILE" "MCP_INTERNAL_TOKEN" "$(openssl rand -hex 32)"
+        print_success "Minted MCP_INTERNAL_TOKEN (was absent — /internal wiring would 401)."
+    fi
+    case "${COMPOSE_PROFILES:-}" in *mcp*) ;; *) return 0 ;; esac
+    if [ -z "$(read_env_value "$ENV_FILE" MCP_MANAGER_SECRET_KEY)" ]; then
+        update_env_value "$ENV_FILE" "MCP_MANAGER_SECRET_KEY" "$(openssl rand -base64 32 | tr -d '\n')"
+        print_success "Minted MCP_MANAGER_SECRET_KEY (was absent)."
+    fi
+    if [ -z "$(read_env_value "$ENV_FILE" MCP_MANAGER_DB_PASSWORD)" ]; then
+        update_env_value "$ENV_FILE" "MCP_MANAGER_DB_PASSWORD" "$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)"
+        print_success "Minted MCP_MANAGER_DB_PASSWORD (was absent)."
+    fi
+    # The mcp.<domain> forward-auth client secret (Authentik proxy provider).
+    # Same upgrade gap; mint-if-absent.
+    if [ -z "$(read_env_value "$ENV_FILE" MCP_CLIENT_SECRET)" ]; then
+        update_env_value "$ENV_FILE" "MCP_CLIENT_SECRET" "$(openssl rand -hex 32)"
+        print_success "Minted MCP_CLIENT_SECRET (was absent)."
+    fi
+    # A trailing `if [ -z … ]` whose secret is ALREADY set returns 1; never let
+    # that abort a bare `set -e` caller (project_postinstall_set_e_abort_pattern).
+    return 0
+}
+
+# #2554: the MCP gateway's Gitea OAuth2 app, registered ONCE as the Gitea
+# admin, so users can "connect Gitea" at mcp.<domain>. Idempotent: with both
+# keys in .env it does nothing; otherwise it looks the app up BY NAME first,
+# so a re-run after a lost .env regenerates that app's secret (PATCH) instead
+# of creating a second app. Neither the admin password nor the client secret
+# ever reaches a process argv or a log line: curl reads the credential from a
+# config on stdin, the answers stay in shell variables, and .env is rewritten
+# with shell builtins only (update_env_value would put the value on sed's
+# argv). A rotation is a deliberate operator act: empty both keys and re-run.
+ensure_gitea_mcp_oauth_app() {
+    case ",${COMPOSE_PROFILES:-}," in *,gitea,*) ;; *) return 0 ;; esac
+    case ",${COMPOSE_PROFILES:-}," in *,mcp,*) ;; *) return 0 ;; esac
+    local old_id
+    old_id=$(read_env_value "$ENV_FILE" OAUTH_GITEA_CLIENT_ID 2>/dev/null) || old_id=""
+    if [ -n "$old_id" ] \
+        && [ -n "$(read_env_value "$ENV_FILE" OAUTH_GITEA_CLIENT_SECRET)" ]; then
+        return 0
+    fi
+    local name="razzfazz MCP gateway" admin pw port domain api cfg body apps app_id resp parsed cid csec code manual
+    local line out="" seen_id=0 seen_sec=0 re
+    admin=$(read_env_value "$ENV_FILE" GITEA_ADMIN_USER 2>/dev/null) || admin=""
+    pw=$(read_env_value "$ENV_FILE" GITEA_ADMIN_PASSWORD 2>/dev/null) || pw=""
+    port=$(read_env_value "$ENV_FILE" GITEA_HTTP_PORT 2>/dev/null) || port=""
+    port=${port:-3000}
+    domain=$(read_env_value "$ENV_FILE" MAIN_DOMAIN 2>/dev/null) || domain=""
+    if [ -z "$admin" ] || [ -z "$pw" ] || [ -z "$domain" ]; then
+        print_warning "Gitea MCP OAuth app not registered: GITEA_ADMIN_USER/PASSWORD or MAIN_DOMAIN is empty."
+        return 0
+    fi
+    case "$port" in ''|*[!0-9]*) print_warning "Gitea MCP OAuth app not registered: GITEA_HTTP_PORT is not a port."; return 0 ;; esac
+    case "$domain" in *[!A-Za-z0-9.-]*) print_warning "Gitea MCP OAuth app not registered: MAIN_DOMAIN is not a plain domain."; return 0 ;; esac
+    api="http://127.0.0.1:${port}/api/v1/user/applications/oauth2"
+    admin=${admin//\\/\\\\}; admin=${admin//\"/\\\"}
+    pw=${pw//\\/\\\\}; pw=${pw//\"/\\\"}
+    cfg=$(printf 'user = "%s:%s"\n' "$admin" "$pw")
+    body="{\"name\":\"${name}\",\"redirect_uris\":[\"https://mcp.${domain}/oauth/callback/gitea\"],\"confidential_client\":true}"
+    # Look the app up first: never a second app, and no create on a failed lookup.
+    # #3424: the HTTP status comes back after the body (-w), so an unreachable
+    # Gitea, refused admin credentials and any other answer each get their own
+    # message. The credential still travels on stdin only (-K -).
+    manual="or register an OAuth2 app in Gitea yourself (redirect URI https://mcp.${domain}/oauth/callback/gitea) and set OAUTH_GITEA_CLIENT_ID and OAUTH_GITEA_CLIENT_SECRET in .env"
+    resp=$(printf '%s\n' "$cfg" | curl -sS --max-time 20 -K - -w '\n%{http_code}' "${api}?page=1&limit=50" 2>/dev/null) || true
+    code=${resp##*$'\n'}
+    apps=${resp%$'\n'*}
+    [ "$apps" = "$resp" ] && apps=""
+    case "$code" in
+        2[0-9][0-9]) ;;
+        401|403)
+            print_warning "Gitea MCP OAuth app not registered: Gitea refused the admin credentials (HTTP ${code}) — GITEA_ADMIN_USER / GITEA_ADMIN_PASSWORD in .env do not match Gitea's admin account. Fix them and re-run, ${manual}. Users cannot connect Gitea until then."
+            return 0 ;;
+        ''|000|*[!0-9]*)
+            print_warning "Gitea MCP OAuth app not registered: Gitea did not answer on 127.0.0.1:${port} (is Gitea up?). Re-run once it is, ${manual}. Users cannot connect Gitea until then."
+            return 0 ;;
+        *)
+            print_warning "Gitea MCP OAuth app not registered: Gitea answered HTTP ${code} when listing OAuth apps. Re-run, ${manual}. Users cannot connect Gitea until then."
+            return 0 ;;
+    esac
+    app_id=$(printf '%s' "$apps" | python3 -c 'import json, sys
+d = json.load(sys.stdin)
+assert isinstance(d, list)
+ids = [a["id"] for a in d if isinstance(a, dict) and a.get("name") == sys.argv[1] and isinstance(a.get("id"), int)]
+print(ids[0] if ids else "none")' "$name" 2>/dev/null) || app_id=""
+    if [ -z "$app_id" ]; then
+        print_warning "Gitea MCP OAuth app not registered: Gitea answered HTTP ${code} but its OAuth app list could not be read. Re-run, ${manual}. Users cannot connect Gitea until then."
+        return 0
+    fi
+    if [ "$app_id" = "none" ]; then
+        resp=$(printf '%s' "$body" | curl -sS -f --max-time 20 -K <(printf '%s\n' "$cfg") -X POST "$api" \
+            -H 'Content-Type: application/json' --data-binary @- 2>/dev/null) || resp=""
+    else
+        resp=$(printf '%s' "$body" | curl -sS -f --max-time 20 -K <(printf '%s\n' "$cfg") -X PATCH "${api}/${app_id}" \
+            -H 'Content-Type: application/json' --data-binary @- 2>/dev/null) || resp=""
+    fi
+    parsed=$(printf '%s' "$resp" | python3 -c 'import json, re, sys
+d = json.load(sys.stdin)
+v = [d.get("client_id"), d.get("client_secret")]
+ok = all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.-]{8,256}", x) for x in v)
+print(v[0] if ok else ""); print(v[1] if ok else "")' 2>/dev/null) || parsed=""
+    cid=${parsed%%$'\n'*}
+    csec=${parsed#*$'\n'}
+    csec=${csec%$'\n'}
+    if [ -z "$cid" ] || [ -z "$csec" ] || [ "$cid" = "$parsed" ]; then
+        print_warning "Gitea MCP OAuth app registration failed — users cannot connect Gitea yet (#2554)."
+        return 0
+    fi
+    if [ -n "$old_id" ]; then
+        # The operator set an id without its secret: say so before replacing it.
+        print_warning "OAUTH_GITEA_CLIENT_ID is set but OAUTH_GITEA_CLIENT_SECRET is empty: replacing the id ${old_id} with the registered '${name}' app's ${cid} (#2554)."
+    fi
+    re='^[[:space:]]*(export[[:space:]]+)?OAUTH_GITEA_CLIENT_(ID|SECRET)='
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ $re ]]; then
+            if [ "${BASH_REMATCH[2]}" = "ID" ]; then
+                line="${BASH_REMATCH[0]}${cid}"; seen_id=1
+            else
+                line="${BASH_REMATCH[0]}${csec}"; seen_sec=1
+            fi
+        fi
+        out+="${line}"$'\n'
+    done < "$ENV_FILE"
+    [ "$seen_id" = 1 ] || out+="OAUTH_GITEA_CLIENT_ID=${cid}"$'\n'
+    [ "$seen_sec" = 1 ] || out+="OAUTH_GITEA_CLIENT_SECRET=${csec}"$'\n'
+    printf '%s' "$out" > "$ENV_FILE"
+    print_success "Registered the MCP gateway's Gitea OAuth app (#2554)."
+    # mcp-manager reads the keys from its environment: reconcile_mcp_manager_env
+    # (run right after the MCP steps) recreates it from the file (#3094).
+    return 0
+}
+
+# #2472 / A1 D7: mcp-manager's dedicated READ-ONLY Authentik token
+# (MCP_MANAGER_AUTHENTIK_READONLY_TOKEN), on install AND on `rzfz upgrade`
+# (which ends in --refresh). The Config Portal container does the Authentik
+# side (core/config/app/services/mcp_directory_token.py): a view-users-only
+# role, group and service account, one API token, and a PROOF with the key
+# itself that it can list users and is refused every write — a key that fails
+# the proof is deleted, never written. The current key goes in on stdin and
+# the new one comes back on stdout: neither ever reaches an argv or a log
+# line, and .env is rewritten with shell builtins only (update_env_value
+# would put the key on sed's argv). Never the bootstrap token. On any failure
+# the key stays as it was (empty = fail closed: Open WebUI callers get no
+# personal credentials) and `rzfz status` keeps warning.
+ensure_mcp_readonly_authentik_token() {
+    case ",${COMPOSE_PROFILES:-}," in *,mcp,*) ;; *) return 0 ;; esac
+    command -v docker >/dev/null 2>&1 || return 0
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx razzfazz-config; then
+        print_warning "MCP read-only Authentik token not checked: razzfazz-config is not running — Open WebUI callers get no personal MCP credentials until 'rzfz post-install --refresh' runs with it up."
+        return 0
+    fi
+    local current out rc status key line re seen=0 new=""
+    current=$(read_env_value "$ENV_FILE" MCP_MANAGER_AUTHENTIK_READONLY_TOKEN 2>/dev/null) || current=""
+    rc=0
+    out=$(printf '%s' "$current" | docker exec -i razzfazz-config python -m app.services.mcp_directory_token) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 3 ]; then
+            print_warning "MCP read-only Authentik token REFUSED: the minted key did not prove read-only (see the line above); it was deleted and not written. Open WebUI callers get no personal MCP credentials."
+        else
+            print_warning "MCP read-only Authentik token not provisioned (rc=$rc, Authentik unusable?) — retry: rzfz post-install --refresh"
+        fi
+        return 0
+    fi
+    status=""; key=""
+    while IFS= read -r line; do
+        case "$line" in
+            "STATUS "*) status=${line#STATUS } ;;
+            "KEY "*) key=${line#KEY } ;;
+        esac
+    done <<< "$out"
+    if [ -z "$key" ] || [[ ! "$key" =~ ^[A-Za-z0-9._-]{32,256}$ ]]; then
+        print_warning "MCP read-only Authentik token: unusable answer from razzfazz-config — nothing written."
+        return 0
+    fi
+    if [ "$status" = "kept" ] && [ "$key" = "$current" ]; then
+        print_info "MCP read-only Authentik token present and proven read-only."
+        # A key that reached .env while the running mcp-manager was created
+        # without it (a Portal enable whose recreate did not take) is caught by
+        # reconcile_mcp_manager_env, which compares every key (#3050, #3094).
+        return 0
+    fi
+    re='^[[:space:]]*(export[[:space:]]+)?MCP_MANAGER_AUTHENTIK_READONLY_TOKEN='
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ $re ]]; then
+            line="${BASH_REMATCH[0]}${key}"; seen=1
+        fi
+        new+="${line}"$'\n'
+    done < "$ENV_FILE"
+    [ "$seen" = 1 ] || new+="MCP_MANAGER_AUTHENTIK_READONLY_TOKEN=${key}"$'\n'
+    printf '%s' "$new" > "$ENV_FILE"
+    print_success "Minted mcp-manager's read-only Authentik token (view users only; proven: writes refused)."
+    # mcp-manager reads it from its environment: reconcile_mcp_manager_env
+    # recreates it from the file (#3094).
+    return 0
+}
+
+# #3094: every setting the MCP steps above write for mcp-manager (the Gitea
+# OAuth app, the read-only Authentik token, the minted secrets) reaches the
+# RUNNING container here, in one place. Two traps made the per-step recreates
+# miss: load_env exported every .env key into this process, and `docker
+# compose` prefers that (stale, often empty) export over the file, so a
+# recreate right after a builtin .env write rebuilt the container with the old
+# value; and a step whose key was already in .env never recreated at all.
+# This compares what compose renders for mcp-manager FROM THE FILE (every key
+# the .env holds is removed from compose's environment, exactly as an
+# operator's `docker compose up -d --no-deps mcp-manager` sees it) with the
+# running container's environment, recreates only on a difference, and then
+# proves the difference is gone. Names are printed, values never; no value is
+# ever on an argv (python runs docker itself and reads the answers on pipes).
+#
+# The same comparison serves any service that reads its settings from its
+# environment (the service name is the third argument): cognee's LLM_ARGS,
+# changed on an upgrade by cognee_cap_output_budget, reaches it the same way.
+_MCP_MANAGER_ENV_PY='
+import json, os, re, subprocess, sys
+mode, env_file = sys.argv[1], sys.argv[2]
+SVC = sys.argv[3] if len(sys.argv) > 3 else "mcp-manager"
+with open(env_file, encoding="utf-8") as fh:
+    keys = set(re.findall(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=", fh.read(), re.M))
+env = {k: v for k, v in os.environ.items() if k not in keys}
+def run(args):
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=600, check=True).stdout
+try:
+    if mode == "recreate":
+        run(["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", SVC])
+        sys.exit(0)
+    want = json.loads(run(["docker", "compose", "config", "--format", "json", SVC]))["services"][SVC].get("environment") or {}
+    have = dict(kv.partition("=")[::2] for kv in (json.loads(run(
+        ["docker", "inspect", "--type", "container", "--format", "{{json .Config.Env}}", SVC])) or []))
+except Exception:
+    sys.exit(2)
+drift = []
+for k, v in sorted(want.items()):
+    if v is None:
+        continue
+    v = str(v)
+    # compose config re-escapes a literal "$" as "$$" in its output.
+    if have.get(k) != v and have.get(k) != v.replace("$$", "$"):
+        drift.append(k)
+print(" ".join(drift))
+'
+# reconcile_service_env <service> — recreate a running service whose
+# environment differs from what compose renders from .env; then check again.
+reconcile_service_env() {
+    local svc="$1" drift rc=0
+    command -v docker >/dev/null 2>&1 || return 0
+    [ "$(docker inspect --type container --format '{{.State.Running}}' "$svc" 2>/dev/null)" = true ] || return 0
+    drift=$(python3 -c "$_MCP_MANAGER_ENV_PY" drift "$ENV_FILE" "$svc") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Could not compare ${svc}'s environment with .env — recreating it to be sure."
+        drift="(not compared)"
+    fi
+    [ -n "$drift" ] || return 0
+    print_substep "${svc} runs with settings that differ from .env (${drift}) — recreating it"
+    if ! python3 -c "$_MCP_MANAGER_ENV_PY" recreate "$ENV_FILE" "$svc"; then
+        print_warning "${svc} could not be recreated — run: docker compose up -d --no-deps ${svc}"
+        return 0
+    fi
+    rc=0
+    drift=$(python3 -c "$_MCP_MANAGER_ENV_PY" drift "$ENV_FILE" "$svc") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "${svc} was recreated, but its environment could not be checked against .env."
+    elif [ -n "$drift" ]; then
+        print_warning "${svc} still differs from .env after the recreate (${drift}) — run: docker compose up -d --no-deps ${svc}"
+    else
+        print_success "${svc} recreated; it now runs with the settings in .env."
+    fi
+    return 0
+}
+
+reconcile_mcp_manager_env() {
+    case ",${COMPOSE_PROFILES:-}," in *,mcp,*) ;; *) return 0 ;; esac
+    reconcile_service_env mcp-manager
+}
+
+# An upgraded box keeps the LLM_ARGS its install wrote, and before the cap that
+# was max_tokens 65536 for the default chat model: one looping extraction then
+# holds an engine slot for most of an hour. The fresh-install writer
+# (core/llm/sync.py) is not on the --refresh path, and the env migration format
+# compares whole values, so it cannot change one key inside the JSON. This step
+# lowers exactly the old default to the cap; another max_tokens is the
+# operator's and is kept, and the rest of LLM_ARGS is left as written. The
+# file is rewritten in place; then cognee is recreated if its environment now
+# differs from .env (also catching a model-name change made earlier in the
+# refresh, whose recreate saw the value load_env exported).
+cognee_cap_output_budget() {
+    [ -f "$SCRIPT_DIR/core/llm/cognee_output_budget.py" ] || return 0
+    [ -f "$ENV_FILE" ] || return 0
+    local out
+    if ! out=$(python3 "$SCRIPT_DIR/core/llm/cognee_output_budget.py" "$ENV_FILE" 2>&1); then
+        print_warning "cognee: LLM_ARGS could not be checked for the output cap (${out:-no output})."
+    elif [ -n "$out" ]; then
+        print_substep "$out"
+    fi
+    case ",${COMPOSE_PROFILES:-}," in *,cognee,*) ;; *) return 0 ;; esac
+    reconcile_service_env cognee
+}
+
+# #2500: fleet hub /v2 registry credential — mint-if-absent so an operator who
+# reaches only for `rzfz post-install --refresh` (or a `--preset` box) also
+# gets it. `rzfz upgrade`'s own mint (cli/upgrade.sh generate_missing_secrets)
+# has no restart to rely on here: unlike an upgrade, which ends with a
+# stack-wide `docker compose up -d` that picks up any changed .env value,
+# --refresh/--preset only recreate the specific services a step touches, and
+# llm-manager's /api/hub-auth reads LLM_HUB_REGISTRY_PASSWORD from its OWN
+# process environment (modules/llm/manager/app/api/enroll.py /
+# api/hub_auth.py) — a .env-only write is invisible to it until the container
+# is recreated. Delegates to hub-credentials.sh rather than reimplementing:
+# it mints, mirrors the SAME password into LLM_WORKER_REGISTRY_USER/PASSWORD
+# (#1677 — the co-located worker-agent's own runner-image pulls through the
+# host docker daemon need the identical pair, not an independently generated
+# one), and recreates llm-manager (+ llm-worker-agent) so the gate is live
+# immediately. Profile-gated + idempotent: hub-credentials.sh itself no-ops
+# (prints, does not mint or restart) when the pair is already fully set.
+#
+# #2500 fix round 1 (reviewer): the pre-check used to look at
+# LLM_HUB_REGISTRY_PASSWORD alone, so a box with a hub password but an
+# empty/stale LLM_WORKER_REGISTRY_USER/PASSWORD (#559 predates #1677;
+# reachable) short-circuited here BEFORE ever reaching hub-credentials.sh —
+# the exact partial state that script's own third branch now repairs. Check
+# the worker pair too, so this call site actually reaches the repair.
+ensure_hub_credentials_minted() {
+    _llm_manager_profile_active || return 0
+    local hub_user hub_pw worker_user worker_pw
+    hub_user="$(read_env_value "$ENV_FILE" LLM_HUB_REGISTRY_USER)"
+    hub_user="${hub_user:-fleet}"
+    hub_pw="$(read_env_value "$ENV_FILE" LLM_HUB_REGISTRY_PASSWORD)"
+    worker_user="$(read_env_value "$ENV_FILE" LLM_WORKER_REGISTRY_USER)"
+    worker_pw="$(read_env_value "$ENV_FILE" LLM_WORKER_REGISTRY_PASSWORD)"
+    if [ -n "${hub_pw}" ] && [ "${worker_user}" = "${hub_user}" ] && [ "${worker_pw}" = "${hub_pw}" ]; then
+        return 0   # fully provisioned AND mirrored already
+    fi
+    if [ -x "${SCRIPT_DIR}/cli/hub-credentials.sh" ]; then
+        "${SCRIPT_DIR}/cli/hub-credentials.sh" \
+            || print_warning "Hub credential provisioning reported an issue — run 'rzfz hub-credentials' manually."
+    else
+        print_warning "hub-credentials.sh not found — hub registry credentials NOT minted; run 'rzfz hub-credentials' manually."
+    fi
+    return 0
+}
+
+# #2755: the tenant row authentik_tenants_tenant.avatars decides whether Authentik asks
+# Gravatar; the container's AUTHENTIK_AVATARS env alone does not move it. init-authentik.sh
+# writes it on its full path and on its fast path, but `post-install --refresh` and an
+# upgrade that does not re-run the init left an upgraded box on 'gravatar,initials'. This
+# applies the SAME idempotent change (write only when the row differs; initials unless the
+# worker's env says otherwise). Never fatal.
+reconcile_authentik_tenant_avatars() {
+    docker ps --format '{{.Names}}' | grep -qx authentik-worker || return 0
+    local code
+    code='import os, sys, django
+sys.path.append("/")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "authentik.root.settings")
+django.setup()
+from authentik.tenants.models import Tenant
+t = Tenant.objects.get(schema_name="public")
+want = os.environ.get("AUTHENTIK_AVATARS") or "initials"
+if t.avatars != want:
+    print("Updating avatars from %r to %r" % (t.avatars, want))
+    t.avatars = want
+    t.save()
+else:
+    print("Avatars already set correctly.")'
+    if docker exec authentik-worker python -c "$code"; then
+        print_substep "Authentik tenant avatars row reconciled."
+    else
+        print_warning "Could not reconcile the Authentik tenant avatars row — Authentik may still ask Gravatar. Re-run 'rzfz post-install --refresh' once authentik-worker is healthy."
+    fi
+    return 0
+}
+
+reconcile_authentik_bindings() {
+    # ga.6 backstop for the init-time outpost-attach race. init-authentik.sh runs
+    # apply-policy-bindings.py during init (always, even fast-path — ga.4 round 17),
+    # but its poll can settle on a PARTIAL ProxyProvider set while the blueprint
+    # controller is still creating later modules' providers, leaving those providers
+    # un-attached to the embedded outpost → their subdomains 404 from Authentik
+    # ("Not Found" / broken start portal; seen on a test box + 0.208 — only
+    # 10 of 24 providers attached). At post-install time every ProxyProvider already
+    # exists and is stable, so re-running the same idempotent reconcile here attaches
+    # the full set reliably (no race). Runs on --preset AND --refresh.
+    docker ps --format '{{.Names}}' | grep -qx authentik-worker \
+        || { print_substep "authentik-worker not running — skipping outpost reconcile."; return 0; }
+    local script="$SCRIPT_DIR/core/Authentik/apply-policy-bindings.py"
+    [ -f "$script" ] || { print_substep "apply-policy-bindings.py not found — skipping outpost reconcile."; return 0; }
+    print_step "Reconciling Authentik bindings + embedded-outpost providers (post-install backstop)..."
+    if docker cp "$script" authentik-worker:/tmp/apply_policy_bindings.py 2>/dev/null \
+       && docker exec -e COMPOSE_PROFILES="${COMPOSE_PROFILES:-}" \
+            -e ENABLE_OPENWEBUI_OIDC="$(read_env_value "$ENV_FILE" ENABLE_OPENWEBUI_OIDC 2>/dev/null || true)" \
+            -e ENABLE_GITEA_AUTHENTIK_OIDC="$(read_env_value "$ENV_FILE" ENABLE_GITEA_AUTHENTIK_OIDC 2>/dev/null || true)" \
+            -e RAZZFAZZ_REQUIRE_ADMIN_MFA="$(read_env_value "$ENV_FILE" RAZZFAZZ_REQUIRE_ADMIN_MFA 2>/dev/null || true)" \
+            -e RAZZFAZZ_ACCESS_GROUP="$(read_env_value "$ENV_FILE" RAZZFAZZ_ACCESS_GROUP 2>/dev/null || true)" \
+            authentik-worker python /tmp/apply_policy_bindings.py; then
+        print_success "Authentik bindings + outpost providers reconciled."
+    else
+        print_warning "Authentik binding reconcile reported issues — re-run: docker exec -e COMPOSE_PROFILES=\"\$(grep -oE '^COMPOSE_PROFILES=.*' .env | cut -d= -f2-)\" -e RAZZFAZZ_REQUIRE_ADMIN_MFA=\"\$(grep -oE '^RAZZFAZZ_REQUIRE_ADMIN_MFA=.*' .env | cut -d= -f2-)\" -e RAZZFAZZ_ACCESS_GROUP=\"\$(grep -oE '^RAZZFAZZ_ACCESS_GROUP=.*' .env | cut -d= -f2- | tr -d '\\\"')\" authentik-worker python /tmp/apply_policy_bindings.py"
+    fi
+    reconcile_authentik_tenant_avatars
+}
+
+# ==============================================================================
+# DNS Provisioning
+# ==============================================================================
+setup_local_dns() {
+    print_step "DNS: Setting up /etc/hosts entries..."
+
+    local domain="${MAIN_DOMAIN}"
+    if [ -z "$domain" ]; then
+        print_error "MAIN_DOMAIN not set in .env"
+        return 1
+    fi
+
+    # Get local IP
+    local local_ip
+    local_ip=$(hostname -I | awk '{print $1}')
+
+    # rc6.4 fix (M023-S05.2 follow-up): derive the FQDN list from .env's
+    # `*_DOMAIN` keys instead of a hardcoded subdomain string. New modules
+    # (e.g. crawl4ai added in M023-S03 / rc6) carry their own *_DOMAIN env
+    # entry; the previous hardcoded list drifted every release because there
+    # was nothing forcing it to stay in sync. Static modules where the
+    # Caddyfile uses `<sub>.{$MAIN_DOMAIN}` directly (docling, pdf — no
+    # per-module *_DOMAIN) are added below as a small static suffix list.
+    #
+    # External *_DOMAIN values (e.g. GOOGLE_OAUTH_DOMAIN=example.com) are
+    # excluded by checking that the resolved FQDN actually ends with
+    # `.${MAIN_DOMAIN}`; only locally-served domains land in /etc/hosts.
+    local entries_needed=""
+    local added=0
+    local -A fqdns=()
+    fqdns["$domain"]=1
+
+    while IFS= read -r _line; do
+        # Split on the FIRST '=' only (#2663): `IFS='=' read -r k v` drops one
+        # trailing '=' from the last field, truncating base64 secrets.
+        key="${_line%%=*}"; value="${_line#*=}"
+        # Skip MAIN_DOMAIN itself (we already added the bare domain)
+        [ "$key" = "MAIN_DOMAIN" ] && continue
+        # Strip surrounding quotes if any
+        value="${value%\"}"; value="${value#\"}"
+        # Strip an inline ` # comment` (rc6.2 read_env_value semantics)
+        value=$(printf '%s' "$value" | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')
+        # Expand `${MAIN_DOMAIN}` literal
+        value="${value//\$\{MAIN_DOMAIN\}/$domain}"
+        # Skip empties / non-local
+        [ -z "$value" ] && continue
+        case "$value" in
+            *.${domain}|${domain}) fqdns["$value"]=1 ;;
+            *) ;;  # external domain, skip
+        esac
+    done < <(grep -E '^[A-Z][A-Z_0-9]*_DOMAIN=' "$ENV_FILE" 2>/dev/null)
+
+    # Static fallback for Caddyfile entries that do NOT use a per-module
+    # *_DOMAIN env (kept short — anything new should adopt the env-var
+    # pattern rather than grow this list).
+    for static_sub in docling pdf; do
+        fqdns["${static_sub}.${domain}"]=1
+    done
+
+    for fqdn in "${!fqdns[@]}"; do
+        if ! grep -qF " ${fqdn}" /etc/hosts 2>/dev/null \
+           && ! grep -qE "^[^#]*\b${fqdn//./\\.}\b" /etc/hosts 2>/dev/null; then
+            entries_needed="${entries_needed}${local_ip}   ${fqdn}\n"
+            added=$((added + 1))
+        fi
+    done
+    
+    if [ $added -eq 0 ]; then
+        print_info "All DNS entries already present in /etc/hosts."
+        return 0
+    fi
+    
+    # Write entries — try direct write first, fall back to sudo
+    if [ -w /etc/hosts ]; then
+        echo -e "$entries_needed" >> /etc/hosts
+    else
+        set +e
+        echo -e "$entries_needed" | sudo tee -a /etc/hosts > /dev/null 2>&1
+        local dns_rc=$?
+        set -e
+        if [ $dns_rc -ne 0 ]; then
+            print_warning "Could not write to /etc/hosts (no sudo access)."
+            print_info "Add these entries manually:"
+            echo -e "$entries_needed" | sed 's/^/    /'
+            return 0
+        fi
+    fi
+    
+    print_success "Added $added DNS entries to /etc/hosts."
+}
+
+# ==============================================================================
+# Speaches & Auxiliary Provisioning
+# ==============================================================================
+# speaches_download_model and the pinned default model ids live in
+# scripts/lib.sh: a full restore (cli/backup.sh) re-runs the same provisioning,
+# since backups exclude model files.
+
+# rc 0: Speaches lists both pinned models. rc 1: Speaches did not answer. rc 2:
+# it answers and a pinned model is missing. The verdict is what Speaches lists
+# afterwards, not the download's rc: offline the download step skips and returns
+# 0, so on a box with an empty volume this step used to report OK.
+step_speaches_provisioning() {
+    print_step "Speaches & Auxiliary: Provisioning..."
+
+    # #178 review: this function used to call every sub-step as a bare
+    # statement and END on print_success — a bash function's implicit
+    # return status is that of its LAST command, so the ORIGINAL body
+    # structurally returned 0 no matter what happened above, even when
+    # Speaches never came up. Speaches being unreachable is a genuine FAIL;
+    # propagate it.
+    if ! wait_for_service "Speaches" "http://127.0.0.1:${SPEACHES_PORT:-5003}/v1/models" 60; then
+        SPEACHES_STEP_PROBLEM="Speaches did not answer: its STT/TTS models were not checked or installed."
+        print_error "${SPEACHES_STEP_PROBLEM}"
+        return 1
+    fi
+
+    # From the package on any box, else downloaded where the network mode allows it.
+    razzfazz_speaches_download_defaults || true
+
+    # Model sync — GPUSTACK_API_KEY already in .env from ensure_gpustack_api_key
+    print_substep "Model sync: API key already configured in .env."
+
+    # LightRAG + Cognee model names already set in update_env_model_config
+    print_substep "LightRAG + Cognee: model names already configured in .env."
+
+    local missing url="http://127.0.0.1:${SPEACHES_PORT:-5003}"
+    if ! missing=$(razzfazz_speaches_missing_models "$url"); then
+        SPEACHES_STEP_PROBLEM="Speaches stopped answering at ${url}: its STT/TTS models are unconfirmed."
+        print_error "${SPEACHES_STEP_PROBLEM}"
+        return 1
+    fi
+    if [ -n "$missing" ]; then
+        missing=$(printf '%s' "$missing" | paste -sd, - | sed 's/,/, /g')
+        if razzfazz_is_offline; then
+            SPEACHES_STEP_PROBLEM="Speaches has NO model ${missing}: speech-to-text/text-to-speech will fail. This box is offline, so nothing was downloaded. Provide an offline package that carries them, then run: rzfz post-install --refresh"
+        else
+            SPEACHES_STEP_PROBLEM="Speaches has NO model ${missing}: speech-to-text/text-to-speech will fail. The download did not complete (see the response above). Once Speaches can reach HuggingFace, run: rzfz post-install --refresh"
+        fi
+        print_error "${SPEACHES_STEP_PROBLEM}"
+        return 2
+    fi
+
+    print_success "Speaches & auxiliary provisioning complete."
+}
+
+# The Speaches step for both arms. stts off: nothing to provision, the summary
+# row stays SKIP. Models missing is a failed step, not a warning: a box with
+# stts on and no model cannot do voice at all. It is not one of
+# POST_INSTALL_CRITICAL_STEPS: the box still serves models, and a HuggingFace
+# outage must not fail an install or mark its preset as not done.
+run_speaches_step() {
+    case ",$(printf '%s' "${COMPOSE_PROFILES:-}" | tr -d ' ')," in
+        *,stts,*) ;;
+        *) print_substep "Speaches: stts profile off, nothing to provision."; return 0 ;;
+    esac
+    SPEACHES_STEP_PROBLEM=""
+    if step_speaches_provisioning; then
+        record_step_status speaches OK
+    else
+        record_step_status speaches FAIL
+    fi
+    return 0
+}
+
+# ==============================================================================
+# Stored admin passwords that fail the shared policy (#2840)
+# ==============================================================================
+# A box installed before the password generator guaranteed a digit (#2814) can
+# hold an admin password Dify refuses (422: letters AND numbers). Re-sending the
+# same stored value on every `post-install --refresh` / upgrade fails the same
+# way and leaves Dify unprovisioned. So the STORED admin passwords are checked
+# against password_policy_violation (scripts/lib.sh); a failing one is replaced
+# by a generated compliant one, set through cli/set-admin-password.sh on every
+# app that used it, and recorded in .env. A compliant password is never touched.
+# The new value reaches set-admin-password.sh through the environment, not argv
+# (#2746), and is never logged.
+ADMIN_PASSWORD_APPS="authentik:AUTHENTIK_BOOTSTRAP_PASSWORD gitea:GITEA_ADMIN_PASSWORD dify:DIFY_ADMIN_PASSWORD openwebui:OPENWEBUI_ADMIN_PASSWORD gpustack:GPUSTACK_ADMIN_PASSWORD cognee:COGNEE_ADMIN_PASSWORD lightrag:LIGHTRAG_AUTH_ACCOUNTS komodo:KOMODO_INIT_ADMIN_PASSWORD"
+
+heal_noncompliant_admin_passwords() {
+    local -a apps=() keys=() vals=() done_vals=()
+    local pair app key val reason i j seen new rc failed=0 cur fleet
+    fleet="$(read_env_value "$ENV_FILE" AUTHENTIK_BOOTSTRAP_PASSWORD 2>/dev/null || true)"
+    for pair in $ADMIN_PASSWORD_APPS; do
+        app="${pair%%:*}"; key="${pair#*:}"
+        val="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
+        [ "$app" != lightrag ] || val="${val#*:}"
+        # An empty key means "uses the fleet password" (cli/set-admin-password.sh --status).
+        [ -n "$val" ] || { [ "$app" = authentik ] || val="$fleet"; }
+        [ -n "$val" ] || continue
+        if password_policy_violation "$val" >/dev/null; then continue; fi
+        apps+=("$app"); keys+=("$key"); vals+=("$val")
+    done
+    [ "${#apps[@]}" -gt 0 ] || return 0
+
+    for i in "${!apps[@]}"; do
+        seen=0
+        for cur in "${done_vals[@]+"${done_vals[@]}"}"; do [ "$cur" = "${vals[$i]}" ] && seen=1; done
+        [ "$seen" = 0 ] || continue
+        done_vals+=("${vals[$i]}")
+        reason="$(password_policy_violation "${vals[$i]}" || true)"
+        new="$(generate_password 24)" || { print_warning "Could not generate a replacement admin password; left as is."; failed=1; continue; }
+        local group=""
+        for j in "${!apps[@]}"; do
+            [ "${vals[$j]}" = "${vals[$i]}" ] || continue
+            group="${group:+$group }${apps[$j]}"
+            rc=0
+            RZFZ_NEW_ADMIN_PASSWORD="$new" "${SCRIPT_DIR}/cli/set-admin-password.sh" \
+                --app "${apps[$j]}" --password-from-env >/dev/null 2>&1 || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                print_warning "set-admin-password for ${apps[$j]} exited ${rc}; check: rzfz set-admin-password --status"
+            fi
+            # The record in .env follows the new value even where the app was not running.
+            cur="$(read_env_value "$ENV_FILE" "${keys[$j]}" 2>/dev/null || true)"
+            if [ "${apps[$j]}" != lightrag ] && [ "$cur" != "$new" ]; then
+                update_env_value "$ENV_FILE" "${keys[$j]}" "$new"
+            fi
+            export "${keys[$j]}=$(read_env_value "$ENV_FILE" "${keys[$j]}" 2>/dev/null || true)"
+        done
+        print_warning "Stored admin password for ${group} did not meet the password policy (${reason}) - rotated to a generated compliant one and set on those apps (value not shown; read it from .env)."
+    done
+    [ "$failed" = 0 ] || return 1
+    return 0
+}
+
+# ==============================================================================
+# Dify Provisioning
+# ==============================================================================
+DIFY_ACCESS=""
+DIFY_CSRF=""
+
+dify_login() {
+    local dify_email="$1"
+    local dify_pass="$2"
+    # #1164: the password (base64, as Dify's login wants it) travels on STDIN
+    # through a JSON body built by json.dumps — never in docker-exec argv
+    # (host ps / audit), never string-interpolated into JSON (a rotated
+    # password with a quote or backslash broke or injected the body).
+    local resp
+    resp=$(printf '%s' "$dify_pass" | DIFY_EMAIL="$dify_email" python3 -c '
+import base64, json, os, sys
+print(json.dumps({"email": os.environ["DIFY_EMAIL"],
+                  "password": base64.b64encode(sys.stdin.buffer.read()).decode()}))' \
+        | docker exec -i dify-api curl -s -D- -X POST http://localhost:5001/console/api/login \
+        -H "Content-Type: application/json" \
+        -d @- 2>&1)
+    
+    DIFY_ACCESS=$(echo "$resp" | grep -oP 'access_token=\K[^;]+')
+    DIFY_CSRF=$(echo "$resp" | grep -oP 'csrf_token=\K[^;]+')
+    
+    [ -n "$DIFY_ACCESS" ] && [ -n "$DIFY_CSRF" ]
+}
+
+dify_api() {
+    local method="$1" path="$2" data="${3:-}"
+    local url="http://localhost:5001${path}"
+    # #1164: argv array + body on STDIN — the old `sh -c "$cmd"` string with
+    # `-d '$data'` broke (or injected) on any single quote in the payload.
+    if [ -n "$data" ]; then
+        # #2682/#2619: the session cookie and CSRF token travel in the exec
+        # environment (rz_ctr_curl), never in an argv.
+        printf '%s' "$data" | RZ_CURL_HEADERS=$'Cookie: access_token='"${DIFY_ACCESS}; csrf_token=${DIFY_CSRF}"$'\nX-CSRF-Token: '"${DIFY_CSRF}" \
+            rz_ctr_curl dify-api -s -X "$method" \
+            -H "Content-Type: application/json" -d @- "$url" 2>/dev/null
+    else
+        RZ_CURL_HEADERS=$'Cookie: access_token='"${DIFY_ACCESS}; csrf_token=${DIFY_CSRF}"$'\nX-CSRF-Token: '"${DIFY_CSRF}" \
+            rz_ctr_curl dify-api -s -X "$method" "$url" </dev/null 2>/dev/null
+    fi
+}
+
+# S20: resolve the Dify admin account email. `razzfazz-ai-admin@$MAIN_DOMAIN`
+# is correct on a fresh install, but if the operator changed MAIN_DOMAIN after
+# init the account row keeps its ORIGINAL email — so the derived address finds
+# no account, the model-config Python sys.exit(1)s, and (pre-fix) the bash
+# success-check only grepped output → post-install "completed" with ZERO Dify
+# models (operator-reported on a test box after a razzfazz.ai →
+# example.com domain change). This helper tries the derived email
+# first, then falls back to the actual admin row (oldest account). On a
+# pre-setup box with no accounts it returns the derived email (which dify
+# setup will then create).
+_resolve_dify_admin_email() {
+    local derived="razzfazz-ai-admin@${MAIN_DOMAIN}"
+    local hit
+    hit=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -tAc \
+        "SELECT 1 FROM accounts WHERE email='${derived}' LIMIT 1;" 2>/dev/null | xargs)
+    if [ "$hit" = "1" ]; then
+        echo "$derived"; return 0
+    fi
+    local actual
+    actual=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -tAc \
+        "SELECT email FROM accounts ORDER BY created_at LIMIT 1;" 2>/dev/null | xargs)
+    if [ -n "$actual" ]; then
+        echo "$actual"; return 0
+    fi
+    echo "$derived"; return 0
+}
+
+# #1139: the ORDERED list of passwords that may belong to the Dify console
+# admin account, most-authoritative first, one per line.
+#
+# `DIFY_ADMIN_PASSWORD` is the .env RECORD of that account: cli/init.sh writes it
+# (#952), `cli/set-admin-password.sh dify` rotates it (its APPS registry maps
+# `dify:DIFY_ADMIN_PASSWORD`), and the day-1 `admin_password_verifies[dify]` probe
+# checks against it. `AUTHENTIK_BOOTSTRAP_PASSWORD` is only the FLEET default —
+# it is what pre-#952 boxes happened to seed the Dify account with, so it stays
+# as a LOGIN fallback for them and for nothing else.
+#
+# Using the bootstrap password as the primary source is what made an operator
+# rotation self-destruct: after `set-admin-password.sh dify` the account and
+# DIFY_ADMIN_PASSWORD hold the new password while the bootstrap one is stale, so
+# every login below failed and the last-resort DB reset quietly rewrote the
+# account back to the FLEET password — undoing the rotation and re-opening the
+# .env-vs-DB divergence (M033 S17) that reset exists to close.
+#
+# Empty values are dropped (an old .env may not carry the key at all; an empty
+# candidate would burn a login attempt and, on the setup path, create an admin
+# with no password), and a duplicate is emitted once — on a normal post-#952
+# install both variables hold the SAME value, and two identical failing logins
+# only double the pressure on Dify's login rate limiter.
+_dify_admin_passwords() {
+    local primary="${DIFY_ADMIN_PASSWORD:-}"
+    local fallback="${AUTHENTIK_BOOTSTRAP_PASSWORD:-}"
+    [ -n "$primary" ] && printf '%s\n' "$primary"
+    if [ -n "$fallback" ] && [ "$fallback" != "$primary" ]; then
+        printf '%s\n' "$fallback"
+    fi
+    return 0
+}
+
+dify_ensure_admin() {
+    local admin_email="razzfazz-ai-admin@${MAIN_DOMAIN}"
+    # #1139: candidates in priority order; [0] is the password this box CLAIMS
+    # the account has, so it is the one used to CREATE the account on a fresh
+    # setup and the one the self-heal below converges the account onto.
+    local -a admin_pw_candidates=()
+    local _dify_pw_line
+    while IFS= read -r _dify_pw_line; do
+        [ -n "$_dify_pw_line" ] && admin_pw_candidates+=("$_dify_pw_line")
+    done < <(_dify_admin_passwords)
+    local admin_pass="${admin_pw_candidates[0]:-}"
+    if [ -z "$admin_pass" ]; then
+        # Both keys empty: there is no password to log in with OR to create the
+        # account with. Proceeding would run /console/api/setup with an EMPTY
+        # password and leave a password-less Dify admin behind — fail loudly
+        # instead, the .env is the thing that needs fixing.
+        print_error "Neither DIFY_ADMIN_PASSWORD nor AUTHENTIK_BOOTSTRAP_PASSWORD is set in .env — cannot provision the Dify admin account."
+        return 1
+    fi
+
+    # Wait for dify-api to actually answer before ANY /console/api call.
+    # dify-api may have just been (re)created by a preceding `docker compose up`
+    # (env/profile change, module enable); while it is cold the setup + login
+    # endpoints refuse the connection / 5xx. Previously the ONLY readiness wait
+    # lived inside the INIT_PASSWORD>30 self-heal branch below, so the normal
+    # case (a <=30-char INIT_PASSWORD) skipped it entirely and fired
+    # /console/api/init at a not-ready API: init silently no-ops, setup stays
+    # "not_started", and every later login 401s "not_init_validated" ->
+    # "Failed to authenticate with Dify" on an otherwise-healthy box.
+    local _dify_wait
+    for _dify_wait in $(seq 1 40); do
+        docker exec dify-api curl -sf --max-time 5 \
+            http://localhost:5001/console/api/setup >/dev/null 2>&1 && break
+        sleep 3
+    done
+
+    # Check setup status
+    local setup_status
+    setup_status=$(docker exec dify-api curl -s http://localhost:5001/console/api/setup 2>/dev/null | \
+        python3 -c "import sys,json; print(json.load(sys.stdin).get('step',''))" 2>/dev/null)
+
+    if [ "$setup_status" != "finished" ]; then
+        # Two-step Dify setup:
+        # 1. Validate init password (sets session cookie)
+        # 2. Create admin user (requires session from step 1)
+        print_substep "Running Dify initial setup..."
+        local init_pass
+        # `|| true` is load-bearing: this file runs under `set -eo pipefail`, and a
+        # BARE `x=$(grep … | cut …)` inherits the pipeline's status. When the key is
+        # ABSENT grep exits 1, pipefail propagates it, and the run dies HERE — before
+        # the very next line, which already handles the empty case. (#200; same shape
+        # as the #755 regression fixed in #793.)
+        init_pass=$(grep "^INIT_PASSWORD=" "${SCRIPT_DIR}/.env.dify" 2>/dev/null | cut -d= -f2-) || true
+        # Dify 1.14+ caps INIT_PASSWORD at 30 chars (init_validate.py max_length=30).
+        # The box admin password is often longer (operator-generated); if it leaked
+        # into INIT_PASSWORD, /console/api/init 422s forever and Dify never gets set
+        # up. INIT_PASSWORD is ONLY the first-run gate — self-heal it to a dedicated
+        # <=30 token and recreate dify-api so the container env matches, then create
+        # the admin below with the real (good) admin password.
+        if [ -z "$init_pass" ] || [ "${#init_pass}" -gt 30 ]; then
+            init_pass=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
+            print_substep "Dify INIT_PASSWORD missing/>30 chars — setting a <=30 gate + recreating dify-api..."
+            update_env_value "${SCRIPT_DIR}/.env.dify" "INIT_PASSWORD" "$init_pass"
+            docker compose up -d --no-deps --force-recreate dify-api >/dev/null 2>&1 || true
+            for _i in $(seq 1 40); do
+                docker exec dify-api curl -s http://localhost:5001/console/api/setup >/dev/null 2>&1 && break
+                sleep 3
+            done
+        fi
+
+        # Step 1: Validate init password (capture session cookie)
+        local init_resp
+        # #1164: secrets on STDIN via json.dumps, never in argv (see dify_login).
+        init_resp=$(printf '%s' "$init_pass" | python3 -c '
+import json, sys
+print(json.dumps({"password": sys.stdin.read()}))' \
+            | docker exec -i dify-api curl -s -c /tmp/dify_setup.jar \
+            -X POST http://localhost:5001/console/api/init \
+            -H "Content-Type: application/json" \
+            -d @- 2>&1)
+        print_info "Init response: $init_resp"
+        
+        # Step 2: Create admin user (with session cookie from step 1)
+        # NOTE: setup endpoint expects PLAINTEXT password (no base64 encoding)
+        local setup_resp
+        setup_resp=$(printf '%s' "$admin_pass" | DIFY_EMAIL="$admin_email" python3 -c '
+import json, os, sys
+print(json.dumps({"email": os.environ["DIFY_EMAIL"], "name": "razzfazz.ai Admin",
+                  "password": sys.stdin.read()}))' \
+            | docker exec -i dify-api curl -s -b /tmp/dify_setup.jar \
+            -X POST http://localhost:5001/console/api/setup \
+            -H "Content-Type: application/json" \
+            -d @- 2>&1)
+        print_info "Setup response: $setup_resp"
+        sleep 2
+
+        # Verify the two-step setup actually took. A transient during init/setup
+        # (e.g. dify-api still warming) otherwise leaves Dify at "not_started",
+        # and every subsequent login 401s "not_init_validated". Retry the
+        # init+setup pair once before falling through to the login attempts.
+        local setup_after
+        setup_after=$(docker exec dify-api curl -s http://localhost:5001/console/api/setup 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('step',''))" 2>/dev/null)
+        if [ "$setup_after" != "finished" ]; then
+            print_substep "Dify setup did not complete on first attempt — retrying init+setup once..."
+            # #1164: same stdin transport as the first attempt above.
+            printf '%s' "$init_pass" | python3 -c '
+import json, sys
+print(json.dumps({"password": sys.stdin.read()}))' \
+                | docker exec -i dify-api curl -s -c /tmp/dify_setup.jar \
+                -X POST http://localhost:5001/console/api/init \
+                -H "Content-Type: application/json" \
+                -d @- >/dev/null 2>&1
+            printf '%s' "$admin_pass" | DIFY_EMAIL="$admin_email" python3 -c '
+import json, os, sys
+print(json.dumps({"email": os.environ["DIFY_EMAIL"], "name": "razzfazz.ai Admin",
+                  "password": sys.stdin.read()}))' \
+                | docker exec -i dify-api curl -s -b /tmp/dify_setup.jar \
+                -X POST http://localhost:5001/console/api/setup \
+                -H "Content-Type: application/json" \
+                -d @- >/dev/null 2>&1
+            sleep 2
+        fi
+    fi
+    
+    # Try login with current domain email — DIFY_ADMIN_PASSWORD first, then the
+    # bootstrap fallback for accounts seeded before #952 (see
+    # _dify_admin_passwords). A hit here means the box is already consistent, so
+    # nothing is written: the self-heal below is for accounts we CANNOT reach.
+    # #1739: only the PRIMARY candidate means agreement. A login with a LATER
+    # candidate says the account is reachable and on a password `.env` does not
+    # name — the state a reviewer measured on 0.79, where DIFY_ADMIN_PASSWORD
+    # did not verify against the live hash while every other app did. Returning
+    # here leaves an operator holding the right value out of `.env` and unable
+    # to log in, with the one explanation they can rule out (noted it down
+    # wrong) being the only one that is true of the file. So a fallback hit
+    # falls THROUGH to the converge below, which is what the comment on
+    # `admin_pw_candidates[0]` promises.
+    local _dify_pw _dify_i=0 _dify_converge=false
+    for _dify_pw in "${admin_pw_candidates[@]}"; do
+        if dify_login "$admin_email" "$_dify_pw"; then
+            if [ "$_dify_i" -eq 0 ]; then
+                print_success "Logged in to Dify as $admin_email."
+                set -e
+                return 0
+            fi
+            print_substep "Dify admin answers to the fallback password, not to the one .env names — converging it onto DIFY_ADMIN_PASSWORD."
+            _dify_converge=true
+            break
+        fi
+        _dify_i=$((_dify_i + 1))
+    done
+
+    # Try with old domain (existing installation) — skipped once we already know
+    # the account is reachable and needs converging (#1739).
+    local existing_email
+    [ "$_dify_converge" = true ] || existing_email=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -t -c \
+        "SELECT email FROM accounts LIMIT 1;" 2>/dev/null | xargs)
+
+    if [ -n "$existing_email" ] && [ "$existing_email" != "$admin_email" ]; then
+        print_info "Found existing Dify admin: $existing_email"
+        _dify_i=0
+        for _dify_pw in "${admin_pw_candidates[@]}"; do
+            if dify_login "$existing_email" "$_dify_pw"; then
+                if [ "$_dify_i" -eq 0 ]; then
+                    print_success "Logged in to Dify as $existing_email."
+                    set -e
+                    return 0
+                fi
+                # #1739, same rule for the old-domain account.
+                print_substep "Dify admin ($existing_email) answers to the fallback password — converging it onto DIFY_ADMIN_PASSWORD."
+                break
+            fi
+            _dify_i=$((_dify_i + 1))
+        done
+    fi
+
+    # Last resort: reset password in DB using Dify's own password hashing.
+    # Mechanically unchanged by #1139 — but `$admin_pass` is now the PRIMARY
+    # candidate (DIFY_ADMIN_PASSWORD when set), so an unreachable account is
+    # converged onto what .env claims instead of away from it.
+    print_substep "Resetting Dify admin password via database..."
+    local target_email="${existing_email:-${admin_email}}"
+    
+    # #1164: the plaintext arrives on STDIN — not inside the Python source in
+    # docker-exec argv (host ps / audit), where a quote also broke the program.
+    printf '%s' "$admin_pass" | docker exec -i dify-api python3 -c "
+import base64, hashlib, binascii, os, sys
+pw = sys.stdin.buffer.read()
+salt = os.urandom(16)
+dk = hashlib.pbkdf2_hmac('sha256', pw, salt, 10000)
+print(base64.b64encode(binascii.hexlify(dk)).decode())
+print(base64.b64encode(salt).decode())
+" 2>/dev/null | {
+        read -r pass_hash
+        read -r salt_b64
+        if [ -n "$pass_hash" ] && [ -n "$salt_b64" ]; then
+            docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -c \
+                "UPDATE accounts SET password='${pass_hash}', password_salt='${salt_b64}' WHERE email='${target_email}';" > /dev/null 2>&1
+            if [ "$target_email" != "$admin_email" ]; then
+                docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -c \
+                    "UPDATE accounts SET email='${admin_email}' WHERE email='${target_email}';" > /dev/null 2>&1
+            fi
+        fi
+    }
+    
+    sleep 1
+    if dify_login "$admin_email" "$admin_pass"; then
+        print_success "Dify admin password reset and logged in."
+        set -e
+        return 0
+    fi
+    
+    print_error "Failed to authenticate with Dify."
+    set -e
+    return 1
+}
+
+# Resolve the EXACT marketplace package identifier (name:version@checksum) for a
+# PINNED plugin version via the Dify marketplace REST API, queried from inside
+# dify-api. This REPLACES the console marketplace-search route that Dify 1.16
+# removed (see dify_install_plugin). We pin the *version* (deliberate — e.g.
+# gpustack must be >=0.0.15 for the thinking-param passthrough) but resolve the
+# package *hash* dynamically, because the marketplace can RE-PUBLISH a version
+# with a new checksum (it re-signed gpustack 0.0.15 on 2026-07-16, invalidating
+# our old pin hash → install 400 "file not found" → the "zero Dify models"
+# defect, #116). Empty output on any error → caller uses the hardcoded fallback.
+_dify_marketplace_pinned_identifier() {
+    local name="$1" version="$2"
+    [ -n "$name" ] && [ -n "$version" ] || return 0
+    local mkt
+    mkt=$(docker exec dify-api sh -c 'printf %s "${MARKETPLACE_API_URL:-https://marketplace.dify.ai}"' 2>/dev/null)
+    [ -n "$mkt" ] || mkt="https://marketplace.dify.ai"
+    docker exec dify-api sh -c "curl -s --max-time 15 '${mkt}/api/v1/plugins/${name}/${version}'" 2>/dev/null | \
+        python3 -c "
+import sys, json
+try:
+    v = json.load(sys.stdin).get('data', {}).get('version', {})
+    ident = v.get('unique_identifier') or ''
+    if not ident and v.get('plugin_tuple') and v.get('checksum'):
+        ident = '%s@%s' % (v['plugin_tuple'], v['checksum'])
+    if ident:
+        print(ident)
+except Exception:
+    pass
+" 2>/dev/null
+}
+
+# #1972: make the plugin pins above mean something. Dify's own default for the
+# MODEL plugin category is LATEST (every other category is fix_only —
+# api/services/plugin/plugin_auto_upgrade_service.py, and migration
+# 2026_06_15_1200 stamps that default onto every tenant that never touched it),
+# so the versions dify_install_plugin pins are install-time floors: 0.91 already
+# ran openai_api_compatible 0.0.66 and gpustack 0.0.16 BEFORE #1968 pinned them.
+# Operator decision 2026-09-12: fix_only for model plugins too. Keyed on
+# (tenant_id, category) — one row per tenant per category, UNIQUE — so this is
+# one idempotent UPDATE for every tenant, plus a row for any tenant that has
+# none (an ABSENT row means "default", and the default is LATEST).
+# #1972 + #3233: model plugins upgrade fix_only (operator decision), and the
+# plugins the pin table pins are excluded from Dify's auto-upgrade altogether.
+dify_pin_model_plugin_strategy() {
+    local _psql="docker exec postgres psql -U ${POSTGRES_USER:-docker} -d ${DIFY_DB:-dify_db} -tAc" rc=0
+    _dify_pin_model_plugin_fix_only || rc=$?
+    # 2 = the table could not be read; the exclusion would only repeat that
+    [ "$rc" = 2 ] || _dify_exclude_pinned_plugins_from_auto_upgrade "$_psql"
+    return 0
+}
+
+_dify_pin_model_plugin_fix_only() {
+    local _psql="docker exec postgres psql -U ${POSTGRES_USER:-docker} -d ${DIFY_DB:-dify_db} -tAc"
+    local off_default missing
+    off_default=$($_psql "select count(*) from tenant_plugin_auto_upgrade_strategies where category='model' and strategy_setting<>'fix_only';" 2>/dev/null | tr -d '[:space:]')
+    missing=$($_psql "select count(*) from tenants t where not exists (select 1 from tenant_plugin_auto_upgrade_strategies s where s.tenant_id=t.id and s.category='model');" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$off_default" ] || [ -z "$missing" ]; then
+        print_warning "Dify: could not read tenant_plugin_auto_upgrade_strategies — model plugins may still auto-upgrade to latest and the pins above are install-time values only (#1972)."
+        return 2
+    fi
+    if [ "$off_default" = "0" ] && [ "$missing" = "0" ]; then
+        print_substep "Dify: model plugin auto-upgrade is fix_only for every tenant (#1972)."
+        return 0
+    fi
+    if [ "$off_default" != "0" ]; then
+        $_psql "update tenant_plugin_auto_upgrade_strategies set strategy_setting='fix_only', updated_at=now() where category='model' and strategy_setting<>'fix_only';" >/dev/null 2>&1 || true
+    fi
+    if [ "$missing" != "0" ]; then
+        $_psql "insert into tenant_plugin_auto_upgrade_strategies (id, tenant_id, strategy_setting, upgrade_time_of_day, upgrade_mode, exclude_plugins, include_plugins, created_at, updated_at, category) select gen_random_uuid(), t.id, 'fix_only', 0, 'exclude', '[]', '[]', now(), now(), 'model' from tenants t where not exists (select 1 from tenant_plugin_auto_upgrade_strategies s where s.tenant_id=t.id and s.category='model');" >/dev/null 2>&1 || true
+    fi
+    local still
+    still=$($_psql "select (select count(*) from tenant_plugin_auto_upgrade_strategies where category='model' and strategy_setting<>'fix_only') + (select count(*) from tenants t where not exists (select 1 from tenant_plugin_auto_upgrade_strategies s where s.tenant_id=t.id and s.category='model'));" 2>/dev/null | tr -d '[:space:]')
+    if [ "$still" = "0" ]; then
+        print_substep "Dify: model plugin auto-upgrade set to fix_only (${off_default} tenant(s) were on LATEST, ${missing} had no row) (#1972)."
+    else
+        print_warning "Dify: ${still:-?} tenant(s) still let model plugins auto-upgrade — the UPDATE did not take; check tenant_plugin_auto_upgrade_strategies by hand (#1972)."
+    fi
+}
+
+# #3233: fix_only did NOT make the pins "the version in service" (#1972's claim):
+# in 0.0.x versioning every release is a fix, and the daily upgrade moved
+# openai_api_compatible 0.0.66 -> 0.0.83 on 0.91 behind the pin. The operator's
+# fix_only stays for every category; the plugins the pin table pins are put on
+# each strategy row's exclude list, so the pin decides their version and a new
+# version reaches a box only with a release (the offline package carries exactly
+# the pinned one, so online and air-gapped boxes run the same). A row in
+# include mode (`partial`, only the listed plugins upgrade) loses the pinned ids
+# from its include list instead.
+_dify_exclude_pinned_plugins_from_auto_upgrade() {
+    local _psql="$1" names arr
+    names=$(razzfazz_dify_plugin_pinned_names 2>/dev/null) || names=""
+    if [ -z "$names" ]; then
+        print_warning "Dify: no plugin pins found — pinned plugins are NOT excluded from auto-upgrade."
+        return 0
+    fi
+    arr=$(printf '%s\n' "$names" | awk 'NF { gsub(/'"'"'/, ""); printf "%s'"'"'%s'"'"'", (n++ ? "," : ""), $0 }')
+    $_psql "update tenant_plugin_auto_upgrade_strategies set
+              exclude_plugins = (select coalesce(json_agg(distinct x order by x), '[]'::json) from (
+                  select json_array_elements_text(exclude_plugins) as x union select unnest(array[${arr}])) u),
+              upgrade_mode = 'exclude', updated_at = now()
+            where upgrade_mode in ('all', 'exclude')
+              and not (exclude_plugins::jsonb @> to_jsonb(array[${arr}]));
+            update tenant_plugin_auto_upgrade_strategies set
+              include_plugins = (select coalesce(json_agg(x order by x), '[]'::json) from json_array_elements_text(include_plugins) x
+                                 where x <> all (array[${arr}])),
+              updated_at = now()
+            where upgrade_mode = 'partial'
+              and include_plugins::jsonb ?| array[${arr}];" >/dev/null 2>&1 || true
+    local left
+    left=$($_psql "select count(*) from tenant_plugin_auto_upgrade_strategies where
+                     (upgrade_mode in ('all', 'exclude') and not (exclude_plugins::jsonb @> to_jsonb(array[${arr}])))
+                     or (upgrade_mode = 'partial' and include_plugins::jsonb ?| array[${arr}]);" 2>/dev/null | tr -d '[:space:]')
+    if [ "$left" = "0" ]; then
+        print_substep "Dify: pinned plugins ($(printf '%s' "$names" | paste -sd, - | sed 's/,/, /g')) are excluded from auto-upgrade — their version changes only with a release."
+    else
+        print_warning "Dify: ${left:-?} auto-upgrade strateg(ies) still upgrade a pinned plugin — check tenant_plugin_auto_upgrade_strategies by hand."
+    fi
+}
+
+# #2222 — install a Dify plugin from the offline package's plugins/dify/ tree.
+# $1 = <vendor>/<name>. Returns 0 when installed or already installed, 0 with a
+# stated skip when the package carries no plugins, 1 when the package carries
+# the plugin and the install failed.
+#
+# Route, measured on 0.175 (2026-09-16): `install/pkg` resolves its identifier
+# against plugin_declarations in dify_plugin_db and NEVER looks at the daemon's
+# file cache — a file placed at the identifier's path answered 500 "plugin not
+# found / failed to get plugin declaration". Only the UPLOAD path writes the
+# declaration row, so the file is uploaded through the console
+# (`/plugin/upload/pkg`, multipart) and the identifier the upload returns is
+# what `install/pkg` is given. The identifier in the file's path is a NAME (its
+# digest is not a hash of the file); integrity is the package's MANIFEST.sha256.
+_dify_api_upload_pkg() {
+    # $1 = path of the .difypkg inside dify-api → the upload response (JSON)
+    RZ_CURL_HEADERS=$'Cookie: access_token='"${DIFY_ACCESS}; csrf_token=${DIFY_CSRF}"$'\nX-CSRF-Token: '"${DIFY_CSRF}" \
+        rz_ctr_curl dify-api -s -X POST \
+        -F "pkg=@$1" "http://localhost:5001/console/api/workspaces/current/plugin/upload/pkg" </dev/null 2>/dev/null
+}
+
+# #2320 — the pin reconcile. A package upgrade left an installed plugin at its
+# old version (0.79, 2026-09-20, 2026.08-ga.15 -> 2026.09-rc13:
+# openai_api_compatible 0.0.34 kept while the package carried 0.0.66): the
+# package path returned on "already installed" without looking at the version,
+# and the marketplace path issued a plain install/marketplace over the old
+# version, which the daemon refuses INSIDE the task (curd.InstallPlugin:
+# ErrPluginAlreadyInstalled, keyed on tenant + plugin_id) while the caller only
+# reported "initiation". The pin is the version in service (#1972), so an
+# installed plugin is reconciled to it, on both paths:
+#   installed at the pin  -> untouched, no install call;
+#   installed elsewhere   -> upgraded to the pin. The daemon's install/upgrade
+#                            installs the NEW runtime first and swaps the
+#                            tenant's installation only on success, so a
+#                            failed build leaves the old version in service;
+#   not installed         -> installed at the pin (as before).
+# Every outcome is one line naming the plugin, was, now.
+
+# "<vendor>/<name>:<version>@<digest>" -> "<version>"; no ':' -> empty.
+_dify_plugin_version() {
+    local v="${1#*:}"
+    [ "$v" != "$1" ] || v=""
+    printf '%s' "${v%%@*}"
+}
+
+# The tenant's installed identifier for a plugin, from the console's list —
+# the one place both install paths consulted (plugin_id first, the bare name
+# as the fallback the package path always had). Empty when not installed.
+# #3233: what Dify's console reports is Dify's own record of the installation.
+# The plugin daemon can serve another version: Dify's daily auto-upgrade moved
+# 0.91 from 0.0.66 to 0.0.83 while every refresh printed "was 0.0.66, now
+# 0.0.66 — at the pin, untouched". The daemon's table is the truth about what
+# runs; a disagreement is reported and the daemon's answer is used.
+_dify_plugin_daemon_id() {
+    local name="${1//\'/}"
+    case "$name" in */*) ;; *) return 0 ;; esac
+    docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DB_PLUGIN_DATABASE:-dify_plugin_db}" -tAc \
+        "select plugin_unique_identifier from plugin_installations where plugin_id='${name}' order by updated_at desc limit 1;" \
+        2>/dev/null | tr -d '[:space:]' || true
+}
+
+_dify_plugin_installed_id() {
+    local search_name="$1" rec dmn
+    rec=$(_dify_plugin_record_id "$search_name")
+    dmn=$(_dify_plugin_daemon_id "$search_name")
+    if [ -n "$dmn" ] && [ "$(_dify_plugin_version "$dmn")" != "$(_dify_plugin_version "$rec")" ]; then
+        print_warning "Dify plugin '${search_name}': Dify's record says ${rec:-none}, the plugin daemon serves ${dmn} — the daemon's version is what runs, and decides." >&2
+        printf '%s\n' "$dmn"
+        return 0
+    fi
+    printf '%s\n' "${rec:-$dmn}"
+}
+
+_dify_plugin_record_id() {
+    local search_name="$1"
+    dify_api GET "/console/api/workspaces/current/plugin/list?page=1&page_size=100" | \
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for p in d.get('plugins',[]):
+        if p.get('plugin_id')=='${search_name}' or p.get('name')=='${search_name}'.split('/')[-1]:
+            u=p.get('plugin_unique_identifier') or ''
+            if not u and p.get('version'): u='%s:%s' % (p.get('plugin_id',''), p['version'])
+            print(u); break
+except Exception: pass" 2>/dev/null || true
+}
+
+# The per-plugin outcome line (#2320): $1 = name, $2 = was, $3 = now, $4 = why.
+_dify_plugin_outcome() {
+    print_info "Dify plugin '$1': was ${2:-none}, now ${3:-none} — $4 (#2320)"
+}
+
+# Poll an install/upgrade task to its verdict: 0 success, 1 failed (the
+# daemon's message in _DIFY_PLUGIN_TASK_DETAIL), 2 not settled in the poll
+# budget. The task, not the declaration row, is the verdict (0.175, #2222).
+_DIFY_PLUGIN_TASK_DETAIL=""
+_dify_plugin_task_wait() {
+    local task_id="$1" i status
+    _DIFY_PLUGIN_TASK_DETAIL=""
+    for i in $(seq 1 "${RZFZ_DIFY_PLUGIN_TASK_POLLS:-24}"); do
+        sleep "${RZFZ_DIFY_PLUGIN_TASK_POLL_SECONDS:-5}"
+        status=$(dify_api GET "/console/api/workspaces/current/plugin/tasks/${task_id}" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); t=d.get('task', d) or {}
+    s=t.get('status') or ''
+    msgs='; '.join((p.get('message') or '') for p in (t.get('plugins') or []) if p.get('message'))
+    print(s + '\t' + msgs)
+except Exception: print('')" 2>/dev/null || true)
+        _DIFY_PLUGIN_TASK_DETAIL="${status#*	}"; status="${status%%	*}"
+        case "$status" in
+            success) return 0 ;;
+            failed)  return 1 ;;
+        esac
+    done
+    return 2
+}
+
+# Swap the tenant's installation from one identifier to another through the
+# daemon's own upgrade route — the request Dify's PluginInstaller.upgrade_plugin
+# sends, issued from inside dify-api with the daemon URL and key it holds. The
+# console's upgrade/marketplace wrapper is not used on the package path: it
+# posts an install event to marketplace.dify.ai before it reaches the daemon
+# and raises when that call fails, which on an air-gapped box it does. Prints
+# the task id, or DONE when the daemon swapped synchronously; on any refusal
+# prints "ERR<TAB><the daemon's message>" and returns 1 (stdout, because the
+# caller reads it through a command substitution, where a variable set here
+# would die with the subshell).
+_dify_plugin_upgrade_via_daemon() {
+    local old_id="$1" new_id="$2" tenant resp out
+    tenant=$(dify_api GET "/console/api/workspaces/current" | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('id') or '')
+except Exception: print('')" 2>/dev/null || true)
+    [ -n "$tenant" ] || tenant=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -tAc \
+        "select id from tenants limit 1;" 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -z "$tenant" ]; then
+        printf 'ERR\tcould not resolve the Dify tenant'
+        return 1
+    fi
+    resp=$(printf '{"original_plugin_unique_identifier":"%s","new_plugin_unique_identifier":"%s","source":"package","meta":{"plugin_unique_identifier":"%s"}}' \
+            "$old_id" "$new_id" "$new_id" | \
+        docker exec -i dify-api sh -c 'umask 077; cfg=$(mktemp) || exit 1; trap "rm -f \"$cfg\"" EXIT; awk "BEGIN{printf \"header = \\\"X-Api-Key: %s\\\"\\n\", ENVIRON[\"PLUGIN_DAEMON_KEY\"]}" > "$cfg"; curl -s --max-time 60 -K "$cfg" -X POST -H "Content-Type: application/json" -d @- "${PLUGIN_DAEMON_URL:-http://dify-plugin-daemon:5002}/plugin/$1/management/install/upgrade"' _ "$tenant" 2>/dev/null || true)
+    out=$(printf '%s' "$resp" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    if d.get('code',0)!=0:
+        print('ERR\t' + (d.get('message') or 'daemon error'))
+    else:
+        t=d.get('data') or {}
+        print('DONE' if t.get('all_installed') else (t.get('task_id') or ''))
+except Exception: print('')" 2>/dev/null || true)
+    case "$out" in
+        ERR*) printf '%s' "$out"; return 1 ;;
+        "")   printf 'ERR\tunparseable answer: %s' "$(printf '%s' "$resp" | head -c 200)"; return 1 ;;
+    esac
+    printf '%s' "$out"
+}
+
+# Does the package at APPLIANCE_OFFLINE_PKG carry this plugin? (index read
+# only, no extraction) — the operator's package-first rule: what the package
+# carries is used regardless of RAZZFAZZ_NETWORK_MODE; the mode decides only
+# whether the marketplace may be asked for what the package lacks.
+_dify_package_carries_plugin() {
+    local search_name="$1" pkg="${APPLIANCE_OFFLINE_PKG:-}" _idx=""
+    [ -n "$pkg" ] && [ -f "$pkg" ] || return 1
+    _idx="$(appliance_pkg_index "$pkg")" || return 1
+    grep -q "plugins/dify/${search_name}:" "$_idx" 2>/dev/null
+}
+
+# The ONE package member a plugin is installed from (F4 side finding, 0.175 @
+# a602d7c67). plugins/dify/ is the build box's daemon package cache, which keeps
+# every version it ever fetched: a build box whose model plugin auto-upgraded
+# before #1972 carries openai_api_compatible 0.0.66 AND 0.0.67. The version
+# decision and the file that is uploaded must be the SAME member, so both come
+# from this one lookup: the member at the stack's pin ($3, dify_install_plugin's
+# pin table) when the package carries it, else the highest version.
+# Sets _DIFY_PKG_MEMBER to the member's index line (e.g.
+# ./plugins/dify/<vendor>/<name>:<ver>@<digest>) and _DIFY_PKG_MEMBER_NOTE to a
+# sentence naming the candidates when there are several; rc 1 when none.
+_DIFY_PKG_MEMBER=""
+_DIFY_PKG_MEMBER_NOTE=""
+_dify_package_plugin_member() {
+    local idx="$1" search_name="$2" pin="$3" cands chosen="" n why
+    _DIFY_PKG_MEMBER=""; _DIFY_PKG_MEMBER_NOTE=""
+    cands="$(grep -E "(^|/)plugins/dify/${search_name}:[^/]+$" "$idx" 2>/dev/null || true)"
+    [ -n "$cands" ] || return 1
+    why="the highest version"
+    if [ -n "$pin" ]; then
+        chosen="$(printf '%s\n' "$cands" | grep -F "/${search_name}:${pin}@" | head -1 || true)"
+        [ -z "$chosen" ] || why="the stack's pin ${pin}"
+    fi
+    if [ -z "$chosen" ]; then
+        # highest version: sort "<version> <line>" with sort -V
+        chosen="$(printf '%s\n' "$cands" | while IFS= read -r l; do
+                      v="${l##*:}"; printf '%s %s\n' "${v%%@*}" "$l"
+                  done | LC_ALL=C sort -V -k1,1 | tail -1 | cut -d' ' -f2-)"
+    fi
+    n="$(printf '%s\n' "$cands" | wc -l | tr -d ' ')"
+    if [ "$n" -gt 1 ]; then
+        _DIFY_PKG_MEMBER_NOTE="The package carries ${n} members for '${search_name}' ($(printf '%s\n' "$cands" | sed 's#.*plugins/dify/##' | tr '\n' ' ' | sed 's/ $//')); using ${chosen##*plugins/dify/}, ${why}."
+    fi
+    _DIFY_PKG_MEMBER="$chosen"
+    [ -n "$chosen" ]
+}
+
+_dify_install_plugin_from_package() {
+    # $1 = <vendor>/<name>, $2 = the stack's pin version for it (may be empty)
+    local search_name="$1" pin_version="${2:-}" pkg="${APPLIANCE_OFFLINE_PKG:-}" _idx="" _prefix="" tmp="" file="" rel="" member=""
+    if [ -z "$pkg" ] || [ ! -f "$pkg" ]; then
+        print_info "Offline box and no offline package at APPLIANCE_OFFLINE_PKG — Dify plugin '${search_name}' not installed (#2222)."
+        return 0
+    fi
+    _idx="$(appliance_pkg_index "$pkg")" || _idx=""
+    if [ -z "$_idx" ] || ! _prefix="$(appliance_pkg_prefix "$_idx" plugins)"; then
+        print_warning "Offline package carries no plugins/ subtree — Dify plugin '${search_name}' not installed; this box has NO model provider until a package built with the daemon's plugin cache is applied (#2222)."
+        return 0
+    fi
+    # #2489: the "already at the pin?" decision needs no extraction — the index
+    # already names this member as <vendor>/<name>:<version>@<digest> (the same
+    # string _dify_package_carries_plugin greps for above), so the version is
+    # read straight off the index line. Extraction is the expensive step (a
+    # full gzip pass over a package that can be many GB — measured 11-12
+    # min/pass for a 167 GB package on 0.175, #2489) and is paid ONLY below,
+    # for a plugin that turns out to actually need installing.
+    # F4 side finding: ONE lookup names the member; the version below and the
+    # file uploaded further down are both that member (a package may carry
+    # several versions of a plugin).
+    if _dify_package_plugin_member "$_idx" "$search_name" "$pin_version"; then
+        member="$_DIFY_PKG_MEMBER"
+        [ -z "$_DIFY_PKG_MEMBER_NOTE" ] || print_info "$_DIFY_PKG_MEMBER_NOTE"
+    fi
+    rel="${member##*plugins/dify/}"
+    if [ -z "$member" ] || [ -z "$rel" ]; then
+        print_warning "Offline package carries plugins/ but not '${search_name}' — not installed; the package was built on a box without it (#2222)."
+        return 0
+    fi
+    local installed_id installed_ver pkg_ver
+    installed_id=$(_dify_plugin_installed_id "$search_name")
+    installed_ver=$(_dify_plugin_version "$installed_id")
+    pkg_ver=$(_dify_plugin_version "$rel")
+    if [ -n "$installed_id" ] && [ "$installed_ver" = "$pkg_ver" ]; then
+        print_info "Plugin '${search_name}' already installed at the package pin (${installed_id})."
+        _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "at the package pin, untouched"
+        return 0
+    fi
+
+    # #2489: this plugin needs installing — extract the package's plugins/
+    # subtree AT MOST ONCE PER RUN (a run-scoped cache, the same shape as
+    # _RZFZ_DIFY_WHEELHOUSE_STAGED just below) and reuse it for every
+    # remaining plugin this function is called for. A per-member
+    # `tar -x … <one identifier>` would still decompress the WHOLE archive —
+    # gzip is not seekable — and this function also needs the dify-uv-cache/
+    # and dify-wheelhouse/ subtrees beside the .difypkg file, so one call for
+    # the whole plugins/ prefix, done once, is the cheapest correct
+    # extraction; a plugin already at its pin (the branch just above)
+    # triggers none of this at all.
+    if [ "${_RZFZ_DIFY_PLUGINS_EXTRACT_DONE:-0}" = "0" ]; then
+        tmp="$(mktemp -d /var/tmp/rzfz-dify-plugins.XXXXXX 2>/dev/null || mktemp -d)" || return 1
+        if tar xzf "$pkg" -C "$tmp" "$_prefix" 2>/dev/null; then
+            _RZFZ_DIFY_PLUGINS_TMP="$tmp"
+            _RZFZ_DIFY_PLUGINS_EXTRACT_DONE=1
+            # The cache dir must outlive THIS call — every later plugin in the
+            # run reuses it — so it is cleaned at process EXIT, not at this
+            # function's RETURN (a RETURN trap would delete it right after the
+            # very install it was extracted for, before the next plugin gets
+            # to reuse it). Appended to whatever EXIT trap already runs
+            # (post-install.sh's own top-level run-log trap, #427) rather than
+            # replacing it — `trap -p` reads the existing one back so it is
+            # not lost.
+            local _existing_trap
+            _existing_trap="$(trap -p EXIT)"
+            _existing_trap="${_existing_trap#trap -- \'}"
+            _existing_trap="${_existing_trap%\' EXIT}"
+            trap "${_existing_trap:+${_existing_trap}; }rm -rf '${tmp}' 2>/dev/null || true" EXIT
+        else
+            rm -rf "$tmp"
+            _RZFZ_DIFY_PLUGINS_EXTRACT_DONE=2
+        fi
+    fi
+    if [ "$_RZFZ_DIFY_PLUGINS_EXTRACT_DONE" != "1" ]; then
+        print_warning "Could not extract ${_prefix} from the offline package — Dify plugin '${search_name}' not installed (#2222)."
+        return 1
+    fi
+    tmp="$_RZFZ_DIFY_PLUGINS_TMP"
+
+    # the file's path relative to plugins/dify names the plugin: <vendor>/<name>:<version>@<digest>.
+    # Exactly the member chosen above — never `find | head -1`, which lists the
+    # extraction in readdir order and could pick a sibling version.
+    file="${tmp}/${member#./}"
+    if [ ! -f "$file" ]; then
+        print_warning "Offline package lists ${rel} but it is not in the extracted ${_prefix} — Dify plugin '${search_name}' not installed (#2222)."
+        return 1
+    fi
+    # The daemon builds the plugin's Python environment at install time with uv
+    # and fetches from PyPI whatever its cache lacks — under a real air gap the
+    # task dies ("failed to init environment") unless the cache is seeded. The
+    # package carries the daemon's own cache (plugins/dify-uv-cache); it is
+    # restored ONCE per run, BEFORE the first upload, because the build is part
+    # of the install task. Measured on 0.175: cache alone → success in 8 s.
+    if [ "${_RZFZ_DIFY_WHEELHOUSE_STAGED:-0}" != "1" ]; then
+        # #2272: the wheelhouse is what the daemon's uv resolves from on an
+        # air-gapped box (the bound uv.toml names it with no-index); the cache
+        # below is kept for the `uv venv` step only.
+        local wh_dir wroot
+        wh_dir="$(find "$tmp" -type d -path "*plugins/dify-wheelhouse" | head -1)"
+        if [ -n "$wh_dir" ] && [ -n "$(ls -A "$wh_dir" 2>/dev/null)" ]; then
+            wroot="$(docker exec dify-plugin-daemon sh -c 'printf %s "${PLUGIN_STORAGE_LOCAL_ROOT:-/app/storage}"' 2>/dev/null)"; wroot="${wroot:-/app/storage}"
+            if docker exec dify-plugin-daemon mkdir -p "${wroot}/cwd/.wheelhouse" 2>/dev/null \
+               && docker cp "${wh_dir}/." "dify-plugin-daemon:${wroot}/cwd/.wheelhouse/" 2>/dev/null \
+               && docker exec -u root dify-plugin-daemon chown -R dify:dify "${wroot}/cwd/.wheelhouse" 2>/dev/null; then
+                print_substep "Staged the plugin daemon's wheelhouse from the offline package (${wroot}/cwd/.wheelhouse, $(find "$wh_dir" -type f -name '*.whl' | wc -l | tr -d ' ') wheels) — the plugins resolve from it and from nothing else (#2272)."
+                _RZFZ_DIFY_WHEELHOUSE_STAGED=1
+            else
+                print_warning "Could not stage the plugin daemon's wheelhouse from the package — the plugin install will not resolve offline (#2272)."
+            fi
+        else
+            print_warning "Offline package carries no plugins/dify-wheelhouse — built before #2272; the plugin install will not resolve offline."
+            _RZFZ_DIFY_WHEELHOUSE_STAGED=1   # say it once, not per plugin
+        fi
+    fi
+    if [ "${_RZFZ_DIFY_UV_CACHE_SEEDED:-0}" != "1" ]; then
+        local cache_dir root
+        cache_dir="$(find "$tmp" -type d -path "*plugins/dify-uv-cache" | head -1)"
+        if [ -n "$cache_dir" ] && [ -n "$(ls -A "$cache_dir" 2>/dev/null)" ]; then
+            root="$(docker exec dify-plugin-daemon sh -c 'printf %s "${PLUGIN_STORAGE_LOCAL_ROOT:-/app/storage}"' 2>/dev/null)"; root="${root:-/app/storage}"
+            if docker exec dify-plugin-daemon mkdir -p "${root}/cwd/.uv-cache" 2>/dev/null \
+               && docker cp "${cache_dir}/." "dify-plugin-daemon:${root}/cwd/.uv-cache/" 2>/dev/null \
+               && docker exec -u root dify-plugin-daemon chown -R dify:dify "${root}/cwd/.uv-cache" 2>/dev/null; then
+                print_substep "Seeded the plugin daemon's uv cache from the offline package (${root}/cwd/.uv-cache) — the plugins' Python environments build without PyPI (#2222)."
+                _RZFZ_DIFY_UV_CACHE_SEEDED=1
+            else
+                print_warning "Could not seed the plugin daemon's uv cache from the package — the plugin install will need PyPI, which an air-gapped box does not have (#2222)."
+            fi
+        else
+            if [ "${_RZFZ_DIFY_WHEELHOUSE_STAGED:-0}" = "1" ] && [ -n "${wh_dir:-}" ]; then
+                print_info "Offline package carries no plugins/dify-uv-cache — not needed: the plugins resolve from the staged wheelhouse (#2305)."
+            else
+                print_warning "Offline package carries no plugins/dify-uv-cache — the plugin install will need PyPI, which an air-gapped box does not have; expect 'failed to init environment' (#2222)."
+            fi
+            _RZFZ_DIFY_UV_CACHE_SEEDED=1   # say it once, not per plugin
+        fi
+    fi
+    # #2320: reconcile to the package's version — presence alone is not the
+    # answer. The version is compared, not the digest: the path's digest is a
+    # name the daemon minted on the build box and the marketplace re-signs
+    # packages (#116); the pin is the version (#1972). (#2489: the comparison
+    # itself already happened above, off the index, before any extraction —
+    # installed_id/installed_ver/pkg_ver from there are reused here.)
+    if [ -n "$installed_id" ]; then
+        print_substep "Upgrading plugin '${search_name}' from the offline package (${installed_id} -> ${rel})..."
+    else
+        print_substep "Installing plugin '${search_name}' from the offline package (${rel})..."
+    fi
+    local inbox="/tmp/rzfz-plugins" base
+    base="$(basename "$file")"
+    if ! docker exec dify-api mkdir -p "$inbox" 2>/dev/null || ! docker cp "$file" "dify-api:${inbox}/${base}" 2>/dev/null; then
+        print_warning "Could not place '${rel}' into dify-api:${inbox} — plugin not installed (#2222)."
+        return 1
+    fi
+    local up ident
+    up=$(_dify_api_upload_pkg "${inbox}/${base}")
+    ident=$(printf '%s' "$up" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); print(d.get('unique_identifier') or d.get('plugin_unique_identifier') or '')
+except Exception: print('')" 2>/dev/null)
+    docker exec dify-api rm -f "${inbox}/${base}" >/dev/null 2>&1 || true
+    if [ -z "$ident" ]; then
+        print_warning "Plugin '${search_name}': the upload of ${rel} returned no identifier — $(printf '%s' "$up" | head -c 200)"
+        return 1
+    fi
+    local resp task_id rc
+    if [ -n "$installed_id" ]; then
+        # #2320: an installed plugin is SWAPPED to the uploaded file through the
+        # daemon's upgrade route; install/pkg over an installed plugin_id fails
+        # inside the task ("plugin already installed").
+        task_id=$(_dify_plugin_upgrade_via_daemon "$installed_id" "$ident") || true
+        case "$task_id" in ""|ERR*)
+            print_warning "Plugin '${search_name}': the daemon refused the upgrade ${installed_id} -> ${ident}: ${task_id#ERR	} (#2320)"
+            _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "upgrade refused, the installed version stays"
+            return 1 ;;
+        esac
+    else
+        resp=$(dify_api POST "/console/api/workspaces/current/plugin/install/pkg" \
+            "{\"plugin_unique_identifiers\": [\"${ident}\"]}")
+        task_id=$(printf '%s' "$resp" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    print('DONE' if d.get('all_installed') else (d.get('task_id') or ''))
+except Exception: print('')" 2>/dev/null || true)
+        if [ -z "$task_id" ]; then
+            print_warning "Plugin '${search_name}' install from the offline package answered: $(echo "$resp" | head -c 200)"
+            return 1
+        fi
+        if [ "$task_id" = "DONE" ]; then
+            print_success "Plugin '${search_name}' already installed (${ident})."
+            _dify_plugin_outcome "$search_name" "" "$pkg_ver" "installed at the package pin"
+            return 0
+        fi
+    fi
+    # The task, not the declaration row, is the verdict (0.175 under a real air
+    # gap): the declaration row survives a failed install, and "task created"
+    # is not "installed" — the daemon builds the plugin's Python environment
+    # after the task starts and reports the failure IN the task.
+    rc=0
+    [ "$task_id" = "DONE" ] || _dify_plugin_task_wait "$task_id" || rc=$?
+    case "$rc" in
+        0)
+            if [ -n "$installed_id" ]; then
+                print_success "Plugin '${search_name}' upgraded from the offline package (${installed_id} -> ${ident})."
+                _dify_plugin_outcome "$search_name" "$installed_ver" "$pkg_ver" "upgraded to the package pin"
+            else
+                print_success "Plugin '${search_name}' installed from the offline package (${ident})."
+                _dify_plugin_outcome "$search_name" "" "$pkg_ver" "installed at the package pin"
+            fi
+            return 0 ;;
+        1)
+            if [ -n "$installed_id" ]; then
+                print_warning "Plugin '${search_name}' upgrade FAILED in the daemon: ${_DIFY_PLUGIN_TASK_DETAIL:-no message} — the installed version stays in service (#2320)"
+                _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "upgrade failed, the installed version stays"
+            else
+                print_warning "Plugin '${search_name}' install FAILED in the daemon: ${_DIFY_PLUGIN_TASK_DETAIL:-no message} (#2222)"
+            fi
+            print_info "  The plugin's Python environment is built at install time; on an air-gapped box its dependencies must come from the package's seeded cache."
+            return 1 ;;
+    esac
+    if [ -n "$installed_id" ]; then
+        print_warning "Plugin '${search_name}' upgrade task ${task_id} did not settle in time — not reporting it upgraded (#2320)."
+        _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "upgrade unsettled, the installed version is what the list shows"
+    else
+        print_warning "Plugin '${search_name}' install task ${task_id} did not settle in time — not reporting it installed (#2222)."
+    fi
+    return 1
+}
+
+# #1320: the marketplace install, retried. The plugin daemon's own three
+# immediate retries do not outlast a transient marketplace/R2 hiccup (a test box,
+# 2026-09-04: refused, then 200 in 0.4 s minutes later). Bounded attempts
+# (RZFZ_DIFY_PLUGIN_INSTALL_ATTEMPTS, default 3) with a growing pause
+# (RZFZ_DIFY_PLUGIN_RETRY_BASE_SECONDS x attempt, default 15); only a transient
+# answer is retried (the daemon's "Reached maximum retries", a timeout, a 5xx
+# gateway text, or no/unparseable answer). A signature/verification error, a 4xx
+# or any other refusal is final: retrying cannot fix it. A final refusal
+# returns 1 so the caller's warning fires and the run says what to do. Offline
+# mode never reaches the marketplace. The echoed response is scrubbed of URL
+# credentials and token values.
+_dify_plugin_install_marketplace() {
+    local search_name="$1" plugin_id="$2" resp attempt verdict shown
+    local attempts="${RZFZ_DIFY_PLUGIN_INSTALL_ATTEMPTS:-3}" base="${RZFZ_DIFY_PLUGIN_RETRY_BASE_SECONDS:-15}"
+    case "$attempts" in ''|*[!0-9]*|0) attempts=3 ;; esac
+    case "$base" in ''|*[!0-9]*) base=15 ;; esac
+    if razzfazz_offline_skip "Dify plugin install from marketplace ('${search_name}')"; then
+        return 1
+    fi
+    for attempt in $(seq 1 "$attempts"); do
+        resp=$(dify_api POST "/console/api/workspaces/current/plugin/install/marketplace" \
+            "{\"plugin_unique_identifiers\":[\"${plugin_id}\"]}") || resp=""
+        verdict=$(printf '%s' "$resp" | python3 -c "
+import sys, json, re
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    print('transient' if not raw.strip() or not raw.lstrip().startswith(('{', '[')) else 'final'); sys.exit(0)
+if not isinstance(d, dict):
+    print('final'); sys.exit(0)
+if 'all_installed' in d or d.get('task_id'):
+    print('accepted'); sys.exit(0)
+msg = str(d.get('message') or d.get('error') or d.get('code') or '')
+if re.search(r'(?i)signature|verif|unauthori|forbidden|not found|already installed|\\b4\\d\\d\\b', msg):
+    print('final')
+elif re.search(r'(?i)reached maximum retries|time[ds]? ?out|temporar|try again|unavailable|bad gateway|connection (reset|refused|aborted)|\\b5\\d\\d\\b', msg):
+    print('transient')
+else:
+    print('final')
+" 2>/dev/null) || verdict="transient"
+        if [ "$verdict" = "accepted" ]; then
+            [ "$attempt" -eq 1 ] || print_substep "Plugin '$search_name': the marketplace accepted the install on attempt ${attempt}/${attempts} (#1320)."
+            return 0
+        fi
+        shown=$(printf '%s' "$resp" | sed -E 's#(://)[^/@[:space:]"]*@#\1#g; s#((token|key|secret|password|access_token|authorization)=)[^&"[:space:]]*#\1REDACTED#Ig' | head -c 200)
+        if [ "$verdict" = "final" ]; then
+            print_warning "Plugin '$search_name' install refused: ${shown} — not a transient failure, retrying will not help; check the plugin pin and the marketplace signature (#1320)."
+            return 1
+        fi
+        print_warning "Plugin '$search_name' install refused (attempt ${attempt}/${attempts}): ${shown}"
+        if [ "$attempt" -lt "$attempts" ]; then
+            sleep $(( base * attempt ))
+        fi
+    done
+    print_warning "Plugin '$search_name' could not be installed: the Dify marketplace (marketplace.dify.ai) refused ${attempts} attempts. This is a network/marketplace problem, not the box's configuration — re-run 'rzfz post-install --refresh' once the marketplace answers (#1320)."
+    return 1
+}
+
+dify_install_plugin() {
+    local search_name="$1"
+
+    # #2545: the per-plugin PINNED VERSION + full offline fallback identifier live
+    # in ONE table (config/dify-plugin-pins.tsv), shared with an offline package (Enterprise), which
+    # carries exactly these members. The pin is read BEFORE the package-first
+    # branch, so the package path installs the member at this pin.
+    local pin_version="" pin_fallback="" _pin
+    if _pin="$(razzfazz_dify_plugin_pin "$search_name")"; then
+        pin_version="$(printf '%s' "$_pin" | cut -f1)"
+        pin_fallback="$(printf '%s' "$_pin" | cut -f2)"
+    fi
+
+    # #184 WS2b: resolving + installing a plugin queries the Dify marketplace
+    # (marketplace.dify.ai) and fetches the package → internet egress. On an
+    # air-gapped box the plugin comes from the offline package instead (#2222):
+    # journey B measured a fresh offline install with every belt armed and no
+    # model provider at all, because this used to skip and nothing else loaded
+    # the plugin. The package's plugins/dify/ tree carries the daemon's own
+    # package cache (path = identifier, used as a NAME) and plugins/dify-uv-cache
+    # the daemon's dependency cache; the cache is seeded, the file is UPLOADED
+    # through the console and installed by the identifier the upload returns,
+    # and the install task is the verdict — no marketplace call.
+    # #2320 + the operator's package-first rule: a plugin the package carries is
+    # used regardless of RAZZFAZZ_NETWORK_MODE — the mode decides only whether
+    # the marketplace may be asked for a plugin the package lacks.
+    if _dify_package_carries_plugin "$search_name"; then
+        print_substep "Plugin '${search_name}': the package at ${APPLIANCE_OFFLINE_PKG} carries it — package-first, the marketplace is not asked (#2320)."
+        _dify_install_plugin_from_package "$search_name" "$pin_version"
+        return $?
+    fi
+    if razzfazz_offline_skip "Dify plugin install from marketplace ('${search_name}') — installing it from the offline package instead"; then
+        _dify_install_plugin_from_package "$search_name" "$pin_version"
+        return $?
+    fi
+
+    # Resolve the TARGET identifier FIRST (before the installed-check) so we can
+    # upgrade a stale plugin, not just skip-if-present.
+    #
+    # Dify 1.16 REMOVED the console marketplace-SEARCH proxy route
+    # (/console/api/workspaces/current/plugin/market/plugins → HTTP 404); only the
+    # per-identifier /plugin/marketplace/pkg fetch and /plugin/install/marketplace
+    # remain. The old console-search "resolve latest identifier" therefore returned
+    # EMPTY on 1.16, so every install fell through to the pinned id — and the
+    # gpustack pin's hash had gone stale (re-published 0.0.15), so
+    # install/marketplace 400'd "file not found" and langgenius/gpustack never
+    # installed → zero Dify models (#116). Resolve the exact package identifier for
+    # the pinned version straight from the marketplace REST API (self-heals a
+    # re-signed package hash); fall back to the hardcoded pin only when the
+    # marketplace is unreachable (air-gapped/customer boxes).
+    local plugin_id
+    plugin_id=$(_dify_marketplace_pinned_identifier "$search_name" "$pin_version")
+    [ -n "$plugin_id" ] || plugin_id="$pin_fallback"
+
+    if [ -z "$plugin_id" ]; then
+        print_error "Failed to resolve a version for plugin '$search_name'"
+        return 1
+    fi
+
+    # Version-aware (#2320): installed at the pinned VERSION -> untouched (the
+    # digest is not compared — the marketplace re-signs packages, #116);
+    # installed at another version -> the console's upgrade route, which swaps
+    # the tenant's installation (a plain install/marketplace over an installed
+    # plugin_id fails inside the daemon's task with "plugin already installed",
+    # and this path never read the task); not installed -> install as before.
+    local installed_id installed_ver pin_ver
+    installed_id=$(_dify_plugin_installed_id "$search_name")
+    installed_ver=$(_dify_plugin_version "$installed_id")
+    pin_ver=$(_dify_plugin_version "$plugin_id")
+    if [ -n "$installed_id" ] && [ "$installed_ver" = "$pin_ver" ]; then
+        print_info "Plugin '$search_name' already at target version ($installed_id)."
+        _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "at the pin, untouched"
+        return 0
+    elif [ -n "$installed_id" ]; then
+        print_substep "Upgrading plugin '$search_name' from the marketplace ($installed_id -> $plugin_id)..."
+        local resp task_id rc
+        resp=$(dify_api POST "/console/api/workspaces/current/plugin/upgrade/marketplace" \
+            "{\"original_plugin_unique_identifier\":\"${installed_id}\",\"new_plugin_unique_identifier\":\"${plugin_id}\"}")
+        task_id=$(printf '%s' "$resp" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    print('DONE' if d.get('all_installed') else (d.get('task_id') or ''))
+except Exception: print('')" 2>/dev/null || true)
+        if [ -z "$task_id" ]; then
+            print_warning "Plugin '$search_name' upgrade from the marketplace answered: $(echo "$resp" | head -c 200) (#2320)"
+            _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "upgrade refused, the installed version stays"
+            return 1
+        fi
+        rc=0
+        [ "$task_id" = "DONE" ] || _dify_plugin_task_wait "$task_id" || rc=$?
+        case "$rc" in
+            0) print_success "Plugin '$search_name' upgraded from the marketplace (${installed_id} -> ${plugin_id})."
+               _dify_plugin_outcome "$search_name" "$installed_ver" "$pin_ver" "upgraded to the pin from the marketplace"
+               return 0 ;;
+            1) print_warning "Plugin '$search_name' upgrade FAILED in the daemon: ${_DIFY_PLUGIN_TASK_DETAIL:-no message} — the installed version stays in service (#2320)"
+               _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "upgrade failed, the installed version stays"
+               return 1 ;;
+        esac
+        print_warning "Plugin '$search_name' upgrade task ${task_id} did not settle in time — not reporting it upgraded (#2320)."
+        _dify_plugin_outcome "$search_name" "$installed_ver" "$installed_ver" "upgrade unsettled, the installed version is what the list shows"
+        return 1
+    fi
+
+    print_substep "Installing plugin '$search_name' ($plugin_id)..."
+    if _dify_plugin_install_marketplace "$search_name" "$plugin_id"; then
+        print_success "Plugin '$search_name' installation initiated."
+        _dify_plugin_outcome "$search_name" "" "$pin_ver" "install initiated from the marketplace, the task is not awaited here"
+        return 0
+    fi
+    _dify_plugin_outcome "$search_name" "" "" "marketplace install failed, see the warning above"
+    return 1
+}
+
+# ── #160: Dify model-provider icons render as broken images ──────────────────
+# The provider list / model-config screens render each provider icon as a plain
+#   <img src="{CONSOLE_API_URL}/console/api/workspaces/<tenant>/model-providers/
+#            <provider>/icon_small/<lang>">
+# dify-api serves those bytes from the dify-plugin-daemon (content-hash assets).
+# The WHOLE serving chain — the frontend <img>, the CONSOLE_API_URL absolute-URL
+# builder (services/entities/model_provider_entities.py ProviderResponse), the
+# UNAUTHENTICATED <path:provider> icon route, and Caddy's /console/api/*
+# SSO-exemption — is byte-identical & correct 1.14.2 -> 1.16.0 and verified
+# working live (see modules/dify/Dockerfile header). So a broken icon is a
+# RUNTIME condition of THAT box's dify-api/plugin-daemon icon endpoint, not a
+# code/build gap. This probe makes it self-diagnosing: it emits, one per line,
+# "<provider><TAB><http_status>" for every installed model-provider whose icon
+# endpoint did NOT return an image (empty output = all icons render).
+#
+# Self-contained: needs NO console session (works in verify-only runs). Resolves
+# the tenant from postgres, enumerates installed model-provider plugins from the
+# plugin-daemon inner API, then probes each provider's UNAUTHENTICATED icon
+# endpoint on dify-api — the exact URL the browser <img> hits.
+dify_broken_provider_icons() {
+    local tenant server_key providers
+    tenant=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d dify_db -tAc \
+        "select id from tenants limit 1;" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$tenant" ] || return 0
+    server_key=$(docker exec dify-plugin-daemon sh -c 'printf %s "$SERVER_KEY"' 2>/dev/null)
+    [ -n "$server_key" ] || return 0
+    # Installed model-provider ids = "<plugin_id>/<declaration.provider>" (only
+    # those that declare a small icon).
+    providers=$(docker exec dify-plugin-daemon sh -c \
+        'umask 077; cfg=$(mktemp) || exit 1; trap "rm -f \"$cfg\"" EXIT; printf "header = \"X-Api-Key: %s\"\n" "$SERVER_KEY" > "$cfg"; curl -s --max-time 15 -K "$cfg" "http://127.0.0.1:5002/plugin/'"${tenant}"'/management/models?page=1&page_size=100"' 2>/dev/null | \
+        python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = d.get('data') if isinstance(d, dict) else d
+out = set()
+for p in (items or []):
+    decl = p.get('declaration', {}) or {}
+    pid, prov = p.get('plugin_id'), decl.get('provider')
+    if decl.get('icon_small') and pid and prov:
+        out.add('%s/%s' % (pid, prov))
+for x in sorted(out):
+    print(x)
+" 2>/dev/null)
+    [ -n "$providers" ] || return 0
+    printf '%s\n' "$providers" | while IFS= read -r prov; do
+        [ -n "$prov" ] || continue
+        local code
+        code=$(docker exec dify-api curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            "http://localhost:5001/console/api/workspaces/${tenant}/model-providers/${prov}/icon_small/en_US" 2>/dev/null)
+        [ "$code" = "200" ] || printf '%s\t%s\n' "$prov" "${code:-000}"
+    done
+}
+
+# ── #1248 verify: Dify's workspace default models ────────────────────────────
+# "Dify: setup complete" + "model-provider icons render" both PASSED on the box
+# whose Dify had no model provider at all: setup-complete is about the install
+# wizard, and the icon probe reports on whatever providers happen to be
+# installed. Neither notices that no default text-generation / embedding /
+# rerank model is selected — the state in which a Dify app has no model and a
+# knowledge base cannot index.
+#
+# The defaults are read back through Dify's OWN service layer (the same call the
+# setter uses) rather than off a `tenant_default_models` SELECT: Dify stores the
+# LEGACY origin spelling of the model type, and a schema guess here would turn
+# every box red for the wrong reason.
+_dify_default_models_dump() {
+    local admin_email="$1"
+    local _dify_get_py="${_DIFY_PY_COMPAT}
+_rz_guard('default-model-dump')
+import sys
+sys.path.insert(0, '/app/api')
+from app import create_app
+from extensions.ext_database import db
+from models.account import Account, TenantAccountJoin
+ModelProviderService = _rz_model_provider_service()
+_, app = create_app()
+with app.app_context():
+    account = db.session.query(Account).filter(Account.email == sys.argv[1]).first()
+    if not account:
+        print('FATAL|admin account not found'); sys.exit(1)
+    tj = db.session.query(TenantAccountJoin).filter(TenantAccountJoin.account_id == account.id).first()
+    if not tj:
+        print('FATAL|tenant not found'); sys.exit(1)
+    mps = _rz_adapt(ModelProviderService())
+    for mtype in ('llm', 'text-embedding', 'rerank'):
+        try:
+            d = mps.get_default_model_of_model_type(tenant_id=tj.tenant_id, model_type=mtype)
+        except Exception as exc:
+            print('%s|ERROR|%s' % (mtype, exc)); continue
+        if not d:
+            print('%s||' % mtype); continue
+        prov = getattr(d, 'provider', None)
+        pname = getattr(prov, 'provider', None) or getattr(prov, 'provider_name', None) or ''
+        print('%s|%s|%s' % (mtype, pname, getattr(d, 'model', '') or ''))
+"
+    # create_app() prints framework warnings on stdout: keep only OUR rows, so an
+    # empty result means the helper produced none (the caller then fails it).
+    docker exec dify-api python3 -c "$_dify_get_py" "$admin_email" 2>/dev/null \
+        | grep -E '^(llm|text-embedding|rerank|FATAL)\|' || true
+}
+
+# _dify_verify_one_default <model_type> <what> <want_model> <want_provider>
+#                          <want_label> <dump>
+_dify_verify_one_default() {
+    local mtype="$1" what="$2" want_model="$3" want_provider="$4"
+    local want_label="$5" dump="$6"
+    local row prov model
+    row=$(printf '%s\n' "$dump" | awk -F'|' -v t="$mtype" '$1 == t {print; exit}')
+    if [ -z "$row" ]; then
+        verify_check "Dify: default $what wired to $want_label" "fail" \
+            "Dify reported no default $what at all — re-run 'rzfz post-install --refresh' (#1248)"
+        return 0
+    fi
+    prov=$(printf '%s' "$row" | awk -F'|' '{print $2}')
+    model=$(printf '%s' "$row" | awk -F'|' '{print $3}')
+    if [ "$prov" = "ERROR" ]; then
+        verify_check "Dify: default $what wired to $want_label" "fail" \
+            "Dify could not resolve its default $what: $(printf '%s' "$model" | head -c 120)"
+        return 0
+    fi
+    if [ -z "$model" ]; then
+        verify_check "Dify: default $what wired to $want_label" "fail" \
+            "no default $what selected — a Dify app has no model and a knowledge base cannot index (#1248)"
+        return 0
+    fi
+    case "$prov" in
+        *"$want_provider"*) ;;
+        *)
+            verify_check "Dify: default $what wired to $want_label" "fail" \
+                "selected '$model' under provider '$prov', but this box's LLM backend is $want_label — Dify is calling an endpoint that is not there (#1248)"
+            return 0
+            ;;
+    esac
+    if [ -n "$want_model" ] && [ "$model" != "$want_model" ]; then
+        verify_check "Dify: default $what wired to $want_label" "fail" \
+            "selected '$model', expected '$want_model' from core/llm/standard-models.yaml"
+        return 0
+    fi
+    verify_check "Dify: default $what wired to $want_label ($model)" "pass"
+    return 0
+}
+
+# #1308 — "wired" is not "authenticated". _dify_verify_one_default proves a
+# default exists and names the right provider; a ROTATED LLM_MANAGER_DIFY_KEY
+# that never reached Dify (the old create-or-skip) still passed all three
+# lines while every model call 401'd. This asks Dify to actually USE each
+# default through its own path — ModelManager with the STORED credential, not
+# .env's key — one minimal call per type. Rows: <mtype>|OK| ,
+# <mtype>|AUTHFAIL|<reason> , <mtype>|SKIP| (no default — reported above).
+_dify_probe_default_models() {
+    local admin_email="$1"
+    local _dify_probe_py="${_DIFY_PY_COMPAT}
+_rz_guard('default-model-probe')
+import sys
+sys.path.insert(0, '/app/api')
+from app import create_app
+from extensions.ext_database import db
+from models.account import Account, TenantAccountJoin
+ModelProviderService = _rz_model_provider_service()
+from core.model_manager import ModelManager
+try:
+    # Dify >= 1.10 ships the runtime as the graphon package (measured in
+    # dify-api 1.15/1.17 — review #1387); older releases under core.
+    from graphon.model_runtime.entities.model_entities import ModelType
+    from graphon.model_runtime.entities.message_entities import UserPromptMessage
+except ImportError:
+    from core.model_runtime.entities.model_entities import ModelType
+    from core.model_runtime.entities.message_entities import UserPromptMessage
+import inspect, signal
+def _call(fn, **kw):
+    # bind only the kwargs this Dify generation knows (user= vanished in 1.x)
+    sig = inspect.signature(fn)
+    return fn(**{k: v for k, v in kw.items() if k in sig.parameters})
+def _verdict(exc):
+    # AUTHFAIL only for an authentication failure; anything else (backend
+    # down, model not deployed, timeout) is ERROR = no verdict, not red.
+    m = str(exc).lower()
+    for t in ('401', '403', 'unauthorized', 'authenticat', 'invalid api key', 'invalid_api_key', 'incorrect api key', 'forbidden'):
+        if t in m:
+            return 'AUTHFAIL'
+    return 'ERROR'
+def _model_type(name):
+    # N3 (review): the graphon enum is a StrEnum — `ModelType(name)`. The 0.x
+    # class method `value_of` does not exist there.
+    try:
+        return ModelType(name)
+    except (ValueError, TypeError):
+        return ModelType.value_of(name)
+def _on_alarm(*_a):
+    print('FATAL|probe timed out after 60 s (a cold model load?) - no verdict; re-run later')
+    sys.stdout.flush(); sys.exit(3)
+signal.signal(signal.SIGALRM, _on_alarm); signal.alarm(60)
+_, app = create_app()
+with app.app_context():
+    account = db.session.query(Account).filter(Account.email == sys.argv[1]).first()
+    if not account:
+        print('FATAL|admin account not found'); sys.exit(1)
+    tj = db.session.query(TenantAccountJoin).filter(TenantAccountJoin.account_id == account.id).first()
+    if not tj:
+        print('FATAL|tenant not found'); sys.exit(1)
+    mps = _rz_adapt(ModelProviderService())
+    # N1 (review, measured in dify-api 1.15): ModelManager takes a REQUIRED
+    # provider_manager in 1.x. Dify builds it exactly like this
+    # (core/app/llm/model_access.py). The 0.x no-arg form is the fallback.
+    try:
+        from core.plugin.impl.model_runtime_factory import create_plugin_provider_manager
+        _pm = create_plugin_provider_manager(tenant_id=tj.tenant_id, user_id=account.id)
+        mm = ModelManager(provider_manager=_pm)
+    except (ImportError, TypeError):
+        mm = ModelManager()
+    for mtype in ('llm', 'text-embedding', 'rerank'):
+        try:
+            d = mps.get_default_model_of_model_type(tenant_id=tj.tenant_id, model_type=mtype)
+        except Exception as exc:
+            print('%s|ERROR|default unreadable: %s' % (mtype, str(exc).replace('|', '/')[:160])); continue
+        model = getattr(d, 'model', None) if d else None
+        if not model:
+            print('%s|SKIP|' % mtype); continue
+        prov = getattr(d, 'provider', None)
+        pname = getattr(prov, 'provider', None) or getattr(prov, 'provider_name', None) or ''
+        try:
+            mi = mm.get_model_instance(tenant_id=tj.tenant_id, provider=pname,
+                                       model_type=_model_type(mtype), model=model)
+            if mtype == 'llm':
+                _call(mi.invoke_llm, prompt_messages=[UserPromptMessage(content='ping')],
+                      model_parameters={'max_tokens': 1}, stream=False)
+            elif mtype == 'text-embedding':
+                _call(mi.invoke_text_embedding, texts=['ping'])
+            else:
+                _call(mi.invoke_rerank, query='ping', docs=['ping', 'pong'])
+            print('%s|OK|' % mtype)
+        except Exception as exc:
+            print('%s|%s|%s' % (mtype, _verdict(exc), str(exc).replace('|', '/').replace(chr(10), ' ')[:160]))
+"
+    # stderr goes to the operator when the probe produced NO rows — a broken
+    # import, a missing container and a missing admin account used to look
+    # identical ("no verdict") behind 2>/dev/null (review #1387, Befund 3).
+    local _errf _out _rc
+    _errf=$(mktemp)
+    # N2 (review): `create_app()` prints framework warnings on STDOUT, so the
+    # raw output is never empty and the FATAL/no-verdict path could not fire.
+    # Keep only OUR rows; anything else is noise from Dify's own boot.
+    _out=$(docker exec dify-api python3 -c "$_dify_probe_py" "$admin_email" 2>"$_errf" \
+           | grep -E '^(llm|text-embedding|rerank|FATAL)\|' || true); _rc=${PIPESTATUS[0]}
+    if [ -z "$_out" ]; then
+        local _err
+        _err=$(grep -v '^[[:space:]]*$' "$_errf" | tail -1 | head -c 160)
+        printf 'FATAL|no output from the probe (rc %s)%s\n' "$_rc" "${_err:+: $_err}"
+    else
+        printf '%s\n' "$_out"
+    fi
+    rm -f "$_errf"
+}
+
+# _dify_verify_probe_row <model_type> <what> <probe> <want_label>
+_dify_verify_probe_row() {
+    local mtype="$1" what="$2" probe="$3" want_label="$4" row verdict reason
+    row=$(printf '%s\n' "$probe" | awk -F'|' -v t="$mtype" '$1 == t {print; exit}')
+    [ -n "$row" ] || return 0
+    verdict=$(printf '%s' "$row" | awk -F'|' '{print $2}')
+    reason=$(printf '%s' "$row" | cut -d'|' -f3-)
+    case "$verdict" in
+        OK)   verify_check "Dify: default $what answers through its stored credential ($want_label)" "pass" ;;
+        SKIP) ;;   # no default at all — the wiring check above already failed it
+        AUTHFAIL)
+              verify_check "Dify: default $what answers through its stored credential ($want_label)" "fail" \
+                  "$(printf '%s' "$reason" | head -c 160) — a rotated LLM_MANAGER_DIFY_KEY that Dify never learned? re-run 'rzfz post-install --refresh' (#1308)" ;;
+        *)    # ERROR (backend down, model not deployed, timeout…) — unmeasured
+              # is not green, but it is not a key problem either (#1301 lesson).
+              print_warning "  Dify: default $what could not be probed — $(printf '%s' "$reason" | head -c 160) (no verdict on authentication, #1308)" ;;
+    esac
+    return 0
+}
+
+# #3233: "the default model answers" is not "a workflow node with structured
+# output runs". rc16 boxes answered every ping and still refused every
+# structured-output node (the plugin pin did not advertise the capability), and
+# Dify 1.18 stringified booleans (#3229). This runs ONE such node's path on the
+# default chat model — Dify's own capability check, call and validator, no app.
+dify_verify_structured_output() {
+    local row verdict text
+    row=$(razzfazz_dify_structured_output_probe "$(_resolve_dify_admin_email)")
+    verdict=$(printf '%s' "$row" | cut -d'|' -f2)
+    text=$(printf '%s' "$row" | cut -d'|' -f3-)
+    case "$verdict" in
+        OK)      verify_check "Dify: a structured-output node with a boolean field runs on the default chat model" "pass" ;;
+        REFUSED) verify_check "Dify: a structured-output node with a boolean field runs on the default chat model" "fail" \
+                     "Dify refuses it: ${text} — re-run 'rzfz post-install --refresh'; if it stays, the model plugin or its credential is wrong" ;;
+        SKIP)    print_info "  Dify structured-output check skipped: ${text}" ;;
+        *)       print_warning "  Dify structured-output check: no verdict — ${text}" ;;
+    esac
+    return 0
+}
+
+dify_verify_default_models() {
+    local want_provider want_label
+    if llm_manager_owns_standard_set; then   # #1441: one predicate for "the manager owns this box's models"
+        want_provider="openai_api_compatible"
+        want_label="the LLM Manager"
+    else
+        want_provider="gpustack"
+        want_label="GPUStack"
+    fi
+
+    local admin_email dump
+    admin_email=$(_resolve_dify_admin_email)
+    dump=$(_dify_default_models_dump "$admin_email")
+    if [ -z "$dump" ] || printf '%s\n' "$dump" | grep -q '^FATAL|'; then
+        # ONE line, not three identical ones, when the READ itself failed.
+        verify_check "Dify: default models wired to $want_label" "fail" \
+            "could not read Dify's default models: ${dump:-no output from dify-api}"
+        return 0
+    fi
+
+    _dify_verify_one_default "llm" "text model" "$(_default_chat_alias)" \
+        "$want_provider" "$want_label" "$dump"
+    _dify_verify_one_default "text-embedding" "embedding model" \
+        "$(_default_embedding_alias)" "$want_provider" "$want_label" "$dump"
+    # The rerank default is checked WITHOUT pinning an expected alias: the
+    # reranker is the one role an operator legitimately swaps per box, and what
+    # must not be missing is the wiring, not a particular model.
+    _dify_verify_one_default "rerank" "rerank model" "" \
+        "$want_provider" "$want_label" "$dump"
+    # #1308: now USE each default through Dify's own path (stored credential).
+    local probe
+    probe=$(_dify_probe_default_models "$admin_email")
+    if [ -z "$probe" ] || printf '%s\n' "$probe" | grep -q '^FATAL|'; then
+        local _why
+        _why=$(printf '%s\n' "$probe" | grep '^FATAL|' | head -1 | cut -d'|' -f2-)
+        print_warning "  Dify: could not probe the default models through their stored credentials — no verdict on authentication (#1308)${_why:+: $_why}"
+    else
+        _dify_verify_probe_row "llm" "text model" "$probe" "$want_label"
+        _dify_verify_probe_row "text-embedding" "embedding model" "$probe" "$want_label"
+        _dify_verify_probe_row "rerank" "rerank model" "$probe" "$want_label"
+    fi
+}
+
+# ── #1248: the Dify model provider on an LLM-Manager box ─────────────────────
+# `dify_configure_model` below wires Dify to `http://gpustack:9090` through the
+# langgenius/gpustack plugin. A Manager-shaped box runs no GPUStack at all, so on
+# a clean install every credential validation died on
+# `NameResolutionError(host='gpustack', port=9090)`, no default
+# text-generation / embedding / rerank model was ever selected, and Dify shipped
+# with no usable model provider — the last member of the #976 rewiring class
+# (Open WebUI moved in #976, the model DEPLOY in #1250b/#1255, Dify here).
+#
+# The backend is the manager's metered OpenAI-compatible surface —
+# http://llm-manager:8080/v1, key-authenticated with the stack/dify service key,
+# `/v1/rerank` included — so the provider is langgenius/openai_api_compatible and
+# the registration goes through the SAME shared helper the manager's chat wiring
+# already uses (#813/#666), extended by #1248 to the embedding and rerank model
+# types plus the workspace defaults.
+#
+# The model set comes from core/llm/standard-models.yaml, filtered the way the
+# GPUStack branch and #1255's manager deploy filter it (preset, role,
+# auto_start): it is the SOLL this very post-install run just deployed.
+# Enumerating the manager's READY deployments instead — what
+# wire_llm_manager_consumers does — registers nothing while a weight download is
+# still finishing, and that deferral ("deferred to the next --refresh") is part
+# of why a clean Manager box came up unwired at all.
+dify_configure_manager_models() {
+    print_substep "Configuring LLM Manager models in Dify..."
+
+    # Liveness decides whether to SKIP an authoritative write, never WHICH
+    # backend a consumer is pointed at (#976). With the manager down we cannot
+    # mint a key and Dify's own credential validation would fail anyway, so
+    # refuse loudly instead of storing a provider that 401s or points nowhere.
+    if ! _llm_manager_running; then
+        print_error "The llm-manager profile is active but the llm-manager container is not running — a Dify provider registered now would store credentials for an endpoint that is not there. Start the stack and re-run 'rzfz post-install --refresh'. (#1248)"
+        return 1
+    fi
+
+    local admin_email
+    admin_email=$(_resolve_dify_admin_email)
+
+    # The stack/dify service key is minted by wire_llm_manager_consumers on a box
+    # where the manager was ALREADY serving; on a clean install that ran BEFORE
+    # the models were deployed and returned early, so mint here too rather than
+    # register an unauthenticated provider (#1185).
+    # #3278: validated like every service key — a dead key after a reset is
+    # re-minted instead of being registered as a provider that 401s.
+    local dify_key=""
+    if llm_manager_resolve_service_key LLM_MANAGER_DIFY_KEY dify; then
+        dify_key="$_LLM_SVC_KEY"
+        if [ "$_LLM_SVC_KEY_NEW" = "1" ]; then print_substep "Minted the stack/dify service key."; fi
+    fi
+    if [ -z "$dify_key" ]; then
+        print_error "No stack/dify LLM Manager service key (LLM_MANAGER_DIFY_KEY is empty or rejected and the mint failed) — Dify would get a model provider that 401s on every call. (#1248/#1185)"
+        return 1
+    fi
+
+    local preset="${PRESET:-standard}"
+    local endpoint="$LLM_CANONICAL_ENDPOINT"
+    local label="LLM Manager"
+    local provider="langgenius/openai_api_compatible/openai_api_compatible"
+
+    local rows
+    rows=$(_model_rows_for_preset "$preset") || rows=""
+    if [ -z "$rows" ]; then
+        print_error "No models for preset '$preset' in core/llm/standard-models.yaml — there is nothing to register in Dify."
+        return 1
+    fi
+
+    # Always-on models only, keyed on the ROLE column (col 6) exactly like the
+    # GPUStack branch: an auto_start:false spare is not running, so registering it
+    # makes Dify offer a model whose every call 503s.
+    #
+    # #1786 rev-B: the WILDCARD column too. `auto_start != false` is only half of
+    # "the standard set actually placed this" — `_llmm_row_deployable` also
+    # refuses a wildcard weight filename (col 3), because the unattended deploy
+    # cannot expand a glob without an HF listing call. `nomic-embed-text` is
+    # exactly that shape ("*f16*.gguf", deliberately, so it stays a console
+    # option), so it is registered but never served, and Dify's credential
+    # validation answers
+    #     400 Client Error: Bad Request for url: http://llm:8080/v1/embeddings
+    # on EVERY post-install run of EVERY manager box (measured on 0.91,
+    # 2026-09-08). Same rule, one place: a row this box does not serve is not a
+    # row Dify may offer.
+    local chat_rows embed_aliases rerank_aliases
+    chat_rows=$(printf '%s\n' "$rows" | awk -F'\t' '$6 ~ /(^|,)chat(,|$)/ && $7 != "false" && $3 !~ /[*?]/ {print $1 "\t" $6}')
+    embed_aliases=$(printf '%s\n' "$rows" | awk -F'\t' '$6 ~ /(^|,)embedding(,|$)/ && $7 != "false" && $3 !~ /[*?]/ {print $1}')
+    rerank_aliases=$(printf '%s\n' "$rows" | awk -F'\t' '$6 ~ /(^|,)reranker(,|$)/ && $7 != "false" && $3 !~ /[*?]/ {print $1}')
+
+    # #2504 fix round 1: the full MANIFEST set, BEFORE `_dify_only_served`
+    # narrows chat_rows/embed_aliases/rerank_aliases to "served right now" a few
+    # lines down. This is what the #2504 prune below must treat as "keep" — a
+    # model the manifest still wants is not retired just because it has not
+    # finished pulling yet. Computed unconditionally (not only inside the
+    # `served_ids` branch below, where the OLD code hid it): the prune call
+    # needs it regardless of whether the manager answered.
+    local _wanted
+    _wanted=$(printf '%s\n%s\n%s\n' "$(printf '%s\n' "$chat_rows" | cut -f1)" "$embed_aliases" "$rerank_aliases" | grep -v '^$' || true)
+
+    # #1442 rev-D (journey C on 0.79): the manifest says what the standard set
+    # WANTS placed; the manager says what it SERVES. On a federated legacy box
+    # the reranker was in error in GPUStack and never federated, and this step
+    # still registered `qwen3-reranker` at /v1/rerank — a 404 for every Dify
+    # retrieval, `CredentialsValidateFailedError` in the log. When the manager
+    # answers with a served list, only served rows are registered and the
+    # skipped ones are named; when it answers nothing (models still pulling on
+    # a clean install), the manifest decides as before and the #1507 late pass
+    # re-wires once they are ready.
+    #
+    # #2195 (journey A, 0.91, a fresh CPU install): there is a THIRD case, and
+    # it is the default one. `granite-docling` is 258M and carries a ready
+    # instance within seconds, while the three models this function cares about
+    # are still pulling — so the manager answers with a list that is neither
+    # complete nor empty, the filter below empties all three lists, and the
+    # verdict at the end of this function blamed the MANIFEST for it. The
+    # manifest is fine. Remember which of the two it was.
+    local served_ids _readiness_incomplete=false
+    served_ids=$(_owui_manager_served_models "$dify_key" 2>/dev/null) || served_ids=""
+    if [ -n "$served_ids" ]; then
+        local _skipped
+        # `_wanted` is now hoisted above (computed before the filter below runs);
+        # re-deriving it here from the already-filtered arrays would defeat the
+        # #2504 fix this round makes.
+        # The names the manifest wants and the manager does not serve — computed
+        # HERE, not inside the filter: a command substitution is a subshell and
+        # would keep the list to itself.
+        _skipped=$(printf '%s\n' "$_wanted" | grep -vxF -f <(printf '%s\n' "$served_ids") | paste -sd ',' - | sed 's/,/, /g') || _skipped=""
+        _dify_only_served() {   # $1 = rows (one per line, first column = alias) → the served subset
+            local line alias
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                alias=$(printf '%s' "$line" | cut -f1)
+                printf '%s\n' "$served_ids" | grep -qxF -- "$alias" && printf '%s\n' "$line"
+            done <<< "$1"
+            return 0
+        }
+        chat_rows=$(_dify_only_served "$chat_rows")
+        embed_aliases=$(_dify_only_served "$embed_aliases")
+        rerank_aliases=$(_dify_only_served "$rerank_aliases")
+        # #2195 rev-B (journey A-prime, 0.91, 23:46:32): ANY wanted row the
+        # manager does not serve makes this a readiness state — not only the
+        # case where every one of them is missing. The first cut required chat
+        # AND embed AND rerank to be empty, and the box that followed served the
+        # reranker and the doc model while the chat model and the embedder were
+        # still pulling: the condition was false, the old path ran, and Dify was
+        # configured with a reranker and nothing else UNDER A GREEN LINE. The
+        # cost was immediate — the example KB was not created, because Dify
+        # answered `{"code":"invalid_param","message":"Default model not found
+        # for text-embedding"}`. `_skipped` is already exactly this list, and it
+        # is already printed above; here it decides.
+        if [ -n "$_skipped" ]; then
+            _readiness_incomplete=true
+        fi
+        if [ -n "$_skipped" ]; then
+            print_warning "  Not registered in Dify — the LLM Manager does not serve: ${_skipped} (#1442). Deploy them, then re-run 'rzfz post-install --refresh'."
+        fi
+    fi
+
+    local reg_all="" alias roles ctx extra
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        alias=$(printf '%s' "$line" | cut -f1)
+        roles=$(printf '%s' "$line" | cut -f2)
+        [ -n "$alias" ] || continue
+        ctx=$(_manifest_per_slot_context "$alias" 32768)
+        # Capability flags Dify's agent / workflow / vision features gate on.
+        #
+        # #1979: the second spelling `agent_though_support` is GONE. The comment
+        # that used to stand here said the openai_api_compatible plugin declares
+        # the typo'd variable and the gpustack fork the correct one, so sending
+        # both would land the flag either way. Measured across four shipped
+        # plugin packages — the typo appears NOWHERE:
+        #
+        #     plugin                              agent_thought_  agent_though_
+        #     openai_api_compatible 0.0.66             16              0
+        #     openai_api_compatible 0.0.34             10              0
+        #     gpustack              0.0.16             10              0
+        #     gpustack              0.0.15             10              0
+        #
+        # (A review measured the same against the three versions installed on
+        # 0.91, in the provider schema AND the model sources.) Both plugins use
+        # the correct spelling only, so the extra key had no reader on any
+        # version we have ever shipped — it was never a safeguard, and the
+        # comment defending it was never checked against a package.
+        #
+        # #1966: `compatibility_mode: extended` is what makes the thinking
+        # switch REACH the model. Read in the shipped plugin
+        # (openai_api_compatible 0.0.66, models/llm/llm.py:581-616): with
+        # `agent_thought_support: supported` the plugin POPS `enable_thinking`
+        # out of the model parameters (:591) and only puts a thinking
+        # instruction back — `chat_template_kwargs.enable_thinking`, the form
+        # llama.cpp reads — when `compatibility_mode == "extended"` (:597-605).
+        # The default is `strict`, and under strict the switch is dropped in
+        # BOTH directions: neither a workflow's `enable_thinking: false` nor a
+        # credential's forced value ever leaves Dify.
+        #
+        # Measured on 0.91 against this router (#1966): without
+        # the kwarg qwen3.6 spends its whole budget in the thinking channel and
+        # returns `content: ''` with `finish_reason: length`; with it, the same
+        # call returns the JSON and `finish_reason: stop`. The document-to-JSON workflow sets
+        # `enable_thinking: false` on five of its six LLM nodes and still got
+        # empty content — because the flag never arrived.
+        #
+        # `extended` is right for THIS credential and would not be for every
+        # endpoint: it permits non-standard parameters, and a strict OpenAI
+        # gateway can reject them. This credential names our own LLM Manager,
+        # which is LiteLLM in front of llama-box — the runtime those parameters
+        # were invented for. The Mac-gateway registration deliberately sends no
+        # extra credentials at all and is unaffected.
+        #
+        # #3228: the literal lives in _dify_manager_llm_extras, shared with the
+        # --refresh wiring, which must write the SAME credential.
+        extra=$(_dify_manager_llm_extras "$roles")
+        # #1959: the verdict is deliberately NOT consumed per call here. This
+        # function keeps its own, richer one — the per-model-TYPE count below,
+        # which #1248 rev-B added for exactly this path and which must see every
+        # model's output before it judges. `|| true` only keeps `set -e` from
+        # cutting the loop short at the first refusal.
+        _dify_register_models "$admin_email" "$dify_key" "$endpoint" "$label" \
+            "$ctx" "$alias" "llm" "$extra" || true
+        reg_all="${reg_all}${_DIFY_REG_LAST_OUTPUT}
+"
+    done <<< "$chat_rows"
+
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        ctx=$(_manifest_per_slot_context "$alias" 8192)
+        _dify_register_models "$admin_email" "$dify_key" "$endpoint" "$label" \
+            "$ctx" "$alias" "text-embedding" "{}" || true   # #1959: see above
+        reg_all="${reg_all}${_DIFY_REG_LAST_OUTPUT}
+"
+    done <<< "$embed_aliases"
+
+    # The rerank half is not optional decoration: with no rerank model wired,
+    # Dify's knowledge retrieval silently drops to embedding-only and answers
+    # plausibly from the wrong chunks — the failure #908/#1058 chased through the
+    # Open WebUI RAG path. The manager exposes it at /v1/rerank, which is where
+    # the plugin's rerank model posts.
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        ctx=$(_manifest_per_slot_context "$alias" 8192)
+        _dify_register_models "$admin_email" "$dify_key" "$endpoint" "$label" \
+            "$ctx" "$alias" "rerank" "{}" || true   # #1959: see above
+        reg_all="${reg_all}${_DIFY_REG_LAST_OUTPUT}
+"
+    done <<< "$rerank_aliases"
+
+    # rev-B (review F1): count PER MODEL TYPE, not across all of them. A global
+    # count of 1 passed a run in which the chat credential registered and EVERY
+    # embedding and rerank credential came back `error:` — and the workspace
+    # defaults below were then set for text-embedding and rerank with nothing
+    # behind them. That is the #1248 symptom one level up, and the same class
+    # this cycle is busy abolishing (#1247: the installer reports success while
+    # the box is broken). A type we did not ask for (empty alias list) is not
+    # required to produce anything.
+    # #2197: `${ok_count}` on the success line below was never assigned —
+    # every manager box printed "( model credential(s), …)". Count what the
+    # per-type check counts, so the number on the success line is the number
+    # the verdict was made from.
+    local missing="" mt aliases_for_type ok_type ok_count=0
+    for mt in llm text-embedding rerank; do
+        case "$mt" in
+            llm)            aliases_for_type=$(printf '%s\n' "$chat_rows" | cut -f1) ;;
+            text-embedding) aliases_for_type="$embed_aliases" ;;
+            rerank)         aliases_for_type="$rerank_aliases" ;;
+        esac
+        [ -n "$(printf '%s' "$aliases_for_type" | tr -d '[:space:]')" ] || continue
+        ok_type=$(printf '%s\n' "$reg_all" | grep -cE "${mt} model \[[^]]*\] (added|updated \(credential refreshed\)|already configured)\.") || ok_type=0
+        [ "${ok_type:-0}" -ge 1 ] || missing="${missing:+${missing}, }${mt}"
+        ok_count=$((ok_count + ${ok_type:-0}))
+    done
+    if [ -n "$missing" ]; then
+        print_error "Dify model registration against the LLM Manager produced no usable credential for: ${missing}"
+        print_error "  (a workspace default without a credential behind it is exactly the #1248 state; refusing to set one)"
+        printf '%s\n' "$reg_all" | while IFS= read -r line; do
+            if [ -n "$line" ]; then print_error "  $line"; fi
+        done
+        return 1
+    fi
+
+    # ── workspace defaults ────────────────────────────────────────────────────
+    local chat_default embed_default rerank_default
+    chat_default=$(_dify_pick_default "$(_default_chat_alias)" \
+        "$(printf '%s\n' "$chat_rows" | cut -f1)")
+    embed_default=$(_dify_pick_default "$(_default_embedding_alias)" "$embed_aliases")
+    rerank_default=$(_dify_pick_default "$(_llmm_default_alias reranker qwen3-reranker)" \
+        "$rerank_aliases")
+
+    local pairs=""
+    if [ -n "$chat_default" ]; then pairs="llm=${chat_default}"; fi
+    if [ -n "$embed_default" ]; then pairs="${pairs:+${pairs};}text-embedding=${embed_default}"; fi
+    if [ -n "$rerank_default" ]; then pairs="${pairs:+${pairs};}rerank=${rerank_default}"; fi
+    if [ -z "$pairs" ]; then
+        # #2195: "not yet" and "never" are different answers and used to print
+        # the same line. `dify` is one of POST_INSTALL_CRITICAL_STEPS, so
+        # returning 1 for a box that is merely still downloading exits
+        # post-install 1 with "this box cannot serve models" — measured on 0.91
+        # on a box that served a real chat completion five minutes later.
+        if [ "$_readiness_incomplete" = true ]; then
+            print_warning "No Dify workspace default yet: the manifest's chat, embedding and rerank models are still DOWNLOADING — the LLM Manager serves none of them at this moment. The manifest is fine; the weights are not here yet. On a fresh CPU box this is the normal shape, because --skip-wait is the default there."
+            print_info "  Nothing is registered with nothing behind it (#1248), so Dify keeps no half-configured provider."
+            print_info "  The late pass (#1507) re-runs this for you when the deployments land inside its window. If it does not, run:"
+            print_info "      rzfz post-install --refresh"
+            return 3
+        fi
+        print_error "Nothing to select as a Dify workspace default — the manifest's always-on set for preset '$preset' has no chat, embedding or rerank model."
+        return 1
+    fi
+
+    _dify_set_default_models "$admin_email" "$provider" "$pairs"
+
+    # Only the defaults we ASKED for are asserted: a box whose always-on set has
+    # no reranker never asks for one, and must not fail for it.
+    local missing="" pair mt
+    for pair in $(printf '%s' "$pairs" | tr ';' ' '); do
+        mt="${pair%%=*}"
+        if ! printf '%s\n' "$_DIFY_DEF_LAST_OUTPUT" | grep -q "^Default ${mt} set to "; then
+            missing="${missing}${mt} "
+        fi
+    done
+    if [ -n "$missing" ]; then
+        print_error "Dify workspace default not selected for: ${missing}— a Dify app has no model and a knowledge base cannot index. (#1248)"
+        printf '%s\n' "$_DIFY_DEF_LAST_OUTPUT" | while IFS= read -r line; do
+            if [ -n "$line" ]; then print_error "  $line"; fi
+        done
+        return 1
+    fi
+
+    # #2195 rev-B: what was served IS registered and its defaults ARE set — a
+    # partial set is not a reason to discard what the box has. But the step is
+    # not FINISHED, and printing success over it is what let a Dify with a
+    # reranker and no chat model read as a green install (0.91, journey
+    # A-prime). The verdict is chosen here; the cleanup below still runs once,
+    # after the defaults, which is the #1338 ordering.
+    local _dcm_verdict=0
+    if [ "$_readiness_incomplete" = true ]; then
+        _dcm_verdict=3
+        print_warning "Dify has only PART of its model set: ${pairs}. The LLM Manager does not serve these: ${_skipped}."
+        print_info "  Either they are still downloading — a fresh CPU box wires its consumers before the weights land — or this box cannot place them at all. 'rzfz llm status' says which."
+        print_info "  A Dify with no embedding default cannot index a knowledge base (the example KB seed answers 'Default model not found for text-embedding'); with no rerank default its retrieval silently drops to embedding-only and answers plausibly from the wrong chunks (#908/#1058)."
+        print_info "  The late pass (#1507) re-runs this once the deployments are ready, and does NOT wait for models the manager says it cannot place (#1760). If Dify stays short, run:"
+        print_info "      rzfz post-install --refresh"
+    else
+        print_success "Dify LLM Manager models configured (${ok_count} model credential(s), defaults: ${pairs})."
+    fi
+    # After the defaults are set, not before: tenant_default_models is unique per
+    # (tenant_id, model_type), so setting a default REPOINTS the row the stale
+    # provider held. What the cleanup then removes is only what stayed dangling.
+    # #2415: saved apps that still point at the retired provider move to the one
+    # whose models were just registered (or are reported, when nothing can move).
+    _dify_migrate_graph_provider_refs "langgenius/gpustack/gpustack" "$provider"
+    _dify_drop_inactive_provider_rows "$provider"
+    [ "${_DIFY_REFS_REWRITTEN:-0}" -eq 0 ] || _dify_drop_provider_cache
+    # #2504: a model this run did NOT (re-)register under our own 'LLM Manager'
+    # credential — because the manifest dropped it, not because it is merely
+    # still downloading — must not stay selectable in Dify forever. Gated on
+    # `served_ids` being non-empty: that is the manager's OWN authoritative
+    # answer for "what is actually up right now" (`_owui_manager_served_models`
+    # above); when it came back empty this run learned nothing reliable about
+    # what is retired vs. still pulling, and pruning on that silence would
+    # delete a model that is merely not ready yet.
+    #
+    # Fix round 1 (review): the "keep" list passed here MUST include `_wanted`
+    # — the full MANIFEST set, hoisted above BEFORE `_dify_only_served`
+    # narrowed chat_rows/embed_aliases/rerank_aliases to what the manager
+    # answers right now. The first cut passed those already-narrowed arrays,
+    # so on every box where a manifest model is still pulling (any upgrade,
+    # any fresh install) its registration looked "not served" and was pruned
+    # mid-download. Also gated on `_readiness_incomplete` being false: that
+    # flag already means "this run's answer about what is served is
+    # incomplete", and #2504 must never prune on an incomplete answer even
+    # with `_wanted` as the floor.
+    #
+    # Fix round 2 (review, item B): `_wanted` alone is not enough. It is only
+    # the MANIFEST's always-on set — `wire_llm_manager_consumers` (elsewhere
+    # in this file) separately registers, under this SAME 'LLM Manager'
+    # credential, EVERY ready deployment the manager serves, which includes
+    # models an operator deployed by hand from the console and that are not
+    # in the manifest at all. Keying the prune on `_wanted` alone made such a
+    # model flip-flop: registered by the consumer-wiring step, then pruned
+    # right back out by this one, on the same post-install run. `served_ids`
+    # (this function's own `_owui_manager_served_models` answer, already
+    # known non-empty inside this `if`) is unioned in as the second half of
+    # "must exist" — anything the manager is ACTUALLY serving right now,
+    # manifest or not.
+    if [ -n "$served_ids" ] && [ "$_readiness_incomplete" != true ]; then
+        _dify_prune_stale_models "$provider" "$label" \
+            "$(printf '%s\n%s\n' "$_wanted" "$served_ids" | grep -v '^$' | sort -u)"
+    fi
+    return "$_dcm_verdict"
+}
+
+# #2415 — a backend switch must take the OLD provider's REFERENCES with it.
+#
+# `_dify_drop_inactive_provider_rows` (below) removes the retired provider's
+# model rows, and `dify_configure_manager_models` registers the served set
+# under the active one. Neither touches what a saved app still POINTS AT: an
+# LLM node in `workflows.graph`, a chat app's `app_model_configs.model`, a
+# knowledge base's `datasets.embedding_model_provider`. A workflow authored
+# against `langgenius/gpustack/gpustack` keeps that reference, the provider it
+# names is now empty, and the node renders "Incompatible" with `rzfz status`
+# green. Measured on 0.208 after the 2026.09-ga.1 upgrade: 5 of 7 apps; on prod
+# (2026.08-ga.15) 16 of 41 apps would land in that state at the upgrade.
+#
+# Contract: rewrite the provider reference (stale → active) in the three
+# columns, model names untouched, ONLY when the active provider has at least
+# one registered model; keep the original text of every rewritten row in
+# `rzfz_provider_ref_backup` (reversible by hand); then report what still does
+# not resolve (a model name referenced by a graph that the active provider
+# does not carry) — the report is the point even when nothing is rewritten.
+# DIFY_MIGRATE_REFS-BEGIN
+_dify_migrate_graph_provider_refs() {
+    local stale="$1" active="$2"
+    [ -n "$stale" ] && [ -n "$active" ] && [ "$stale" != "$active" ] || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres || return 0
+    local _psql="docker exec postgres psql -U ${POSTGRES_USER:-docker} -d ${DIFY_DB:-dify_db} -tAc"
+    local _num='s/^[^0-9]*\([0-9][0-9]*\).*/\1/'
+
+    # How many saved apps still point at the retired provider — the number the
+    # operator needs whether or not anything can be rewritten (#2415 ask 3).
+    local apps wf cfg ds bind
+    _DIFY_REFS_REWRITTEN=0
+    apps=$($_psql "SELECT count(DISTINCT app_id) FROM workflows WHERE graph LIKE '%${stale}%';" 2>/dev/null | tr -d '[:space:]')
+    wf=$($_psql "SELECT count(*) FROM workflows WHERE graph LIKE '%${stale}%';" 2>/dev/null | tr -d '[:space:]')
+    cfg=$($_psql "SELECT count(*) FROM app_model_configs WHERE model LIKE '%${stale}%';" 2>/dev/null | tr -d '[:space:]')
+    ds=$($_psql "SELECT count(*) FROM datasets WHERE embedding_model_provider = '${stale}';" 2>/dev/null | tr -d '[:space:]')
+    # #2427: the knowledge base's collection binding carries the provider id too.
+    bind=$($_psql "SELECT count(*) FROM dataset_collection_bindings WHERE provider_name = '${stale}';" 2>/dev/null | tr -d '[:space:]')
+    case "${apps:-}" in ''|*[!0-9]*) apps=0 ;; esac; case "${wf:-}" in ''|*[!0-9]*) wf=0 ;; esac
+    case "${cfg:-}" in ''|*[!0-9]*) cfg=0 ;; esac; case "${ds:-}" in ''|*[!0-9]*) ds=0 ;; esac
+    case "${bind:-}" in ''|*[!0-9]*) bind=0 ;; esac
+    if [ "$apps" -eq 0 ] && [ "$cfg" -eq 0 ] && [ "$ds" -eq 0 ] && [ "$bind" -eq 0 ]; then
+        _dify_report_unresolvable_datasets
+        return 0   # nothing references the retired provider — silent on every --refresh
+    fi
+    print_step "Dify: ${apps} app(s) (${wf} workflow version(s)), ${cfg} chat config(s), ${ds} knowledge base(s), ${bind} collection binding(s) still reference ${stale##*/} (#2415, #2427)"
+
+    local active_models
+    active_models=$($_psql "SELECT count(*) FROM provider_models WHERE provider_name = '${active}';" 2>/dev/null | tr -d '[:space:]')
+    case "${active_models:-}" in ''|*[!0-9]*) active_models=0 ;; esac
+    if [ "$active_models" -eq 0 ]; then
+        print_warning "  ${active##*/} has no registered models yet — references are NOT rewritten (they would point at another empty provider). Re-run 'rzfz post-install --refresh' once the models are served."
+        return 0
+    fi
+
+    # #2427: a knowledge base moves only when the active provider serves ITS model
+    # under the same name — then the stored vectors stay valid (same model, same
+    # width). Any other dataset would need a re-index (#243); it is refused and
+    # named, never repointed at a model that did not build its vectors.
+    local _served="SELECT model_name FROM provider_models WHERE provider_name = '${active}'"
+    local refused
+    refused=$($_psql "SELECT name || ' (' || coalesce(embedding_model,'?') || ')' FROM datasets WHERE embedding_model_provider = '${stale}' AND coalesce(embedding_model,'') NOT IN (${_served});" 2>/dev/null | sed '/^$/d' | tr '\n' ';' | sed 's/;$//; s/;/, /g')
+
+    # Reversible: the original text of every row about to change, kept in Dify's
+    # own database beside the data it belongs to.
+    $_psql "CREATE TABLE IF NOT EXISTS rzfz_provider_ref_backup (id bigserial PRIMARY KEY, migrated_at timestamptz NOT NULL DEFAULT now(), source_table text NOT NULL, row_id text NOT NULL, column_name text NOT NULL, original text);" >/dev/null 2>&1 || {
+        print_warning "  could not create rzfz_provider_ref_backup — references NOT rewritten (no backup, no rewrite)."; return 0; }
+    $_psql "INSERT INTO rzfz_provider_ref_backup (source_table, row_id, column_name, original)
+              SELECT 'workflows', id::text, 'graph', graph FROM workflows WHERE graph LIKE '%${stale}%'
+              UNION ALL SELECT 'app_model_configs', id::text, 'model', model FROM app_model_configs WHERE model LIKE '%${stale}%'
+              UNION ALL SELECT 'datasets', id::text, 'embedding_model_provider', embedding_model_provider FROM datasets WHERE embedding_model_provider = '${stale}' AND embedding_model IN (${_served})
+              UNION ALL SELECT 'dataset_collection_bindings', id::text, 'provider_name', provider_name FROM dataset_collection_bindings WHERE provider_name = '${stale}' AND model_name IN (${_served});" >/dev/null 2>&1 || {
+        print_warning "  backup of the referencing rows FAILED — references NOT rewritten."; return 0; }
+
+    # The rewrite: the provider id inside the JSON (any spacing after the colon),
+    # the plain column on datasets. Model names are untouched.
+    local n_wf n_cfg n_ds n_bind
+    n_wf=$($_psql "UPDATE workflows SET graph = regexp_replace(graph, '\"provider\":\\s*\"${stale}\"', '\"provider\": \"${active}\"', 'g') WHERE graph LIKE '%${stale}%';" 2>/dev/null | sed -n 's/^UPDATE //p')
+    n_cfg=$($_psql "UPDATE app_model_configs SET model = regexp_replace(model, '\"provider\":\\s*\"${stale}\"', '\"provider\": \"${active}\"', 'g') WHERE model LIKE '%${stale}%';" 2>/dev/null | sed -n 's/^UPDATE //p')
+    n_ds=$($_psql "UPDATE datasets SET embedding_model_provider = '${active}' WHERE embedding_model_provider = '${stale}' AND embedding_model IN (${_served});" 2>/dev/null | sed -n 's/^UPDATE //p')
+    # A binding moves unless the active provider already holds one for the same
+    # model and type: two bindings would be two collections, and choosing which
+    # one a knowledge base keeps is not a guess this script makes.
+    n_bind=$($_psql "UPDATE dataset_collection_bindings b SET provider_name = '${active}' WHERE b.provider_name = '${stale}' AND b.model_name IN (${_served})
+                       AND NOT EXISTS (SELECT 1 FROM dataset_collection_bindings a WHERE a.provider_name = '${active}' AND a.model_name = b.model_name AND a.type = b.type);" 2>/dev/null | sed -n 's/^UPDATE //p')
+    case "${n_wf:-}" in ''|*[!0-9]*) n_wf=0 ;; esac; case "${n_cfg:-}" in ''|*[!0-9]*) n_cfg=0 ;; esac; case "${n_ds:-}" in ''|*[!0-9]*) n_ds=0 ;; esac
+    case "${n_bind:-}" in ''|*[!0-9]*) n_bind=0 ;; esac
+    print_substep "  Rewrote ${n_wf} workflow version(s), ${n_cfg} chat config(s), ${n_ds} knowledge base(s), ${n_bind} collection binding(s) → ${active##*/} (originals in rzfz_provider_ref_backup)."
+    _DIFY_REFS_REWRITTEN=$(( n_wf + n_cfg + n_ds + n_bind ))
+    [ -z "$refused" ] || print_warning "  Knowledge base(s) NOT moved — ${active##*/} does not serve their embedding model, so their vectors need a re-index, not a repoint: ${refused}"
+    if [ "$n_bind" -lt "$bind" ]; then
+        print_warning "  $(( bind - n_bind )) collection binding(s) still name ${stale##*/}: ${active##*/} already has a binding for the same model, or does not serve it. Left for an operator; rows in dataset_collection_bindings."
+    fi
+
+    # What still cannot resolve: model names the graphs ask of the active
+    # provider that it does not carry. Reported, never invented.
+    local unresolved
+    unresolved=$($_psql "SELECT DISTINCT m->>'name' FROM workflows w, jsonb_path_query(w.graph::jsonb, '\$.nodes[*].data.model') m
+                          WHERE m->>'provider' = '${active}'
+                            AND NOT EXISTS (SELECT 1 FROM provider_models pm WHERE pm.provider_name = '${active}' AND pm.model_name = m->>'name');" 2>/dev/null | sed '/^$/d' | tr '\n' ' ')
+    if [ -n "$unresolved" ]; then
+        print_warning "  Model name(s) referenced by saved workflows that ${active##*/} does not serve: ${unresolved}— those nodes stay unresolved until the model is deployed or the workflow is edited."
+    else
+        print_substep "  Every model referenced by a saved workflow is registered under ${active##*/}."
+    fi
+    _dify_report_unresolvable_datasets
+    return 0
+}
+
+# #2427 ask 2: a knowledge base whose (provider, model) pair has no model row
+# looks healthy — documents, chunk count — until someone retrieves, and then
+# says "invalid credentials" about a provider nobody uses any more. Name them.
+_dify_report_unresolvable_datasets() {
+    local _psql="docker exec postgres psql -U ${POSTGRES_USER:-docker} -d ${DIFY_DB:-dify_db} -tAc" dead
+    dead=$($_psql "SELECT d.name || ' (' || d.embedding_model_provider || ' / ' || d.embedding_model || ')' FROM datasets d
+                   WHERE d.indexing_technique = 'high_quality'
+                     AND NOT EXISTS (SELECT 1 FROM provider_models pm WHERE pm.provider_name = d.embedding_model_provider AND pm.model_name = d.embedding_model);" 2>/dev/null | sed '/^$/d' | tr '\n' ';' | sed 's/;$//; s/;/, /g')
+    [ -z "$dead" ] || print_warning "  Dify knowledge base(s) whose embedding model no provider serves — retrieval fails with 'credentials is not initialized': ${dead} (#2427)"
+    [ -z "$dead" ] || print_info "  Re-embed them as their owners (hours on a large KB): 'rzfz dify-reindex' lists them, 'rzfz dify-reindex --apply' starts it (#2427)."
+    return 0
+}
+
+# #2427: Dify caches provider credentials and configurations in Valkey, and a
+# database change does NOT take effect — not even across a restart — until the
+# cached keys are gone. Called after the rewrite AND the retired rows' removal.
+_dify_drop_provider_cache() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx valkey || {
+        print_warning "  Valkey not running — Dify's provider cache was NOT cleared; the rewritten rows take effect once it is (run 'rzfz post-install --refresh' again)."; return 0; }
+    local pw db pat keys n=0 failed=0
+    pw=$(read_env_value ".env" VALKEY_PASSWORD 2>/dev/null || true)
+    db=$(read_env_value ".env.dify" REDIS_DB 2>/dev/null || true)
+    case "${db:-}" in ''|*[!0-9]*) db=0 ;; esac
+    # #2746: the password is forwarded by name (REDISCLI_AUTH), never `-a <pw>` on argv
+    local _vk=(docker exec -e REDISCLI_AUTH valkey valkey-cli --no-auth-warning -n "$db")
+    for pat in 'provider_*credential*' 'provider_configurations:*'; do
+        keys=$(REDISCLI_AUTH="$pw" "${_vk[@]}" --scan --pattern "$pat" 2>/dev/null) || { failed=1; continue; }
+        [ -n "$keys" ] || continue
+        # shellcheck disable=SC2086  # one key per word; Dify's keys carry no whitespace
+        if REDISCLI_AUTH="$pw" "${_vk[@]}" UNLINK $keys >/dev/null 2>&1; then
+            n=$(( n + $(printf '%s\n' "$keys" | sed '/^$/d' | wc -l) ))
+        else
+            failed=1
+        fi
+    done
+    if [ "$failed" -ne 0 ]; then
+        print_warning "  Dify's provider cache could not be cleared completely — the rewritten rows may look unchanged until it is (re-run 'rzfz post-install --refresh')."
+    else
+        print_substep "  Cleared ${n} cached Dify provider key(s) so the rewritten rows take effect (#2427)."
+    fi
+    return 0
+}
+# DIFY_MIGRATE_REFS-END
+
+# #1338 — a backend switch must take the OLD provider's rows with it.
+#
+# `dify_configure_manager_models` (above) and `dify_configure_model` (the
+# GPUStack branch) each write one of the stack's TWO providers. Neither ever
+# deleted the other's rows, and `core/llm/sync.py::sync_dify` — the only place
+# that deletes anything — filters on `provider_name = langgenius/gpustack/…`
+# and on aliases that vanished from standard-models.yaml. A migrated box's
+# aliases have NOT vanished; they hang off the wrong provider. So the old
+# provider survives every upgrade and every `--refresh`, and the operator sees
+# a second model list in every Dify picker, pointing at `http://gpustack:9090`
+# — a host a Manager box does not resolve. No error anywhere; the failure
+# arrives at runtime as a NameResolutionError.
+#
+# WHICH TABLES: the issue names `provider_models`. Measured on 0.78 (a real
+# GPUStack box) the provider lives in FOUR:
+#
+#     provider_models             9   the model list
+#     provider_model_credentials  n   the per-model endpoint+key (customizable-
+#                                     model providers keep credentials here)
+#     provider_model_settings     1   per-model enable/disable
+#     tenant_default_models       6   the workspace defaults
+#
+# Dropping only the first would leave the credentials and the workspace
+# defaults pointing at the dead provider, so all four are cleaned.
+#
+# NEVER touches a third-party provider. The delete is keyed on the ONE other
+# stack-owned provider name — an operator's own OpenAI or Anthropic entry has a
+# different `provider_name` and is not part of this decision. And it runs only
+# after the active provider was written successfully (the caller returns
+# earlier on failure), so a half-configured box keeps the rows it still has.
+_dify_drop_inactive_provider_rows() {
+    local active="$1" stale="" scope=""
+    case "$active" in
+        *openai_api_compatible*)
+            # The gpustack provider plugin is OURS end to end: an operator does
+            # not hand-register models under `langgenius/gpustack`, the stack's
+            # own writer is the only thing that ever puts rows there. Everything
+            # of that provider goes.
+            stale="langgenius/gpustack/gpustack"
+            scope="all"
+            ;;
+        *gpustack*)
+            # #1338 review, and this one is load-bearing:
+            # `openai_api_compatible` is Dify's GENERIC provider for "any
+            # OpenAI-compatible endpoint", and it is a customizable-model
+            # provider — every model an operator adds by hand (a partner API,
+            # their own vLLM, a second manager) sits under the SAME
+            # provider_name as ours. A provider-wide DELETE here takes their
+            # entries with it, credentials and workspace defaults included. It
+            # would also delete the Mac gateway's registration (#813), which is
+            # a LIVE integration on a box that switches to GPUStack.
+            #
+            # So on this side only OUR credential is removed, by its label.
+            stale="langgenius/openai_api_compatible/openai_api_compatible"
+            scope="ours"
+            ;;
+        *) return 0 ;;
+    esac
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres || return 0
+
+    local _psql="docker exec postgres psql -U ${POSTGRES_USER:-docker} -d ${DIFY_DB:-dify_db} -tAc"
+
+    # The model names to remove. With scope=ours that is "whatever hangs off a
+    # credential labelled 'LLM Manager'" — the label `_dify_register_models`
+    # writes (credential_name=label). With scope=all it is the whole provider.
+    local names_sql
+    if [ "$scope" = "ours" ]; then
+        names_sql="SELECT DISTINCT pm.model_name FROM provider_models pm
+                     JOIN provider_model_credentials c ON c.id = pm.credential_id
+                    WHERE pm.provider_name = '${stale}'
+                      AND c.provider_name = '${stale}'
+                      AND c.credential_name = 'LLM Manager';"
+    else
+        names_sql="SELECT DISTINCT model_name FROM provider_models WHERE provider_name = '${stale}';"
+    fi
+    local names
+    names=$($_psql "$names_sql" 2>/dev/null | sed '/^$/d')
+    if [ -z "$names" ] && [ "$scope" = "ours" ]; then
+        # Nothing of ours under the retired provider. Silent: this runs on every
+        # --refresh, and on a box that never switched there is nothing to say.
+        #
+        # #1338 review, finding 1: this return used to fire for
+        # BOTH scopes, and on the `all` side that was a NARROWING against the
+        # code it replaced. There the model names are only a convenience — the
+        # whole provider goes — so an empty `provider_models` meant nothing was
+        # deleted at all, not even the credentials, the settings or the
+        # workspace defaults. That state is not hypothetical: it is what a
+        # registration that died after writing its credential leaves behind,
+        # and a dead provider remnant is precisely what this function is for.
+        return 0
+    fi
+
+    # `'a','b'` for the IN-lists below. Dify model names are plugin-declared
+    # identifiers, but a stray quote would end the literal, so double it.
+    local in_list=""
+    local _n
+    while IFS= read -r _n; do
+        [ -n "$_n" ] || continue
+        _n=${_n//\'/\'\'}
+        in_list="${in_list:+${in_list},}'${_n}'"
+    done <<< "$names"
+
+    # #2536 item 10: scope=ours had no reference guard. A saved app or
+    # knowledge base that still names one of OUR models under the retiring
+    # provider lost its model row. Per model, fail closed like scope=all:
+    # a referenced model stays, a lookup that cannot run deletes nothing.
+    local _keep="" _kept_by="" _m
+    if [ "$scope" = "ours" ]; then
+        in_list=""
+        while IFS= read -r _m; do
+            [ -n "$_m" ] || continue
+            _dify_model_referencing_entities "$stale" "$_m"
+            if [ "$_DIFY_REF_FAILED" -eq 1 ]; then
+                print_warning "Dify: NOT removing our ${stale##*/} rows — could not confirm that nothing references '${_m}' (the lookup itself failed). Re-run 'rzfz post-install --refresh'. (#2536)"
+                return 0
+            fi
+            if [ -n "$_DIFY_REF_APPS" ] || [ -n "$_DIFY_REF_DATASETS" ]; then
+                _keep="${_keep:+${_keep}, }${_m}"
+                _kept_by="${_kept_by:+${_kept_by}; }${_m}: ${_DIFY_REF_APPS}${_DIFY_REF_APPS:+${_DIFY_REF_DATASETS:+, }}${_DIFY_REF_DATASETS}"
+                continue
+            fi
+            _m=${_m//\'/\'\'}
+            in_list="${in_list:+${in_list},}'${_m}'"
+        done <<< "$names"
+        [ -z "$_keep" ] || print_warning "Dify: keeping ${_keep} under ${stale##*/} — still used by ${_kept_by}. Point them at ${active##*/} and re-run 'rzfz post-install --refresh'. (#2536)"
+        [ -n "$in_list" ] || return 0
+    fi
+
+    # #2504: scope=all drops the WHOLE stale provider — refuse when a saved app
+    # or knowledge base still points at it. Ordinarily
+    # `_dify_migrate_graph_provider_refs` (run by the caller just before this)
+    # has already moved every reference off `stale`, so this is normally
+    # silent; it only fires when that migration itself was refused (the active
+    # provider had no models yet, or its own backup step failed) — exactly the
+    # case where dropping the provider out from under a still-referencing app
+    # would leave that app's nodes pointing at rows that no longer exist,
+    # worse than the "Incompatible" badge #2415 was written to fix. scope=ours
+    # is guarded per model further down (#2536): it only removes rows under
+    # OUR OWN credential label and keeps every model an app still names.
+    #
+    # Fix round 1: a lookup that FAILS must be read as "may be referenced",
+    # never as "not referenced" — this deletes rows on production Dify
+    # databases, and the review reproduced a fail-OPEN case (a psql/jsonb
+    # error came back as empty output, which the first cut of this guard read
+    # as "nothing references it"). `_dify_provider_referencing_entities`
+    # captures the lookup's own exit code and reports failure explicitly.
+    if [ "$scope" = "all" ]; then
+        _dify_provider_referencing_entities "$stale"
+        if [ "$_DIFY_REF_FAILED" -eq 1 ]; then
+            print_warning "Dify: NOT removing ${stale} — could not confirm nothing still references it (the lookup itself failed) — refusing rather than risk deleting something in use. Re-run 'rzfz post-install --refresh'. (#2504)"
+            return 0
+        fi
+        if [ -n "$_DIFY_REF_APPS" ] || [ -n "$_DIFY_REF_DATASETS" ]; then
+            local _kept_by=""
+            [ -z "$_DIFY_REF_APPS" ] || _kept_by="app(s): ${_DIFY_REF_APPS}"
+            if [ -n "$_DIFY_REF_DATASETS" ]; then
+                [ -z "$_kept_by" ] || _kept_by="${_kept_by}; "
+                _kept_by="${_kept_by}knowledge base(s): ${_DIFY_REF_DATASETS}"
+            fi
+            print_warning "Dify: NOT removing ${stale} — still referenced by ${_kept_by}. #2415 should already have moved these; re-run 'rzfz post-install --refresh' once ${active##*/} serves the model(s) they need. (#2504)"
+            return 0
+        fi
+    fi
+
+    print_step "Dify: removing the retired model provider's rows (#1338)"
+    local rows_deleted=0 t n where
+    for t in provider_models provider_model_settings tenant_default_models; do
+        # scope=all: the whole provider goes, so the name list is not a filter —
+        # it is only the thing that makes the OURS side safe. Restricting the
+        # `all` side by it would leave every row whose model has already gone
+        # from provider_models.
+        if [ "$scope" = "all" ]; then
+            where="provider_name = '${stale}'"
+        else
+            where="provider_name = '${stale}' AND model_name IN (${in_list})"
+        fi
+        n=$($_psql "DELETE FROM ${t} WHERE ${where};" 2>/dev/null | sed -n 's/^DELETE //p')
+        case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
+        [ "$n" = "0" ] || print_substep "  ${t}: ${n} row(s)"
+        rows_deleted=$((rows_deleted + n))
+    done
+    # Credentials LAST: provider_models.credential_id points at them, and the
+    # name lookup above joined through it. #2536: a kept model still does, and
+    # so does any other row (T16's rule in _dify_prune_stale_models).
+    if [ "$scope" = "ours" ] && [ -n "$_keep" ]; then
+        print_substep "  provider_model_credentials: kept — ${_keep} still use the 'LLM Manager' credential"
+    else
+        if [ "$scope" = "ours" ]; then
+            where="provider_name = '${stale}' AND credential_name = 'LLM Manager'
+                   AND NOT EXISTS (SELECT 1 FROM provider_models o WHERE o.credential_id = provider_model_credentials.id)"
+        else
+            where="provider_name = '${stale}'"
+        fi
+        n=$($_psql "DELETE FROM provider_model_credentials WHERE ${where};" 2>/dev/null | sed -n 's/^DELETE //p')
+        case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
+        [ "$n" = "0" ] || print_substep "  provider_model_credentials: ${n} row(s)"
+        rows_deleted=$((rows_deleted + n))
+    fi
+
+    print_substep "Removed ${rows_deleted} row(s) of ${stale} — this box serves its models through ${active##*/}."
+    # #2536 item 8: Dify serves provider credentials/configurations from
+    # Valkey until the keys go (#2427) — the deleted provider stays in every
+    # picker otherwise. The GPUStack-branch caller never dropped it at all.
+    # The drop warns on a Valkey failure and returns 0; it never aborts.
+    [ "$rows_deleted" -eq 0 ] || _dify_drop_provider_cache
+    return 0
+}
+
+# #2504 — a retired backend, or a model the manager simply stopped serving,
+# must not keep a live entry in Dify's model picker under the SAME provider
+# the active registration also uses. #1338/#2415 (above) handle a whole
+# provider going away (GPUStack) and the graph references that pointed at it;
+# neither touches a MODEL row that stays registered under
+# `langgenius/openai_api_compatible/openai_api_compatible` — the manager's own
+# provider — after its backend disappears (the Mac gateway, credential_name
+# 'Mac LLM Gateway') or after the manager itself drops the model from what it
+# serves (credential_name 'LLM Manager'). Both sit on the SAME provider row
+# the currently-served models also use, so #1338's provider-scoped delete
+# cannot tell "still serving" from "retired" — this has to work one model row
+# at a time, scoped by the credential label our own registrations write.
+#
+# Measured on prod (#2504, box-1, during the 2026.08-ga.15 -> 2026.09-ga.3
+# upgrade): three rows under `langgenius/openai_api_compatible/openai_api_
+# compatible` outlived their backend — `jina-reranker-v2` (rerank, pointed at
+# the stopped gpustack:9090 container), `codegemma-2b` (llm, the manifest no
+# longer places it) and `qwen3.6:35b-a3b-mxfp8` (llm, credential
+# 'Mac LLM Gateway', the gateway container retired). The first is a
+# provider-level GPUStack remnant and goes through #1338/#2415 above once
+# they run; the other two are what this block removes.
+# DIFY_RETIRE_PRUNE-BEGIN
+# _dify_sql_escape <value>: doubles single quotes for a literal — the same
+# escaping _dify_drop_inactive_provider_rows already uses for its IN-lists.
+_dify_sql_escape() {
+    printf '%s' "${1//\'/\'\'}"
+}
+
+# usage: _dify_ref_query <sql>
+# Runs <sql> with ON_ERROR_STOP=1 and prints its rows on success. On ANY
+# failure (bad SQL, a cast error on one malformed row, postgres unreachable,
+# a schema this old missing a table, …) prints nothing and returns 1 —
+# deliberately: this file deletes rows on a PRODUCTION Dify database, and a
+# reference lookup that could not run must never be silently read as
+# "nothing references it". Fix round 1 (review): a jsonb cast error on one
+# row emptied the previous version's whole lookup output, which the first cut
+# of the guard then read as "safe to delete".
+_dify_ref_query() {
+    local sql="$1" out rc
+    # #2010: `out=$(cmd); rc=$?` is unreachable on the very failure it exists to
+    # handle — this file runs under `set -e` (line 24), and a bare failing
+    # command-substitution assignment ends the script AT THAT LINE, before
+    # `rc=$?` ever runs. The capture belongs in the `if` condition itself.
+    if out=$(docker exec postgres psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-docker}" -d "${DIFY_DB:-dify_db}" -tAc "$sql" 2>&1); then
+        rc=0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s\n' "$out" | sed '/^$/d'
+    return 0
+}
+
+# usage: _dify_provider_referencing_entities <provider>
+# usage: _dify_model_referencing_entities <provider> <model>
+#
+# Sets _DIFY_REF_FAILED (1 = the lookup itself could not be trusted — treat
+# EXACTLY like "still referenced", i.e. keep the row), _DIFY_REF_APPS and
+# _DIFY_REF_DATASETS (comma-joined names, empty = none found this run).
+#
+# TEXT `LIKE`, deliberately never a bare JSON comparison for the JSON-shaped
+# columns: an over-inclusive match — a coincidental substring hit — costs a
+# false "still referenced", and the row simply survives an extra --refresh
+# cycle. See `_dify_ref_query`'s comment for the fail-open this replaces.
+# Both the fully-qualified provider id and its short form
+# (`${provider##*/}`, e.g. `openai_api_compatible`) are checked, because a
+# stored value may carry either.
+#
+# Fix round 2 (review): `datasets.retrieval_model` is JSONB at Dify 1.17.1
+# (migration fca025d3b60f, AdjustedJSON -> JSONB) — `jsonb LIKE` is not an
+# operator Postgres has ("operator does not exist: jsonb ~~ unknown"), so
+# EVERY dataset lookup errored, which fix round 1's own fail-closed rule then
+# read as "could not confirm — keep it": #2504 pruned NOTHING, and the
+# pre-existing #1338 gpustack drop (which also calls into this guard) was
+# refused on every single run — a regression this round undoes. Cast to
+# `::text` first; a cast cannot fail the way a nonexistent operator can.
+# `workflows.graph` and `app_model_configs.*` are plain `text` columns at
+# 1.17.1 (no migration ever moved them to json/jsonb) and need no cast.
+#
+# LIKE-scan limits, worth knowing and not worth chasing here: JSON escapes a
+# `"`, `\` or non-ASCII character inside a string differently from how it
+# looks unescaped (`\"`, `\\`, `\uXXXX`), so a model or app name carrying one
+# of those could, in principle, be stored in a form this substring scan does
+# not match — a false NEGATIVE, the dangerous direction. Not observed in
+# practice (Dify model aliases are plugin-declared identifiers; nothing here
+# widens the net further without parsing JSON properly, which is the
+# `::jsonb`-cast trap above all over again for a much rarer case).
+#
+# Reference kinds covered (verified against Dify 1.17.1 in review):
+#   workflows.graph                    — any LLM/agent node, including
+#                                         single_retrieval_config.model,
+#                                         multiple_retrieval_config.
+#                                         reranking_model ({provider, model}),
+#                                         agent_parameters.model.value — all
+#                                         just JSON TEXT the LIKE scan does
+#                                         not need to parse. LEFT JOINed to
+#                                         `apps`, not INNER: a RAG PIPELINE's
+#                                         workflow (services/rag_pipeline/
+#                                         rag_pipeline.py:386) has
+#                                         `app_id = pipeline.id`, which is
+#                                         never a row in `apps` at all — an
+#                                         INNER join silently drops every
+#                                         pipeline workflow from this guard.
+#   app_model_configs.model            — a chat app's model config
+#   app_model_configs.dataset_configs  — a chat app's retrieval reranker
+#   datasets.embedding_model /
+#     .embedding_model_provider        — a knowledge base's embedder (plain
+#                                         string columns, exact match — no
+#                                         LIKE needed or wanted here; both the
+#                                         full and short provider id checked)
+#   datasets.retrieval_model           — reranking_model.reranking_model_name
+#                                         inside the retrieval-config JSONB
+#                                         (`::text` cast — see above)
+#   app_annotation_settings /
+#     dataset_collection_bindings      — the annotation-reply embedder: an
+#                                         app's annotation settings point at
+#                                         a collection binding, which carries
+#                                         its own provider_name/model_name
+#                                         (the same table #2427's migrate step
+#                                         above already writes)
+# Reported separately as apps vs. knowledge bases (fix round 1: "by app name"
+# is not the right label for a dataset).
+_dify_provider_referencing_entities() {
+    local provider="$1"
+    _DIFY_REF_FAILED=0
+    _DIFY_REF_APPS=""
+    _DIFY_REF_DATASETS=""
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres; then
+        _DIFY_REF_FAILED=1   # cannot ask at all -> cannot say "not referenced"
+        return 0
+    fi
+    local eprov eshort raw
+    eprov=$(_dify_sql_escape "$provider")
+    eshort=$(_dify_sql_escape "${provider##*/}")
+    raw=$(_dify_ref_query "SELECT DISTINCT COALESCE(a.name, 'pipeline/workflow ' || w.app_id) FROM workflows w LEFT JOIN apps a ON a.id = w.app_id
+                             WHERE w.graph LIKE '%${eprov}%' OR w.graph LIKE '%${eshort}%'
+                            UNION
+                           SELECT DISTINCT a.name FROM apps a JOIN app_model_configs c ON c.app_id = a.id
+                             WHERE c.model LIKE '%${eprov}%' OR c.model LIKE '%${eshort}%'
+                                OR c.dataset_configs LIKE '%${eprov}%' OR c.dataset_configs LIKE '%${eshort}%'
+                            UNION
+                           SELECT DISTINCT COALESCE(a2.name, 'app ' || s.app_id) FROM app_annotation_settings s
+                             JOIN dataset_collection_bindings b ON b.id = s.collection_binding_id
+                             LEFT JOIN apps a2 ON a2.id = s.app_id
+                             WHERE b.provider_name = '${eprov}' OR b.provider_name = '${eshort}';") \
+        || { _DIFY_REF_FAILED=1; return 0; }
+    _DIFY_REF_APPS=$(printf '%s\n' "$raw" | paste -sd ',' - | sed 's/,/, /g')
+    raw=$(_dify_ref_query "SELECT DISTINCT d.name FROM datasets d
+                             WHERE d.embedding_model_provider = '${eprov}' OR d.embedding_model_provider = '${eshort}'
+                                OR d.retrieval_model::text LIKE '%${eprov}%' OR d.retrieval_model::text LIKE '%${eshort}%';") \
+        || { _DIFY_REF_FAILED=1; return 0; }
+    _DIFY_REF_DATASETS=$(printf '%s\n' "$raw" | paste -sd ',' - | sed 's/,/, /g')
+    return 0
+}
+
+_dify_model_referencing_entities() {
+    local provider="$1" model="$2"
+    _DIFY_REF_FAILED=0
+    _DIFY_REF_APPS=""
+    _DIFY_REF_DATASETS=""
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres; then
+        _DIFY_REF_FAILED=1
+        return 0
+    fi
+    local eprov eshort emodel raw
+    eprov=$(_dify_sql_escape "$provider")
+    eshort=$(_dify_sql_escape "${provider##*/}")
+    emodel=$(_dify_sql_escape "$model")
+    raw=$(_dify_ref_query "SELECT DISTINCT COALESCE(a.name, 'pipeline/workflow ' || w.app_id) FROM workflows w LEFT JOIN apps a ON a.id = w.app_id
+                             WHERE (w.graph LIKE '%${eprov}%' OR w.graph LIKE '%${eshort}%') AND w.graph LIKE '%\"${emodel}\"%'
+                            UNION
+                           SELECT DISTINCT a.name FROM apps a JOIN app_model_configs c ON c.app_id = a.id
+                             WHERE ((c.model LIKE '%${eprov}%' OR c.model LIKE '%${eshort}%') AND c.model LIKE '%\"${emodel}\"%')
+                                OR ((c.dataset_configs LIKE '%${eprov}%' OR c.dataset_configs LIKE '%${eshort}%') AND c.dataset_configs LIKE '%\"${emodel}\"%')
+                            UNION
+                           SELECT DISTINCT COALESCE(a2.name, 'app ' || s.app_id) FROM app_annotation_settings s
+                             JOIN dataset_collection_bindings b ON b.id = s.collection_binding_id
+                             LEFT JOIN apps a2 ON a2.id = s.app_id
+                             WHERE (b.provider_name = '${eprov}' OR b.provider_name = '${eshort}') AND b.model_name = '${emodel}';") \
+        || { _DIFY_REF_FAILED=1; return 0; }
+    _DIFY_REF_APPS=$(printf '%s\n' "$raw" | paste -sd ',' - | sed 's/,/, /g')
+    raw=$(_dify_ref_query "SELECT DISTINCT d.name FROM datasets d
+                             WHERE ((d.embedding_model_provider = '${eprov}' OR d.embedding_model_provider = '${eshort}') AND d.embedding_model = '${emodel}')
+                                OR ((d.retrieval_model::text LIKE '%${eprov}%' OR d.retrieval_model::text LIKE '%${eshort}%') AND d.retrieval_model::text LIKE '%\"${emodel}\"%');") \
+        || { _DIFY_REF_FAILED=1; return 0; }
+    _DIFY_REF_DATASETS=$(printf '%s\n' "$raw" | paste -sd ',' - | sed 's/,/, /g')
+    return 0
+}
+
+# usage: _dify_prune_stale_models <provider> <credential_name> <served, one model name per line>
+#
+# <served> MUST be the full WANTED set (the manifest, or an equivalent
+# authoritative "what should exist" list) — never a "currently being served"
+# subset. Fix round 1 (review): the first cut passed the POST-readiness-filter
+# arrays, so a model still mid-pull on a fresh/upgrading box (present in the
+# manifest, absent from the manager's live answer) was pruned as if retired.
+# The caller is responsible for this; see `dify_configure_manager_models`'s
+# `_wanted`, hoisted above its own readiness filter for exactly this reason.
+#
+# Every provider_models row under <provider> whose credential carries OUR
+# <credential_name> and whose model_name is NOT in <served> is a
+# retired-registration candidate. A candidate a saved app or knowledge base
+# still names (via `_dify_model_referencing_entities`) is reported by name and
+# left exactly where it is — there is no provider to migrate it to, only a
+# name the app/dataset would have to change by hand. A candidate the lookup
+# itself could not confirm is ALSO left in place — never deleted on missing
+# information (same fail-closed rule as the whole-provider guard above).
+#
+# Everything else is removed, scoped as narrowly as the schema allows:
+#   provider_models              by its OWN id — the exact candidate row, not
+#                                 a (provider, model_name) match, which would
+#                                 also catch another tenant's or an operator's
+#                                 own identically-named model under a
+#                                 DIFFERENT credential (fix round 1)
+#   provider_model_settings,
+#   tenant_default_models        by (tenant_id, provider_name, model_name,
+#                                 model_type) — the row's own tuple
+#   load_balancing_model_configs by (tenant_id, provider_name, model_name,
+#                                 model_type) — fix round 2: this table DOES
+#                                 carry `model_type` (and `credential_id`) at
+#                                 1.17.1 (models/provider.py:291/294); fix
+#                                 round 1's comment claiming otherwise was
+#                                 wrong and the delete below was under-scoped
+#                                 by exactly that column
+#   provider_model_credentials   by its OWN id AND credential_name — belt and
+#                                 suspenders on top of the id match
+#
+# Fix round 2 (review, item C): all five deletes now run as ONE statement —
+# writable CTEs chained by `EXISTS (SELECT 1 FROM del_pm)` — instead of five
+# separate autocommit `psql -c` calls. Two problems that shape had: it was not
+# atomic (a mid-sequence failure left some tables cleaned and others not, on a
+# row this function had already decided to remove), and every sibling delete
+# ran even when `provider_models` deleted ZERO rows (a race: the row was
+# already gone) — silently "cleaning up" settings/defaults/credentials for a
+# provider_models row this very call never touched. A single WITH statement
+# is one atomic unit in Postgres (a writable CTE always executes exactly
+# once, in full, regardless of whether the final SELECT references it — this
+# is what makes the four dependent deletes reliable, not a lucky ordering),
+# and each dependent CTE's `EXISTS` clause makes it a no-op the moment
+# `del_pm` deleted nothing. The final `SELECT count(*) FROM del_pm` is what
+# #2504 fix round 1 already counted "removed" from.
+#
+# Then the Valkey provider-credential cache is dropped once (if anything was
+# actually removed), the same way #2427's `_dify_drop_provider_cache` already
+# does for the migrate step above.
+#
+# Non-fatal, like every Dify step in this file: nothing here aborts
+# post-install. Every entry point that reaches this function is invoked as
+# `if step_dify_provisioning; then …` (or an equivalent `if fn; then`), and
+# bash suspends `errexit` for the whole duration of a function called as an
+# if/while/until condition — so a failure inside this call tree does not, in
+# practice, kill the run even without the `|| true`s below. They are kept
+# anyway, defensively: this function is a general-purpose helper with two
+# call sites today, and a THIRD call site that (by accident or a future
+# refactor) invokes it outside an `if` condition must not learn the hard way
+# that `-eo pipefail` (set at the top of this file) turns a failed `psql`
+# piped into `sed` into a pipeline exit status of 1 — under `pipefail` the
+# pipeline's status is the RIGHTMOST non-zero command, not the last command's,
+# so `sed` succeeding on empty input does not hide `psql` failing upstream.
+# An empty <served> prunes every row under the label (the shape a
+# fully-retired backend needs).
+#
+# Shared credentials (#2536 C3): `_dify_register_models` creates ONE credential
+# per model today, so no candidate shares its credential. Should that change,
+# `del_cred` keeps a credential that any OTHER provider_models row still points
+# at. Dify 1.17.1 declares no foreign keys, so nothing in the database would
+# have stopped the delete — the NOT EXISTS is the only guard, and
+# test_a_credential_shared_by_a_surviving_model_is_not_deleted pins it.
+_dify_prune_stale_models() {
+    local provider="$1" credential_name="$2" served="$3"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres || return 0
+    local _psql="docker exec postgres psql -U ${POSTGRES_USER:-docker} -d ${DIFY_DB:-dify_db} -tAc"
+    local eprov ecred
+    eprov=$(_dify_sql_escape "$provider")
+    ecred=$(_dify_sql_escape "$credential_name")
+    local candidates
+    # \x1f (unit separator) as the field delimiter: none of these values can
+    # contain it, unlike '|' — psql's own default -A separator, and not
+    # guaranteed absent from an operator-chosen model alias.
+    candidates=$($_psql "SELECT DISTINCT pm.id || E'\x1f' || pm.tenant_id || E'\x1f' || pm.model_name || E'\x1f' || pm.model_type || E'\x1f' || pm.credential_id
+                           FROM provider_models pm
+                           JOIN provider_model_credentials c ON c.id = pm.credential_id
+                          WHERE pm.provider_name = '${eprov}' AND c.credential_name = '${ecred}';" 2>/dev/null | sed '/^$/d') || true
+    [ -n "$candidates" ] || return 0
+    local _pmid _tenant _name _mtype _credid _ename _n removed=0
+    while IFS=$'\x1f' read -r _pmid _tenant _name _mtype _credid; do
+        [ -n "$_pmid" ] || continue
+        printf '%s\n' "$served" | grep -qxF -- "$_name" && continue
+        _dify_model_referencing_entities "$provider" "$_name"
+        if [ "$_DIFY_REF_FAILED" -eq 1 ]; then
+            print_warning "  Dify: could not confirm ${credential_name} model [${_name}] is unreferenced (the lookup failed) — leaving it in place rather than risk an unsafe delete (#2504)."
+            continue
+        fi
+        if [ -n "$_DIFY_REF_APPS" ] || [ -n "$_DIFY_REF_DATASETS" ]; then
+            local _kept_by=""
+            [ -z "$_DIFY_REF_APPS" ] || _kept_by="app(s): ${_DIFY_REF_APPS}"
+            if [ -n "$_DIFY_REF_DATASETS" ]; then
+                [ -z "$_kept_by" ] || _kept_by="${_kept_by}; "
+                _kept_by="${_kept_by}knowledge base(s): ${_DIFY_REF_DATASETS}"
+            fi
+            print_warning "  Dify: ${credential_name} model [${_name}] is retired but still used by ${_kept_by} — not removed (#2504). Point it at a served model, then re-run 'rzfz post-install --refresh'."
+            continue
+        fi
+        _ename=$(_dify_sql_escape "$_name")
+        # One atomic statement — see the function comment (fix round 2, item
+        # C). `del_pm` deletes the exact candidate row; every sibling CTE is
+        # gated on `EXISTS (SELECT 1 FROM del_pm)`, so a `provider_models`
+        # delete that removes zero rows (the candidate already gone — a race
+        # with another --refresh, or hand removal) leaves every other table
+        # untouched instead of "cleaning up" rows that belong to a still-live
+        # registration. The final SELECT is the only thing the primary query
+        # reads; Postgres still executes every writable CTE regardless (it
+        # must — they have side effects), which is the guarantee this design
+        # relies on, not an implementation accident.
+        local _del_sql
+        _del_sql="WITH del_pm AS (
+            DELETE FROM provider_models WHERE id = '${_pmid}' RETURNING 1
+        ), del_settings AS (
+            DELETE FROM provider_model_settings
+             WHERE tenant_id = '${_tenant}' AND provider_name = '${eprov}' AND model_name = '${_ename}' AND model_type = '${_mtype}'
+               AND EXISTS (SELECT 1 FROM del_pm)
+            RETURNING 1
+        ), del_defaults AS (
+            DELETE FROM tenant_default_models
+             WHERE tenant_id = '${_tenant}' AND provider_name = '${eprov}' AND model_name = '${_ename}' AND model_type = '${_mtype}'
+               AND EXISTS (SELECT 1 FROM del_pm)
+            RETURNING 1
+        ), del_lb AS (
+            DELETE FROM load_balancing_model_configs
+             WHERE tenant_id = '${_tenant}' AND provider_name = '${eprov}' AND model_name = '${_ename}' AND model_type = '${_mtype}'
+               AND EXISTS (SELECT 1 FROM del_pm)
+            RETURNING 1
+        ), del_cred AS (
+            DELETE FROM provider_model_credentials
+             WHERE id = '${_credid}' AND credential_name = '${ecred}'
+               AND EXISTS (SELECT 1 FROM del_pm)
+               AND NOT EXISTS (SELECT 1 FROM provider_models o
+                                WHERE o.credential_id = '${_credid}' AND o.id <> '${_pmid}')
+            RETURNING 1
+        )
+        SELECT count(*) FROM del_pm;"
+        # #2010-safe capture: the assignment sits IN the `if` condition, not
+        # on the line before a bare `$?` read (see `_dify_ref_query`'s
+        # comment — the same shape a fix in this file's #2504 round 1 already
+        # had to correct once).
+        if _n=$($_psql "$_del_sql" 2>/dev/null); then :; else _n=""; fi
+        case "${_n:-}" in ''|*[!0-9]*) _n=0 ;; esac
+        if [ "$_n" -gt 0 ]; then
+            removed=$((removed + _n))
+            print_substep "  Dify: removed retired ${credential_name} model [${_name}] (#2504)."
+        fi
+    done <<< "$candidates"
+    [ "$removed" -eq 0 ] || _dify_drop_provider_cache
+    return 0
+}
+# DIFY_RETIRE_PRUNE-END
+
+dify_configure_model() {
+    print_substep "Configuring GPUStack models in Dify..."
+
+    # S20: resolve the real admin email (survives a post-init MAIN_DOMAIN change)
+    local admin_email
+    admin_email=$(_resolve_dify_admin_email)
+    # #1445 (C5c) rev-G: this used to be flipped to `http://llm:8080` "because
+    # the canonical endpoint is canonical". It is the wrong function for that,
+    # and the review measured it from inside a running dify-api:
+    #
+    #     llm:8080/v1-openai/models          -> 000  (name does not resolve)
+    #     gpustack:9090/v1-openai/models     -> 401  (host there, wants its key)
+    #
+    # `step_dify_provisioning` picks THIS branch exactly when
+    # `llm_manager_owns_standard_set` is FALSE — a pure GPUStack box, or a dual
+    # box that is not federated yet. The `llm` alias hangs on the manager
+    # service alone (modules/llm/manager/compose.yml), so on a box without the
+    # manager profile it does not resolve at all and Dify ends up with no
+    # default text/embedding/rerank model: the #1248 failure mode, mirrored.
+    #
+    # And the address is only half of it. This branch registers through the
+    # `langgenius/gpustack` provider plugin with GPUSTACK_API_KEY. Pointing that
+    # at the manager would send a backend's own credential to a metered
+    # endpoint, which is precisely the 401 that #1444's breaking change exists
+    # to produce. Address and key belong together; the manager-shaped box has
+    # its own function (`dify_configure_manager_models`), and this one is the
+    # GPUStack branch.
+    local gpustack_url="http://gpustack:9090"
+    local api_key="${GPUSTACK_API_KEY}"
+    local preset="${PRESET:-standard}"
+
+    # S19: the LLM-category aliases that ship under this preset, read from
+    # standard-models.yaml (the same enumerator deploy/wait use). Replaces the
+    # hardcoded gemma4 + qwen3.5/qwen3-coder-next list that drifted from the
+    # YAML and registered a non-existent model in Dify (404 on validation).
+    # Only always-on chat models (auto_start != false, col 7). Stopped/optional
+    # models (gemma4, qwen3-coder-next at 0 replicas) 503 on Dify credential
+    # validation, so they are not registered here; they get wired manually if
+    # the operator scales them up. default_chat is the system default text-gen.
+    local llm_aliases default_chat default_embedding
+    # #1786 rev-B: `$3 !~ /[*?]/` — see the note in the manager branch above. A
+    # wildcard weight filename is never placed by the standard set, so a model
+    # carrying one must not be registered here either.
+    local _rows_for_dify
+    _rows_for_dify=$(_model_rows_for_preset "$preset")
+    llm_aliases=$(printf '%s\n' "$_rows_for_dify" | awk -F'\t' '$6 ~ /(^|,)chat(,|$)/ && $7 != "false" && $3 !~ /[*?]/ {print $1}' | tr '\n' ' ')
+    local embed_aliases_gs rerank_aliases_gs embed_ctx_pairs rerank_ctx_pairs _a
+    embed_aliases_gs=$(printf '%s\n' "$_rows_for_dify" | awk -F'\t' '$6 ~ /(^|,)embedding(,|$)/ && $7 != "false" && $3 !~ /[*?]/ {print $1}' | tr '\n' ' ')
+    rerank_aliases_gs=$(printf '%s\n' "$_rows_for_dify" | awk -F'\t' '$6 ~ /(^|,)reranker(,|$)/ && $7 != "false" && $3 !~ /[*?]/ {print $1}' | tr '\n' ' ')
+    # #1786 rev-C (review): the context size comes from the
+    # MANIFEST, like the manager branch beside it already does
+    # (`_manifest_per_slot_context`). The previous form was
+    #   'context_size': '32768' if _alias == 'qwen3-embedding' else '8192'
+    # — a typed value wearing the clothes of a derivation, and it disagreed with
+    # the manifest in BOTH arms (qwen3-embedding declares 8192, nomic 2048). The
+    # fallbacks below are the ones the manager branch uses, so a model with no
+    # per_slot_context lands on the same number on both paths.
+    embed_ctx_pairs=""
+    for _a in $embed_aliases_gs; do
+        embed_ctx_pairs="${embed_ctx_pairs}${_a}=$(_manifest_per_slot_context "$_a" 8192) "
+    done
+    rerank_ctx_pairs=""
+    for _a in $rerank_aliases_gs; do
+        rerank_ctx_pairs="${rerank_ctx_pairs}${_a}=$(_manifest_per_slot_context "$_a" 8192) "
+    done
+    default_chat=$(_default_chat_alias)
+    default_embedding=$(_default_embedding_alias)
+
+    local py_script="${_DIFY_PY_COMPAT}
+_rz_guard('gpustack-model-config')
+import sys
+sys.path.insert(0, '/app/api')
+
+from app import create_app
+from extensions.ext_database import db
+from models.account import Account, TenantAccountJoin
+ModelProviderService = _rz_model_provider_service()
+
+# Dify 1.14: create_app() returns (socketio_app, app); was a single Flask app pre-1.14.
+_, app = create_app()
+with app.app_context():
+    try:
+        account = db.session.query(Account).filter(Account.email == '${admin_email}').first()
+        if not account:
+            print('Admin account not found')
+            sys.exit(1)
+        # The admin-account timezone nudge lives in _dify_align_account_timezone
+        # (#1248) — step_dify_provisioning applies it to BOTH provider branches,
+        # so it is not repeated here.
+        tenant_join = db.session.query(TenantAccountJoin).filter(TenantAccountJoin.account_id == account.id).first()
+        if not tenant_join:
+            print('Tenant not found')
+            sys.exit(1)
+        tenant_id = tenant_join.tenant_id
+        mps = _rz_adapt(ModelProviderService())
+        provider = 'langgenius/gpustack/gpustack'
+        
+        # Note: langgenius/gpustack uses a 'customizable-model' type — credentials are
+        # set per model, not at the provider level. No provider_credential needed.
+        
+        # ── Per-model credential helper ──────────────────────────────────────
+        # #3333: create-or-skip left two states behind for good, both measured
+        # on Dify 1.16 + plugin 0.0.15/0.0.18:
+        #   * an existing 'GPUStack' credential kept whatever it was written
+        #     with — strict on every box set up before the extended default;
+        #   * with another credential present, a created 'GPUStack' one stayed
+        #     INACTIVE (Dify keeps the model's first credential active).
+        # Strict means the plugin never forwards enable_thinking. So: refresh
+        # our own credential like _dify_register_models does (#1308), then make
+        # it the active one when the active one is ours to replace. Operator
+        # credentials are never rewritten or deleted.
+        def ensure_active(name, model_type, our_id):
+            cur = mps.get_model_credential(tenant_id=tenant_id, provider=provider,
+                                           model_type=model_type, model=name, credential_id=None)
+            cur_id = (cur or {}).get('current_credential_id')
+            if not cur_id:
+                # 'Remove model' in Dify drops the model record, not its credentials.
+                mps.add_model_credential_to_model_list(tenant_id=tenant_id, provider=provider,
+                                                       model_type=model_type, model=name, credential_id=our_id)
+                return ' and put back on the model list', None
+            if cur_id == our_id:
+                return '', None
+            cur_name = cur.get('current_credential_name') or cur_id
+            cur_mode = (cur.get('credentials') or {}).get('compatibility_mode') or 'strict'
+            if model_type == 'llm' and cur_mode != 'extended':
+                mps.switch_active_custom_model_credential(tenant_id=tenant_id, provider=provider,
+                                                          model_type=model_type, model=name, credential_id=our_id)
+                return f' and made active (the active credential {cur_name!r} was in strict mode; kept, inactive)', None
+            return '', (f'WARNING: {model_type} model [{name}]: the active credential is {cur_name!r}, not GPUStack '
+                        f'- left as it is. Workflows use {cur_name!r}; switch it in Dify if that is not intended (#3333).')
+
+        def add_model(name, model_type, extra_creds):
+            base = {'endpoint_url': '${gpustack_url}', 'api_key': '${api_key}'}
+            base.update(extra_creds)
+            verb = 'added'
+            try:
+                mps.create_model_credential(
+                    tenant_id=tenant_id, provider=provider,
+                    model=name, model_type=model_type,
+                    credentials=base, credential_name='GPUStack'
+                )
+            except Exception as e:
+                if not ('already' in str(e).lower() or 'duplicate' in str(e).lower() or 'exists' in str(e).lower()):
+                    print(f'{model_type} model [{name}] error: {e}')
+                    return
+                verb = 'updated (credential refreshed)'
+            try:
+                avail = mps.get_provider_model_available_credentials(
+                    tenant_id=tenant_id, provider=provider, model_type=model_type, model=name)
+                our_id = next((c.credential_id for c in avail
+                               if getattr(c, 'credential_name', None) == 'GPUStack'), None)
+                if our_id is None:
+                    print(f'{model_type} model [{name}] {verb}.' if verb == 'added' else
+                          f'{model_type} model [{name}] already configured (no credential named GPUStack to refresh) - left untouched.')
+                    return
+                if verb != 'added':
+                    mps.update_model_credential(
+                        tenant_id=tenant_id, provider=provider, model=name, model_type=model_type,
+                        credentials=base, credential_id=our_id, credential_name='GPUStack')
+                suffix, warning = ensure_active(name, model_type, our_id)
+                print(f'{model_type} model [{name}] {verb}{suffix}.')
+                if warning:
+                    print(warning)
+            except Exception as e:
+                step = 'activation' if verb == 'added' else 'refresh'
+                print(f'{model_type} model [{name}] error: {step} failed: {e}')
+
+        # ── LLM models — preset-dependent ────────────────────────────────────
+        llm_defaults = {
+            'mode': 'chat',
+            'context_size': '262144',
+            'max_tokens_to_sample': '8192',
+            'agent_thought_support': 'supported',
+            # compatibility_mode=extended (the 'Enable extra settings' UI option) is
+            # REQUIRED for the gpustack 0.0.15 plugin to forward extra_body — without it
+            # the thinking-param
+            # passthrough (chat_template_kwargs.enable_thinking) is dropped, so qwen3.6
+            # keeps reasoning in structured-extraction. strict = plain OpenAI-compatible.
+            'compatibility_mode': 'extended',
+            'function_calling_type': 'tool_call',
+            'stream_function_calling': 'supported',
+            'vision_support': 'support',
+            'structured_output_support': 'supported',
+            'stream_mode_delimiter': r'\n\n',
+        }
+        # S19: register exactly the LLM-category models that ship under this
+        # preset, read from standard-models.yaml via _model_rows_for_preset
+        # (bash interpolates the space-separated alias list). Replaces the
+        # hardcoded gemma4 + qwen3.5/qwen3-coder-next block that drifted from
+        # the YAML and 404'd Dify validation on the non-existent qwen3.5.
+        # llm_defaults already carries vision_support + 262144 context; the
+        # explicit repeats below preserve parity with the prior per-model config.
+        for _alias in '${llm_aliases}'.split():
+            add_model(_alias, 'llm', {**llm_defaults,
+                'context_size': '262144', 'vision_support': 'support',
+            })
+
+        # ── Embedding + rerank models ─────────────────────────────────────────
+        # #1786: read from the manifest, like the chat block above, instead of
+        # two typed literals. nomic-embed-text was registered unconditionally
+        # while the standard set skips it (wildcard weight filename), so Dify
+        # validated credentials against a model the box does not serve — a 400
+        # on every run. The bash-interpolated lists already carry the same
+        # filter the deploy uses.
+        for _alias, _ctx in [p.split('=', 1) for p in '${embed_ctx_pairs}'.split()]:
+            add_model(_alias, 'text-embedding', {'context_size': _ctx})
+
+        for _alias, _ctx in [p.split('=', 1) for p in '${rerank_ctx_pairs}'.split()]:
+            add_model(_alias, 'rerank', {'context_size': _ctx, 'timeout': '600'})
+
+        # ── System default models ─────────────────────────────────────────────
+        try:
+            for mtype, mname in [
+                ('text-generation', '${default_chat}'),
+                ('text-embedding',  '${default_embedding}'),
+                ('rerank',          'qwen3-reranker'),
+            ]:
+                try:
+                    mps.update_default_model_of_model_type(
+                        tenant_id=tenant_id,
+                        model_type=mtype,
+                        provider=provider,
+                        model=mname
+                    )
+                    print(f'Default {mtype} set to {mname}.')
+                except Exception as e:
+                    print(f'Default {mtype} error: {e}')
+        except Exception as e:
+            print('System defaults error:', e)
+
+    except Exception as e_main:
+        print('Error:', e_main)
+"
+    
+    echo "$py_script" | docker exec -i dify-api sh -c "cat > /tmp/config_models.py"
+    local output rc
+    # #2010: the capture has to sit in a condition. post-install.sh runs under
+    # `set -e`, so a failing `output=$(...)` ends the script AT THIS LINE and the
+    # `rc=$?` below — plus the whole S20 handler that makes the exit code
+    # authoritative — never runs. The failure S20 was written to report was the
+    # one failure it could not reach. Measured as the same shape in
+    # core/init-authentik.sh, where it ended rzfz init with no message at all.
+    if output=$(docker exec -i dify-api python3 /tmp/config_models.py 2>&1); then
+        rc=0
+    else
+        rc=$?
+    fi
+
+    # S20: the model-config Python sys.exit(1)s on admin/tenant-not-found.
+    # Pre-fix the bash only grepped output for "model [" and ignored $?, so a
+    # non-zero exit silently passed and post-install "completed" with ZERO
+    # Dify models. Make the exit code authoritative + return non-zero so the
+    # caller (step_dify_provisioning) fails instead of declaring success.
+    if [ "$rc" -ne 0 ]; then
+        print_error "Dify model configuration FAILED (python exit $rc):"
+        echo "$output" | while IFS= read -r line; do print_error "  $line"; done
+        return 1
+    fi
+    if echo "$output" | grep -q "model \["; then
+        print_success "Dify GPUStack models configured."
+        # #3333: a credential conflict the helper leaves in place is a warning.
+        echo "$output" | while IFS= read -r line; do
+            case "$line" in
+                "WARNING: "*) print_warning "  ${line#WARNING: }" ;;
+                *) print_info "  $line" ;;
+            esac
+        done
+        # #1338: symmetric to the manager branch — a box that moved BACK to
+        # GPUStack must not keep the manager's rows either.
+        _dify_drop_inactive_provider_rows "langgenius/gpustack/gpustack"
+    else
+        # rc==0 but nothing registered — still a failure worth surfacing.
+        print_error "Dify model config produced no registrations: $output"
+        return 1
+    fi
+}
+
+# #2767: the services whose environment or overlay follows RAZZFAZZ_NETWORK_MODE.
+# `rzfz setup --network-mode` only rewrites .env / COMPOSE_FILE; a container keeps
+# the settings it was created with. Installing a Dify plugin into a
+# dify-plugin-daemon still on the OFFLINE uv.toml (no index, wheelhouse only)
+# failed with an unsatisfiable dependency and left a failed task in Integrations.
+# Plain `up -d` (no force) recreates exactly the services whose compose config
+# changed and leaves the rest alone, so this is idempotent and cheap when the
+# mode did not change. Runs BEFORE any plugin install. Non-fatal (a failure warns).
+NETWORK_MODE_SERVICES="dify-plugin-daemon pipelines cognee-mcp docling"
+settle_network_mode_services() {
+    local running svc todo=""
+    running="$(docker compose ps --services --status running 2>/dev/null)" || running=""
+    for svc in $NETWORK_MODE_SERVICES; do
+        printf '%s\n' "$running" | grep -qx "$svc" && todo="${todo:+$todo }$svc"
+    done
+    [ -n "$todo" ] || return 0
+    print_substep "Applying the network-mode settings to: ${todo} (recreated only where they changed)..."
+    # shellcheck disable=SC2086
+    local _cerr
+    if ! _cerr="$(docker compose up -d --no-deps $todo 2>&1 >/dev/null)"; then
+        [ -z "$_cerr" ] || printf '%s\n' "$_cerr" | tail -n 5 >&2
+        print_warning "Could not apply the network-mode settings to: ${todo}. A Dify plugin install may fail against the wrong package index; run 'docker compose up -d --no-deps ${todo}', then 'rzfz post-install --refresh'."
+        return 0
+    fi
+    if printf '%s\n' "$todo" | grep -qw dify-plugin-daemon; then
+        local _w=0
+        while [ "$_w" -lt 60 ]; do
+            [ "$(docker inspect -f '{{.State.Running}}' dify-plugin-daemon 2>/dev/null)" = true ] && break
+            sleep 2; _w=$((_w + 2))
+        done
+    fi
+    return 0
+}
+
+step_dify_provisioning() {
+    print_step "Dify: Provisioning..."
+    # #2195: reset per call — the --refresh arm and the #1507 late pass both
+    # call this function again in the same process, and a marker left standing
+    # would make a repaired Dify keep reporting the state it was repaired from.
+    _DIFY_DEFERRED_UNTIL_READY=0
+    
+    # Dify API is not exposed to host — check via docker exec
+    print_substep "Waiting for Dify API to be ready..."
+    local dify_waited=0
+    while [ $dify_waited -lt 120 ]; do
+        if docker exec dify-api curl -sf --max-time 5 http://localhost:5001/console/api/setup > /dev/null 2>&1; then
+            print_success "Dify API is ready."
+            break
+        fi
+        sleep 5
+        dify_waited=$((dify_waited + 5))
+    done
+    if [ $dify_waited -ge 120 ]; then
+        print_error "Dify API did not become ready within 120s."
+        return 1
+    fi
+    
+    dify_ensure_admin || return 1
+
+    # #1248: WHICH model provider Dify gets follows the box's ACTUAL LLM
+    # backend, decided by the PROFILE (the #976 source-of-truth rule) and
+    # exclusive in the same direction as #1255's deploy: a box that RUNS GPUStack
+    # keeps the GPUStack provider, a Manager-only box gets the OpenAI-compatible
+    # provider against the manager's metered /v1. Pre-#1248 the GPUStack branch
+    # was unconditional, so a Manager box got a provider for
+    # `http://gpustack:9090` — a host that does not resolve there — and ended up
+    # with no default text / embedding / rerank model at all.
+    # #1968 (Betreiberentscheid 2026-09-12): die Dify-Verdrahtung folgt ab
+    # 2026.09 dem LLM MANAGER, nicht mehr der Eigentumsfrage. Woertlich: "the
+    # wiring should be fully oriented on llm manager … But gpustack can still be
+    # enabled and if the user decides be accessed directly bypassing llm
+    # manager … the gpustack plugin should still be there with the latest
+    # version. But no models configured, that the user has to do on his own".
+    #
+    # Damit zerfaellt die eine Frage von #1248 in ZWEI unabhaengige:
+    #
+    #   Ist GPUStack auf dieser Box?   -> bekommt Dify das gpustack-PLUGIN?
+    #   Ist der Manager auf dieser Box? -> wer verdrahtet die MODELLE?
+    #
+    # Vorher entschied `llm_manager_owns_standard_set` beides zugleich, und auf
+    # einer nicht foederierten Doppelbox hiess das: Modelle an GPUStack. Das ist
+    # jetzt falsch — der Manager ist die Adresse, GPUStack der Handbetrieb.
+    local _dify_gpustack_present=false
+    local _dify_manager_present=false
+    _gpustack_profile_active     && _dify_gpustack_present=true
+    _llm_manager_profile_active  && _dify_manager_present=true
+
+    # The admin-account timezone nudge applies to both branches (#1248).
+    _dify_align_account_timezone "$(_resolve_dify_admin_email)"
+
+    # #2767: the daemon must carry the CURRENT network mode before it installs anything.
+    settle_network_mode_services || true
+
+    # Install plugins (pinned versions with content hashes)
+    # These identifiers are from the reference box — update when upgrading plugins
+    # Install Dify plugins (using short names will install the latest available versions).
+    # A single plugin failing to resolve/install (transient marketplace error, or
+    # an upstream plugin without a hardcoded fallback id — e.g. junjiem/mcp_sse)
+    # must NOT abort the whole post-install: dify_install_plugin `return 1`s on an
+    # unresolvable plugin, and under `set -e` a bare call here aborted everything
+    # downstream (Speaches, Gitea, the verify suite). Each install is best-effort;
+    # the operator can install any that failed from the Dify marketplace UI later.
+    #
+    # langgenius/gpustack is installed on every box that RUNS GPUStack — and,
+    # since #1968, also when the Manager owns the wiring. The #1248 reason for
+    # skipping it holds only where it was measured: on a box with NO GPUStack
+    # the plugin is a provider for a host that does not resolve, and every model
+    # under it fails credential validation with a NameResolutionError the
+    # operator has to read. Where GPUStack IS running, the provider resolves —
+    # it simply has no models until the operator adds them, which is exactly
+    # what the 2026.09 decision asks for.
+    if [ "$_dify_gpustack_present" = true ]; then
+        dify_install_plugin "langgenius/gpustack" || print_warning "Dify plugin 'langgenius/gpustack' install failed — install it later via the Dify marketplace."
+    else
+        print_substep "Skipping the 'langgenius/gpustack' plugin — no GPUStack profile on this box, so its provider would point at a host that does not resolve (#1248)."
+    fi
+    dify_install_plugin "langgenius/openai_api_compatible" || print_warning "Dify plugin 'langgenius/openai_api_compatible' install failed — install it later via the Dify marketplace."
+    dify_install_plugin "abesticode/knowledge_pro" || print_warning "Dify plugin 'abesticode/knowledge_pro' install failed — install it later via the Dify marketplace."
+    # M035 P4: MCP client plugin so Dify can use the stack's MCP servers (e.g.
+    # cognee-mcp). Runs IN dify-plugin-daemon, which is PROXY-FREE — unlike
+    # Dify's built-in Tools->MCP, whose client routes through the SSRF proxy and
+    # can't reach internal stack hosts (confirmed in M033 S12). App-builders add
+    # the "MCP SSE/StreamableHTTP" tool to a workflow + point it at, e.g.,
+    # {"cognee":{"transport":"streamable_http","url":"http://cognee-mcp:8000/mcp"}}.
+    dify_install_plugin "junjiem/mcp_sse" || print_warning "Dify plugin 'junjiem/mcp_sse' (MCP client) install failed — install it later via the Dify marketplace."
+    dify_pin_model_plugin_strategy
+    
+    # Wait for plugins to be fully installed before configuring models
+    print_substep "Waiting for plugins to finish installing..."
+    # #1248: wait for the provider plugin(s) this box actually installed. Waiting
+    # on langgenius/gpustack on a Manager box burned the full 120 s and then
+    # warned "model configuration may fail" on every run.
+    local _dify_required_plugins="langgenius/openai_api_compatible"
+    if [ "$_dify_gpustack_present" = true ]; then
+        _dify_required_plugins="langgenius/gpustack langgenius/openai_api_compatible"
+    fi
+    local waited=0
+    while [ $waited -lt 120 ]; do
+        local installed
+        installed=$(dify_api GET "/console/api/workspaces/current/plugin/list?page=1&page_size=100" | \
+            python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    ids=[p.get('plugin_id') for p in d.get('plugins',[])]
+    req='${_dify_required_plugins}'.split()
+    ready = all(r in ids for r in req)
+    print('yes' if ready else 'no')
+except: print('no')
+" 2>/dev/null)
+        if [ "$installed" = "yes" ]; then
+            print_success "Plugins installed."
+            break
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    if [ $waited -ge 120 ]; then
+        print_warning "Plugins not ready after 120 s — the provider does not exist yet, so model registration below will fail. Cause is almost always the marketplace download (see the plugin lines above); re-run 'rzfz post-install --refresh' (#1320)."
+    fi
+
+    # S20: propagate model-config failure (admin-not-found / zero models) so
+    # post-install fails loudly instead of silently "completing" with no Dify
+    # models registered. #1248: same propagation for the Manager branch — a Dify
+    # with no model provider is a broken box, not a warning.
+    # #2195: `|| _dcm_rc=$?`, not a bare call — under `set -e` a bare non-zero
+    # here kills the script, and 3 ("still downloading") is not a failure. The
+    # declaration sits OUTSIDE the branch on purpose: #1273's guard asserts that
+    # dify_configure_manager_models is the first statement the manager-presence
+    # flag selects, and that property is worth keeping literal.
+    local _dcm_rc=0
+    if [ "$_dify_manager_present" = true ]; then
+        dify_configure_manager_models || _dcm_rc=$?
+        case "$_dcm_rc" in
+            0) ;;
+            3) _DIFY_DEFERRED_UNTIL_READY=1 ;;   # still downloading, not broken
+            *) return 1 ;;
+        esac
+        if [ "$_dify_gpustack_present" = true ]; then
+            print_info "GPUStack's Dify provider is installed but carries NO models on purpose (#1968): the wiring goes through the LLM Manager. Add GPUStack models in Dify yourself if you want to bypass the manager."
+        fi
+    else
+        # #1968: `dify_configure_model` — the GPUStack model wiring — is
+        # deliberately NOT called any more. On a box with no manager that leaves
+        # Dify with a working provider and no models, and the operator has to
+        # add them. Saying so is the whole of the difference between a decision
+        # and a defect: a silent Dify with no models is #1248 all over again.
+        print_warning "No LLM Manager profile on this box — Dify gets NO models automatically (#1968). The 'langgenius/gpustack' provider is installed; add the models you want in Dify (Settings -> Model Provider), or enable the llm-manager profile to have them wired for you."
+    fi
+
+    # M019 S03 — Seed example KB and (if operator created the matching apps in
+    # the UI) extract their service API keys into DIFY_APPS_JSON so the
+    # OpenWebUI dify_pipe.py picks them up. Idempotent: KB skipped if already
+    # seeded; apps skipped if not yet created. Operator gets a clear NEXT-STEP
+    # banner with the exact app names to create.
+    if [ -f "${SCRIPT_DIR}/modules/dify/seed-apps.sh" ]; then
+        print_step "Seeding Dify example KB + extracting app API keys (M019)..."
+        # seed-apps.sh relies on THIS script's helper functions (dify_api,
+        # update_env_value, print_*) and its non-exported session vars
+        # (DIFY_ACCESS/DIFY_CSRF, SCRIPT_DIR). Running it via `bash` spawns a
+        # child that inherits none of them -> `dify_api: command not found`, KB
+        # seed a silent no-op (#189; surfaced fleet-wide once the --refresh path
+        # started calling step_dify_provisioning). Source it in a SUBSHELL: the
+        # fork inherits all functions + vars, while the seeder's own
+        # `set -eo pipefail` and `exit 0` stay contained and can't abort us.
+        if ! ( . "${SCRIPT_DIR}/modules/dify/seed-apps.sh" ); then
+            print_warning "Dify seed-apps.sh exited non-zero (non-fatal). Re-run razzfazz-post-install.sh after creating the apps in the Dify UI."
+        fi
+    fi
+
+    # #160: model-provider icons are backend-served <img>s (plugin-daemon asset
+    # endpoint). Reinstalling the provider plugins above re-extracts their icon
+    # assets, so a fresh provision/refresh self-heals a stale icon store. Probe
+    # once and report (non-fatal) so the operator sees icon health immediately.
+    local dify_broken_icons
+    dify_broken_icons=$(dify_broken_provider_icons)
+    if [ -n "$dify_broken_icons" ]; then
+        print_warning "Dify: model-provider icon endpoint still failing for: $(echo "$dify_broken_icons" | awk '{printf "%s(HTTP %s) ", $1, $2}')(#160). If it persists, capture the icon 'src' status in DevTools -> Network and file it on the issue."
+    else
+        print_info "Dify: model-provider icons render (#160 check passed)."
+    fi
+
+    if [ "${_DIFY_DEFERRED_UNTIL_READY:-0}" = "1" ]; then
+        # #2195: everything else in this step DID succeed — the provider, the
+        # plugins, the KB seed. What is missing is the model set, because it was
+        # not served yet. Say that, and do not let it be read as a green run.
+        print_warning "Dify provisioning finished WITHOUT a model set — the models were still downloading when the provider was configured (see above). The box is not broken; it is not finished."
+        return 3
+    fi
+    print_success "Dify provisioning complete."
+}
+
+# ==============================================================================
+# Open WebUI Provisioning
+# ==============================================================================
+# owui_api / owui_ensure_admin live in scripts/lib-owui.sh (#908): the
+# post-upgrade retrieval reconcile needs the same admin session.
+
+
+owui_configure_models() {
+    print_substep "Configuring Open WebUI models (capabilities & visibility)..."
+
+    # #1266: on a box whose backend is the LLM Manager the rows below do not
+    # exist to be patched — there is no `model-sync` container to INSERT them,
+    # so `openwebui_db.model` was EMPTY and every model the manager serves
+    # (embedder and reranker included) showed up in the chat picker with no
+    # capabilities at all. owui_reconcile_model_rows (scripts/lib-owui.sh)
+    # WRITES the rows from the manager's own model list and sets visibility by
+    # task; it returns non-zero when it could not (manager down, nothing served
+    # yet, OWUI not seeded), in which case we fall through to the GPUStack-era
+    # path below rather than leaving the models unconfigured. The GPUStack path
+    # itself is unchanged.
+    # rev-B (review F3): the same box shape #1272 decides with — a dual box that
+    # still serves GPUStack keeps the GPUStack-era patching (capabilities +
+    # hidden) for the rows `model-sync` writes. Gating on the manager profile
+    # alone silently changed behaviour for exactly that shape.
+    if llm_manager_owns_standard_set \
+       && owui_reconcile_model_rows; then   # #1441
+        return 0
+    fi
+
+    # Wait for models to sync from GPUStack
+    local waited=0
+    local synced_models=0
+    while [ $waited -lt 30 ]; do
+        synced_models=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -t -c "SELECT count(*) FROM model;" 2>/dev/null | xargs)
+        if [ -n "$synced_models" ] && [ "$synced_models" -gt 0 ]; then
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    
+    if [ "$synced_models" -eq 0 ]; then
+        print_info "No models synced to Open WebUI yet. Skipping model configuration."
+        return 0
+    fi
+    
+    # We use a python one-liner inside the postgres container to update the JSON safely
+    local update_cmd="
+import json, sys
+def process_meta(meta_str, hidden_val, image_gen_val, vision_val):
+    try:
+        m = json.loads(meta_str) if meta_str and meta_str != 'null' else {}
+    except:
+        m = {}
+    if hidden_val != 'keep':
+        m['hidden'] = hidden_val == 'true'
+    if 'capabilities' not in m: m['capabilities'] = {}
+    if image_gen_val != 'keep':
+        m['capabilities']['image_generation'] = image_gen_val == 'true'
+    if vision_val != 'keep':
+        m['capabilities']['vision'] = vision_val == 'true'
+    return json.dumps(m)
+
+args = sys.argv[1:]
+print(process_meta(args[0], args[1], args[2], args[3]))
+"
+
+    update_model() {
+        local model_id="$1"
+        local hidden="$2"
+        local image_gen="$3"
+        local vision="$4"
+        
+        local current_meta
+        current_meta=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -t -c "SELECT meta FROM model WHERE id = '${model_id}';" 2>/dev/null | xargs)
+        
+        if [ -n "$current_meta" ]; then
+            local new_meta
+            new_meta=$(python3 -c "$update_cmd" "$current_meta" "$hidden" "$image_gen" "$vision")
+            # Escape single quotes for SQL
+            new_meta=$(echo "$new_meta" | sed "s/'/''/g")
+            docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -c "UPDATE model SET meta='${new_meta}' WHERE id='${model_id}';" > /dev/null 2>&1
+        fi
+    }
+
+    # Hide auxiliary models
+    update_model "nomic-embed-text" "true" "keep" "keep"
+    update_model "qwen3-embedding" "true" "keep" "keep"
+    update_model "qwen3-reranker" "true" "keep" "keep"
+    
+    # Configure capabilities (vision on, image_generation off) for every
+    # LLM-category model that ships under this preset. S19: read from
+    # standard-models.yaml — replaces the hardcoded gemma4 + qwen3.5 pair
+    # (the latter drifted to qwen3.6, leaving OWUI mis-tagging the chat model).
+    local _owui_preset="${PRESET:-standard}"
+    while read -r _llm; do
+        [ -n "$_llm" ] && update_model "$_llm" "keep" "false" "true"
+    done < <(_model_rows_for_preset "$_owui_preset" | awk -F'\t' '$6 ~ /(^|,)chat(,|$)/{print $1}')
+
+    print_success "Open WebUI models configured."
+}
+
+# ==============================================================================
+# #1266 / #1252 — OWUI model rows + ".env agrees with the persisted config"
+# ==============================================================================
+# Three findings the pre-existing "Open WebUI: connection configured" check
+# cannot see, because it only asks OWUI whether SOME key is set:
+#
+#   1. the chat models the backend serves have no `model` row, so they carry no
+#      capabilities and day-1's model-count checks stay red;
+#   2. an embedding / reranker / doc-conversion model IS offered in the chat
+#      picker (what a user reads as "three models that cannot talk");
+#   3. `.env` and the persisted DB config disagree about the backend URL or its
+#      key — the two-truths state (#1185's class): chat works today because the
+#      DB is right, and the next upgrade re-seeds OWUI from the WRONG .env.
+#
+# Registered through post-install's own verify_check, so counts and the summary
+# block are the shared ones. Best-effort: never returns non-zero.
+# #1401: the Pipelines server must be a registered Open WebUI connection,
+# otherwise every pipeline filter (openlit_filter — #245 chat attribution) is
+# silently inert. Judged from the same endpoint the registration reads back.
+verify_owui_pipelines_registered() {
+    local listed
+    if [ -z "${OWUI_TOKEN:-}" ]; then
+        verify_check "Open WebUI: Pipelines server registered (pipeline filters active)" "fail" \
+            "not judged: no Open WebUI admin token in this run"
+        return 0
+    fi
+    listed=$(owui_api GET "/api/v1/pipelines/list" 2>/dev/null) || listed=""
+    if printf '%s' "$listed" | grep -q 'pipelines:9099'; then
+        verify_check "Open WebUI: Pipelines server registered (pipeline filters active)" "pass"
+    else
+        verify_check "Open WebUI: Pipelines server registered (pipeline filters active)" "fail" \
+            "GET /api/v1/pipelines/list has no http://pipelines:9099 — openlit_filter never runs (#1401). Re-run 'rzfz post-install --refresh'."
+    fi
+}
+
+verify_owui_model_rows_and_env() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "chat" || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx openwebui || return 0
+    if ! _llm_manager_profile_active && ! _gpustack_profile_active; then
+        return 0
+    fi
+    print_substep "Checking Open WebUI model rows + .env/DB agreement..."
+
+    # ── (1)+(2) the rows, against the manager's own model list ──────────────
+    if llm_manager_owns_standard_set; then   # #1441
+        local args out rc=0 vkey
+        # A verify must not MUTATE: pass the .env key rather than letting the
+        # resolver mint one (and write .env) from inside a read-only check.
+        vkey="${LLM_MANAGER_OWUI_KEY:-}"
+        [ -n "$vkey" ] || vkey=$(read_env_value "$ENV_FILE" LLM_MANAGER_OWUI_KEY 2>/dev/null) || vkey=""
+        # rev-B (review F1): passing the key was not enough. With an EMPTY key
+        # `_owui_manager_model_args` falls through to `_owui_llm_key` →
+        # `_owui_resolve_manager_key`, which MINTS a `stack/openwebui` key and
+        # writes it to .env — from inside a read-only check, on every run, so a
+        # box with a dead key rotated its key at each `--verify`. A missing key
+        # is a FINDING here, never something a verify repairs.
+        if [ -z "$vkey" ]; then
+            verify_check "Open WebUI: chat-model rows written for every served chat model" "fail" \
+                "LLM_MANAGER_OWUI_KEY is empty — nothing to ask the manager with. Run 'rzfz post-install --preset <preset>' (or --refresh) to mint and wire it; --verify never writes .env (#1266/#1252)."
+            verify_check "Open WebUI: no embedding/reranker model in the chat picker" "fail" \
+                "not judged: LLM_MANAGER_OWUI_KEY is empty (see the line above)"
+            args=""
+        else
+            args=$(_owui_manager_model_args "$vkey") || args=""
+        fi
+        if [ -z "$vkey" ]; then
+            :  # already reported above — do not repeat the generic message
+        elif [ -z "$args" ]; then
+            verify_check "Open WebUI: chat-model rows written for every served chat model" "fail" \
+                "the LLM Manager served no model to LLM_MANAGER_OWUI_KEY — either nothing is deployed (#1250b) or that key is dead (#1185); see the 'LLM Manager:' checks above"
+        else
+            local -a model_args=()
+            local line
+            while IFS= read -r line; do
+                [ -n "$line" ] && model_args+=(--model "$line")
+            done <<< "$args"
+            out=$(python3 "${SCRIPT_DIR}/scripts/owui_model_rows.py" verify \
+                "${model_args[@]}" \
+                --manifest "${SCRIPT_DIR}/core/llm/standard-models.yaml" \
+                --db "${OPENWEBUI_DB:-openwebui_db}" \
+                --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                verify_check "Open WebUI: chat-model rows written for every served chat model" "fail" \
+                    "could not read openwebui_db.model: $(printf '%s\n' "$out" | head -n1) (#1266)"
+            else
+                local absent visible
+                absent=$(printf '%s\n' "$out" | sed -n 's/^\(MISSING\|INACTIVE\) //p' | tr '\n' ' ')
+                visible=$(printf '%s\n' "$out" | sed -n 's/^VISIBLE //p' | tr '\n' ' ')
+                if [ -z "$absent" ]; then
+                    verify_check "Open WebUI: chat-model rows written for every served chat model" "pass"
+                else
+                    verify_check "Open WebUI: chat-model rows written for every served chat model" "fail" \
+                        "no usable row for: ${absent}— they carry no capabilities and the chat model list is built from these rows; re-run 'rzfz post-install --refresh' (#1266)"
+                fi
+                if [ -z "$visible" ]; then
+                    verify_check "Open WebUI: no embedding/reranker model in the chat picker" "pass"
+                else
+                    verify_check "Open WebUI: no embedding/reranker model in the chat picker" "fail" \
+                        "offered as chat models: ${visible}— they cannot answer a prompt; re-run 'rzfz post-install --refresh' (#1266)"
+                fi
+            fi
+        fi
+    fi
+
+    # ── (3) .env vs the persisted config ────────────────────────────────────
+    local url env_bases env_keys env_key db_out db_present db_key
+    url=$(_owui_llm_base_url)
+    env_bases=$(read_env_value "$ENV_FILE" OWUI_OPENAI_BASE_URLS 2>/dev/null) || env_bases=""
+    env_keys=$(read_env_value "$ENV_FILE" OWUI_OPENAI_KEYS 2>/dev/null) || env_keys=""
+    env_key=$(_owui_env_endpoint_key "$env_bases" "$env_keys" "$url")
+    db_out=$(python3 "${SCRIPT_DIR}/scripts/owui_config_reconcile.py" pair --url "$url" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>/dev/null) || db_out=""
+    db_present=$(printf '%s\n' "$db_out" | sed -n 's/^URL_PRESENT=//p' | head -n1)
+    db_key=$(printf '%s\n' "$db_out" | sed -n 's/^KEY=//p' | head -n1)
+    case ";${env_bases};" in
+        *";${url};"*) ;;
+        *)  verify_check "Open WebUI: .env connection matches the persisted config" "fail" \
+                "OWUI_OPENAI_BASE_URLS in .env does not carry the active backend ${url} (it holds '${env_bases:-<empty>}'), so the container env feeds compose's GPUStack default while the DB is wired to the manager — the next re-seed clobbers the working connection (#1252)"
+            return 0 ;;
+    esac
+    if [ "$env_key" = "gpustack_CHANGEME_AFTER_FIRST_START" ]; then
+        verify_check "Open WebUI: .env connection matches the persisted config" "fail" \
+            "OWUI_OPENAI_KEYS still carries the gpustack placeholder for ${url} (#1252)"
+    elif [ -z "$db_out" ] || [ "$db_present" != "1" ]; then
+        verify_check "Open WebUI: .env connection matches the persisted config" "fail" \
+            "the persisted config holds no entry for ${url} — .env and the DB disagree (#1252)"
+    elif [ "$env_key" != "$db_key" ]; then
+        verify_check "Open WebUI: .env connection matches the persisted config" "fail" \
+            "the key .env pairs with ${url} is not the one the persisted config holds — two truths, and an upgrade re-seeds from .env (#1252)"
+    else
+        verify_check "Open WebUI: .env connection matches the persisted config" "pass"
+    fi
+    return 0
+}
+
+
+
+owui_configure_connection() {
+    # #1013 (EXO-5): resolve through the same _owui_llm_base_url/_owui_llm_key
+    # pair the #1003 repoint uses (manager-first, gpustack fallback), and skip
+    # cleanly when neither backend profile is active instead of posting a dead
+    # endpoint.
+    #
+    # #1185: this used to POST a NESTED {"openai": {...}} to
+    # /api/v1/configs/import. On OWUI 0.11's per-key `config` table that writes
+    # a dead `openai` blob row OWUI never reads (the "legacy blob" from the
+    # 0.91 forensics) and asserts nothing about the live connection — while the
+    # key it carried was the UNVALIDATED .env value. The connection is now
+    # asserted through owui_reconcile_openai_keys: an upsert per base URL
+    # (never a duplicate), the whole key family as one set, and a key that
+    # _owui_llm_key has already validated against the manager.
+    local llm_base llm_key
+    llm_base=$(_owui_llm_base_url)
+    llm_key=$(_owui_llm_key)
+    if ! _llm_manager_profile_active && ! _gpustack_profile_active; then
+        print_substep "No LLM backend profile active — skipping OWUI OpenAI connection config."
+        return 0
+    fi
+    # #1445 (C5c) re-review: this is the FOURTH authoritative write into OWUI's
+    # persisted config — owui_reconcile_openai_keys upserts the connection row,
+    # rag.openai.api_key and the reranker URL, writes the .env pair and
+    # recreates `openwebui`. It asked the profiles and never the liveness, so
+    # three lines before owui_configure_embedding correctly refuses, this one
+    # stamped `http://llm:8080/v1` in while the manager was down. Same guard,
+    # same reason: skipping is recoverable, a wrong authoritative write is not
+    # (#976).
+    if _llm_manager_profile_active && ! _llm_manager_running; then
+        print_warning "llm-manager profile is enabled but the container is not running — SKIPPING the authoritative OWUI OpenAI-connection write so it is not repointed at a backend this box does not run. Re-run 'rzfz post-install --refresh' once llm-manager is up."
+        return 0
+    fi
+    print_substep "Configuring LLM OpenAI-compatible connection (${llm_base})..."
+    owui_reconcile_openai_keys "$llm_base" "$llm_key" "$(_owui_rerank_url)"
+    # Signup stays closed on a provisioned box. FLAT dotted key — the per-key
+    # store is keyed by path, a nested {"ui": {...}} would be another dead blob.
+    local resp
+    resp=$(owui_api POST "/api/v1/configs/import" '{"config": {"ui.enable_signup": false}}')
+    if echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ui.enable_signup') is False or d.get('ui', {}).get('enable_signup') is False" 2>/dev/null; then
+        print_success "OpenAI-compatible connection configured (${llm_base})."
+    else
+        print_warning "Could not verify the OWUI connection/signup config."
+    fi
+}
+
+owui_configure_audio() {
+    print_substep "Configuring Speech-to-Text and Text-to-Speech (Speaches)..."
+    
+    # Get current config, modify, send back (API requires all fields)
+    local result
+    result=$(python3 -c "
+import json, urllib.request
+
+headers = {'Authorization': 'Bearer ${OWUI_TOKEN}', 'Content-Type': 'application/json'}
+url = 'http://127.0.0.1:${OPENWEBUI_PORT:-8080}'
+
+req = urllib.request.Request(f'{url}/api/v1/audio/config', headers=headers)
+current = json.loads(urllib.request.urlopen(req).read())
+
+# STT: Speaches with faster-whisper
+current['stt']['ENGINE'] = 'openai'
+current['stt']['OPENAI_API_BASE_URL'] = 'http://speaches:8000/v1'
+current['stt']['OPENAI_API_KEY'] = 'sk-111'
+current['stt']['MODEL'] = '${RAZZFAZZ_SPEACHES_STT_MODEL}'
+
+# TTS: Speaches with piper German voice
+current['tts']['ENGINE'] = 'openai'
+current['tts']['OPENAI_API_BASE_URL'] = 'http://speaches:8000/v1'
+current['tts']['OPENAI_API_KEY'] = 'sk-111'
+current['tts']['MODEL'] = '${RAZZFAZZ_SPEACHES_TTS_MODEL}'
+current['tts']['VOICE'] = 'de_DE-jarvis-high'
+current['tts']['SPLIT_ON'] = 'punctuation'
+
+data = json.dumps(current).encode()
+req = urllib.request.Request(f'{url}/api/v1/audio/config/update', data=data, headers=headers)
+resp = json.loads(urllib.request.urlopen(req).read())
+print('OK' if resp.get('tts',{}).get('ENGINE') == 'openai' else 'FAIL')
+" 2>/dev/null)
+    
+    if [ "$result" = "OK" ]; then
+        print_success "Audio config set (STT: ${RAZZFAZZ_SPEACHES_STT_MODEL}, TTS: ${RAZZFAZZ_SPEACHES_TTS_MODEL})."
+    else
+        print_warning "Audio config update may have failed."
+    fi
+}
+
+owui_configure_embedding() {
+    # Fleet standard embedding (qwen3-embedding) — matches prod + the Dify/cognee/
+    # lightrag RAG path. Read from standard-models.yaml defaults.embedding so it
+    # never drifts back to the old nomic hardcode.
+    local emb_alias
+    emb_alias=$(_default_embedding_alias)
+
+    # #243: OWUI's Chroma collections are built at whatever dimension the
+    # embedding model emitted AT INSERT TIME. Flip RAG_EMBEDDING_MODEL to a
+    # different alias (prod: all-MiniLM-L6-v2 384-dim -> qwen3-embedding
+    # 2560-dim) and every existing knowledge base keeps its OLD-dim vectors
+    # while OWUI now queries at the NEW dim — collections either
+    # dimension-mismatch or 404 (chromadb.errors.NotFoundError), and RAG
+    # silently answers "Keine Quellen gefunden" with nothing in the run
+    # output to explain why (chat model irrelevant). Persist the model we
+    # last successfully applied and compare on every run so a change is
+    # reported instead of swapped in silently — same idea as the LightRAG/
+    # Cognee live-dim probe (#413/#70), applied to OWUI's missing guard.
+    # `|| true` is load-bearing under `set -eo pipefail`: grep finds nothing
+    # on a fresh box / first run and must not kill it (#200/#793 shape).
+    local prior_emb
+    prior_emb=$(grep -m1 '^OWUI_EMBEDDING_MODEL_APPLIED=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-) || true
+    if [ -n "$prior_emb" ] && [ "$prior_emb" != "$emb_alias" ]; then
+        print_warning "OWUI embedding model changed ($prior_emb -> $emb_alias) — RE-INDEX REQUIRED: existing knowledge-base collections are still built at the OLD model's dimension and will silently return zero sources (dimension mismatch / Chroma NotFoundError) until every KB is re-indexed against $emb_alias (#243)."
+    fi
+
+    # #976: resolve the OpenAI-compatible embedding backend — the LLM Manager
+    # (metered) when it is active, else GPUStack. Hardcoding gpustack:9090 here
+    # left RAG embedding pointed at a dead backend on a manager-only box.
+    #
+    # Same rule as owui_configure_retrieval_env: this POST is authoritative, so
+    # a manager box whose manager is momentarily down must not have its
+    # embedding endpoint rewritten to GPUStack.
+    # #1445 (C5c / E1): the address is canonical on every box, so the
+    # precondition is "is the manager supposed to run here, and does it?"
+    # — not "does it own the models?". See scripts/lib-owui.sh.
+    if _llm_manager_profile_active && ! _llm_manager_running; then   # #1445
+        print_warning "llm-manager profile is enabled but the container is not running — SKIPPING the authoritative OWUI embedding-config write. Re-run 'rzfz post-install --refresh' once llm-manager is up."
+        return 0
+    fi
+    local _emb_url _emb_key _emb_backend
+    _emb_url=$(_owui_llm_base_url)
+    _emb_key=$(_owui_llm_key)
+    # One decision, reported honestly: the label must name the backend the URL
+    # above actually points at. Deriving it from a SECOND probe let a state flip
+    # mid-function print "GPUStack" for a manager URL (and vice versa).
+    # #1445 (C5c / E1): _owui_llm_base_url is canonical now, so the honest label
+    # follows the same question _llm_backend_display_name asks — is the manager
+    # the front of this box? Spelled out rather than delegated: this function is
+    # extracted and run on its own by test_243, and a call into lib-owui.sh
+    # would make the label depend on a stub instead of on the rule.
+    if _llm_manager_profile_active; then _emb_backend="LLM Manager"; else _emb_backend="GPUStack"; fi   # #1445
+    print_substep "Configuring embedding model ($emb_alias via $_emb_backend)..."
+    # #2515: fleet default is BATCHED and PARALLEL, not one input at a time.
+    # RAG_EMBEDDING_BATCH_SIZE=1 / CONCURRENT_REQUESTS=1 were never a deliberate
+    # choice (carried unchanged from the first cli/ move, #26/#34) and
+    # ENABLE_ASYNC_EMBEDDING=false made the other two moot even set correctly —
+    # retrieval/utils.py::get_embedding_function batches and runs
+    # asyncio.gather() over a Semaphore(concurrent_requests) only when async is
+    # on; false walks every batch sequentially regardless of batch size or
+    # concurrency. 16 is qwen3-embedding's ctx(8192)/parallel(2) = 4096
+    # tokens-per-input budget's headroom for typical RAG chunks.
+    #
+    # #2515 fix round 1: a flat 4 ignored the fleet — qwen3-embedding runs
+    # --parallel=2 (core/llm/standard-models.yaml), so a single replica offers
+    # only 2 llama.cpp slots, and OWUI 0.11.3 builds a FRESH
+    # Semaphore(concurrent_requests) inside every async_embedding_function
+    # call (retrieval/utils.py ~1153-1163) — each concurrent RAG operation
+    # gets its own budget, oversubscribing a single-replica box and competing
+    # with chat retrieval. _llmm_embedding_concurrent_requests
+    # (cli/lib-llm-manager-deploy.sh) computes replicas x parallel, clamped to
+    # [1,4]: 1 replica -> 2, 2+ replicas -> 4. _LLMM_EMBEDDING_CONCURRENT_REQUESTS
+    # is set by this run's own deploy pass when it ran in this shell; a
+    # standalone call (this function can run alone, e.g. on --refresh with no
+    # fresh deploy) asks the manager itself.
+    # #2536 item 14: the same numbers the psql writer lands — one source.
+    local _emb_batch=16 _emb_conc=4 _emb_set
+    if declare -F _llmm_owui_embedding_settings >/dev/null 2>&1; then
+        _emb_set=$(_llmm_owui_embedding_settings "${PRESET:-standard}")
+        _emb_batch="${_emb_set%% *}"; _emb_conc="${_emb_set##* }"
+    fi
+    local resp
+    resp=$(owui_api POST "/api/v1/retrieval/embedding/update" "{
+        \"RAG_EMBEDDING_ENGINE\": \"openai\",
+        \"RAG_EMBEDDING_MODEL\": \"$emb_alias\",
+        \"RAG_EMBEDDING_BATCH_SIZE\": $_emb_batch,
+        \"ENABLE_ASYNC_EMBEDDING\": true,
+        \"RAG_EMBEDDING_CONCURRENT_REQUESTS\": $_emb_conc,
+        \"openai_config\": {
+            \"url\": \"$_emb_url\",
+            \"key\": \"$_emb_key\"
+        }
+    }")
+
+    if echo "$resp" | python3 -c "import sys,json; assert json.load(sys.stdin).get('RAG_EMBEDDING_MODEL') == '$emb_alias'" 2>/dev/null; then
+        print_success "Embedding model configured ($emb_alias)."
+        update_env_value "$ENV_FILE" "OWUI_EMBEDDING_MODEL_APPLIED" "$emb_alias"
+    else
+        print_warning "Embedding config update may have failed."
+    fi
+}
+
+owui_configure_content_extraction() {
+    # #23: when the docling profile is enabled, make docling the Open WebUI document
+    # extractor so uploads route through the internal docling server. Profile-gated —
+    # a no-op otherwise (OWUI keeps its built-in extractor; the compose default for
+    # OWUI_CONTENT_EXTRACTION_ENGINE is empty, safe when docling isn't running).
+    if ! echo "${COMPOSE_PROFILES:-}" | grep -qw "docling"; then
+        return 0
+    fi
+    print_substep "Setting docling as the Open WebUI document extractor..."
+    update_env_value "$ENV_FILE" "OWUI_CONTENT_EXTRACTION_ENGINE" "docling"
+    # Best-effort: also push to a running OWUI so it doesn't wait for a recreate.
+    owui_api POST "/api/v1/retrieval/config/update" \
+        "{\"CONTENT_EXTRACTION_ENGINE\": \"docling\", \"DOCLING_SERVER_URL\": \"http://docling:5001\"}" \
+        >/dev/null 2>&1 || true
+    print_success "docling set as the OWUI content extractor (applies on next OWUI recreate)."
+}
+
+# #908: _owui_retrieval_defaults (THE retrieval defaults, in ONE place) and
+# _owui_retrieval_mismatches (the read-back verdict) live in
+# scripts/lib-owui.sh — the same table + push serve post-install (--preset /
+# --refresh) AND the post-upgrade reconcile in cli/upgrade.sh.
+
+
+owui_configure_retrieval_env() {
+    # This function performs an AUTHORITATIVE write: it rewrites OWUI's
+    # persisted RAG config (embedding + completion + reranker endpoints). On a
+    # box wired to the LLM Manager, doing that while the manager is DOWN used
+    # to silently repoint RAG at GPUStack and leave it there. Refuse to write
+    # instead: the config on disk is already correct, and a later run with the
+    # manager up applies any real change. Skipping is recoverable; a wrong
+    # authoritative write is not (#976).
+    # #1445 (C5c / E1): the address is canonical on every box, so the
+    # precondition is "is the manager supposed to run here, and does it?"
+    # — not "does it own the models?". See scripts/lib-owui.sh.
+    if _llm_manager_profile_active && ! _llm_manager_running; then   # #1445
+        print_warning "llm-manager profile is enabled but the container is not running — SKIPPING the authoritative OWUI retrieval-config write so it is not repointed at a backend this box does not run. Re-run 'rzfz post-install --refresh' once llm-manager is up."
+        return 0
+    fi
+
+    # NOTE: The retrieval config/update API has a bug in Open WebUI 0.8.12
+    # (references non-existent FETCH_URL_MAX_CONTENT_LENGTH config key).
+    # Workaround: set via environment variables in modules/chat/compose.yml
+    # These are read by PersistentConfig on first startup and stored in DB.
+    print_substep "Setting retrieval config via environment variables..."
+    
+    local compose_file="${SCRIPT_DIR}/modules/chat/compose.yml"
+    # #976: resolve the RAG completion + reranker backend once — the LLM
+    # Manager (metered) when active, else GPUStack. Both were hardcoded to
+    # gpustack:9090, so on a manager-only box RAG completion 404'd and the
+    # reranker silently fell back to unranked hits.
+    local _rag_url _rag_key _rerank_url
+    _rag_url=$(_owui_llm_base_url)
+    _rag_key=$(_owui_llm_key)
+    _rerank_url=$(_owui_rerank_url)
+    # #908: the STATIC retrieval defaults come from _owui_retrieval_defaults —
+    # the same table the authoritative API push below and the read-back verdict
+    # read. Chunking rationale (unchanged, and the reason the values are what
+    # they are): the markdown-header splitter (OWUI default ON) splits each doc
+    # per ## section, orphaning the facts (rates) from the entity (client name
+    # in the header) — retrieval then cannot connect "client + topic". Turn it
+    # OFF and use a whole-document character chunk (≤ qwen3-embedding's
+    # 2048-token ctx ≈ ~5000 chars) so client + facts stay in one chunk. Also
+    # disable the LLM retrieval-query rewrite (it mistranslates domain terms,
+    # e.g. "Tagsätze"→bank "Tagesgeldsatz"). See project_owui_rag_recipe
+    # (2026-06-13); measured again live in #908 (price list rank #18/55 → #3).
+    local _row _env_key _api_key _val _typ
+    while IFS='|' read -r _env_key _api_key _val _typ; do
+        [ -n "$_env_key" ] || continue
+        update_env_value "$ENV_FILE" "$_env_key" "$_val"
+    done <<< "$(_owui_retrieval_defaults)"
+
+    # The per-box RESOLVED values (#976) and the web-search block: not part of
+    # the static table because they are computed here, not declared.
+    local env_vars_needed=(
+        # OpenWebUI's external reranker POSTs the body to RAG_EXTERNAL_RERANKER_URL
+        # AS-IS — it does NOT append "/rerank" the way the embedding code appends
+        # "/embeddings" to the OpenAI base URL. The full endpoint must be given
+        # here, otherwise every retrieval emits "404 Client Error" + a silent
+        # fall-back to unranked vector hits, dropping retrieval quality.
+        # See memory: project_openwebui_external_reranker_url.md.
+        "RAG_EXTERNAL_RERANKER_URL=$_rerank_url"
+        "RAG_EXTERNAL_RERANKER_API_KEY=$_rag_key"
+        "ENABLE_WEB_SEARCH=true"
+        "WEB_SEARCH_ENGINE=searxng"
+        "SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>"
+        "WEB_SEARCH_RESULT_COUNT=5"
+        # #2622: no RAG_OPENAI_API_* here. compose feeds the container's
+        # RAG_OPENAI_API_* from OWUI_RAG_OPENAI_* (environment: overrides
+        # env_file), so a plain-name .env row reached nothing; the live value is
+        # the DB row owui_push_retrieval_defaults writes below.
+    )
+
+    # Add env vars to the openwebui service environment in compose
+    # We do this by updating .env which is referenced by the compose file
+    for var in "${env_vars_needed[@]}"; do
+        local key="${var%%=*}"
+        local val="${var#*=}"
+        update_env_value "$ENV_FILE" "$key" "$val"
+    done
+
+    print_success "Retrieval env vars set in .env (seed for fresh first-start)."
+
+    # #908 follow-up: the authoritative API push + read-back verdict is ONE
+    # implementation in scripts/lib-owui.sh, shared with the post-upgrade
+    # reconcile in cli/upgrade.sh (pure API push, no model deploy).
+    owui_push_retrieval_defaults "$_rag_url" "$_rag_key" "$_rerank_url"
+}
+
+owui_upload_pipes() {
+    print_substep "Uploading per-user agent pipes (hermes/moltis/opencode/dify)..."
+    # The hermes/moltis/opencode/dify pipes ship as files at
+    # modules/chat/functions/*.py but are NOT auto-loaded by OpenWebUI — they have
+    # to be POSTed into /api/v1/functions/. Without this step the "Open in
+    # Chat" deep-link from agent-manager (chat.<domain>/?models=hermes.personal)
+    # has no matching model and the user lands on chat with nothing
+    # selected.
+    #
+    # Pipes carry `# @include _lib/<file>` directives that we inline before
+    # upload. The included helper files may carry their own
+    # `from __future__` imports — strip those from inlined content because
+    # `from __future__` must appear at the very top of a Python source
+    # file (mid-file → SyntaxError → upload validation rejects).
+    #
+    # Each pipe is uploaded once (create) on first install, then updated
+    # in place on subsequent runs (POST /api/v1/functions/id/<id>/update).
+    local pipes_dir="${SCRIPT_DIR}/modules/chat/functions"
+    local lib_dir="${pipes_dir}/_lib"
+    # #2948: cognee_pipe is retired (it signed in to cognee as the cognee admin
+    # and kept users apart only by a dataset name); owui_remove_retired_pipes
+    # takes it off boxes that have it. Knowledge reaches chat through the
+    # per-user cognee MCP servers instead.
+    for pipe_file in hermes_pipe moltis_pipe opencode_pipe dify_pipe; do
+        local src="${pipes_dir}/${pipe_file}.py"
+        [ -f "$src" ] || continue
+        local work
+        work=$(mktemp)
+        # Inline @include directives, strip __future__ from included content
+        python3 - "$src" "$lib_dir" "$work" <<'PYEOF'
+import os, re, sys
+src_path, lib_dir, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(src_path).read()
+def repl(m):
+    inc = m.group(1).strip()
+    # _lib/<file>.py — resolve relative to modules/chat/functions/
+    p = os.path.join(os.path.dirname(src_path), inc)
+    if not os.path.exists(p):
+        return m.group(0)
+    inc_text = open(p).read()
+    inc_text = re.sub(r"^from __future__.*$", "", inc_text, flags=re.M)
+    return inc_text
+out = re.sub(r"^# @include (.+)$", repl, src, flags=re.M)
+open(out_path, "w").write(out)
+PYEOF
+        # Extract id/title/description from the YAML-style header
+        local pipe_id pipe_title pipe_desc
+        pipe_id=$(grep -m1 '^id:' "$work" | sed 's/^id:[[:space:]]*//' | tr -d ' \r')
+        pipe_title=$(grep -m1 '^title:' "$work" | sed 's/^title:[[:space:]]*//' | tr -d '\r')
+        pipe_desc=$(grep -m1 '^description:' "$work" | sed 's/^description:[[:space:]]*//' | tr -d '\r')
+        # Build JSON body
+        local body
+        body=$(WORK="$work" PIPE_ID="$pipe_id" PIPE_TITLE="$pipe_title" PIPE_DESC="$pipe_desc" python3 -c '
+import json, os
+print(json.dumps({
+    "id": os.environ["PIPE_ID"],
+    "name": os.environ["PIPE_TITLE"],
+    "meta": {"description": os.environ["PIPE_DESC"], "manifest": {}},
+    "content": open(os.environ["WORK"]).read(),
+    "type": "pipe",
+}))')
+        # Try create; on "already registered" fall through to update
+        local create_resp
+        create_resp=$(echo "$body" | RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s -X POST \
+            -H 'Content-Type: application/json' \
+            -d @- "http://localhost:8080/api/v1/functions/create" 2>/dev/null || true)
+        if echo "$create_resp" | grep -q '"already registered"'; then
+            echo "$body" | RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s -X POST \
+                -H 'Content-Type: application/json' \
+                -d @- "http://localhost:8080/api/v1/functions/id/${pipe_id}/update" >/dev/null 2>&1 || true
+            print_info "  Updated existing pipe: $pipe_id"
+        else
+            print_info "  Created pipe: $pipe_id"
+        fi
+        # Ensure it's active (toggle once if currently disabled)
+        local state
+        state=$(RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s \
+            "http://localhost:8080/api/v1/functions/id/${pipe_id}" </dev/null \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin).get("is_active","?"))' 2>/dev/null)
+        if [ "$state" = "False" ]; then
+            RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s -X POST \
+                "http://localhost:8080/api/v1/functions/id/${pipe_id}/toggle" </dev/null >/dev/null 2>&1 || true
+            print_info "  Activated pipe: $pipe_id"
+        fi
+        rm -f "$work"
+    done
+    print_success "Pipe upload complete."
+}
+
+# #2948: pipes an earlier release installed and this one no longer ships. Removed
+# from Open WebUI on --preset and --refresh (the path `rzfz upgrade` takes), so
+# no box keeps a pipe that signs in to cognee as its admin. Idempotent: a box
+# without the pipe answers non-200 to the lookup and nothing is sent.
+OWUI_RETIRED_PIPES="cognee"
+owui_remove_retired_pipes() {
+    local pid code
+    for pid in $OWUI_RETIRED_PIPES; do
+        code=$(RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s -o /dev/null \
+            -w '%{http_code}' "http://localhost:8080/api/v1/functions/id/${pid}" </dev/null 2>/dev/null) || code=""
+        [ "$code" = "200" ] || continue
+        code=$(RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s -o /dev/null \
+            -w '%{http_code}' -X DELETE "http://localhost:8080/api/v1/functions/id/${pid}/delete" </dev/null 2>/dev/null) || code=""
+        if [ "$code" = "200" ]; then
+            print_substep "Open WebUI: removed the retired '${pid}' pipe (it signed in to cognee as the cognee admin)."
+        else
+            print_warning "Open WebUI: the retired '${pid}' pipe could not be removed (HTTP ${code:-none}) - delete it under Admin Panel > Functions."
+        fi
+    done
+    return 0
+}
+
+# M035 P3: seed Open WebUI native MCP tool-server connections from the registry.
+# OWUI 0.9.x supports type='mcp' (streamable-HTTP) connections via
+# POST /api/v1/configs/tool_servers. core/mcp/sync.py --emit owui produces the
+# connection list (filtered by COMPOSE_PROFILES, secrets resolved from .env).
+# #2672: the merge is sync.py's (merge_owui_connections): by URL, operator-added
+# servers untouched, registry ones enabled + readable by all users once, an
+# admin's enable/access decision never overwritten. Runs on --preset AND
+# --refresh. Idempotent.
+owui_seed_mcp_servers() {
+    [ -f "$SCRIPT_DIR/core/mcp/sync.py" ] || return 0
+    local emit
+    emit=$(python3 "$SCRIPT_DIR/core/mcp/sync.py" --emit owui 2>/dev/null)
+    # An empty answer is sync.py failing; "[]" is a valid answer (mcp off): then only the
+    # registry's own gateway entries still in the list have to go (#2672).
+    [ -z "$emit" ] && { print_substep "No registry MCP servers eligible for Open WebUI."; return 0; }
+    local current merged
+    current=$(RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s \
+        http://localhost:8080/api/v1/configs/tool_servers </dev/null 2>/dev/null)
+    if [ "$emit" = "[]" ]; then
+        printf '%s' "$current" | grep -q 'http://mcp-manager:5000/gw/' \
+            || { print_substep "No registry MCP servers eligible for Open WebUI."; return 0; }
+        print_step "Open WebUI: removing MCP tool servers whose backend is switched off..."
+    else
+        print_step "Open WebUI: seeding MCP tool servers from the registry..."
+    fi
+    merged=$(printf '%s' "$current" | python3 "$SCRIPT_DIR/core/mcp/sync.py" --emit owui --merge-current 2>/dev/null) \
+        || { print_warning "Open WebUI's tool-server list is unreadable — MCP tool servers not seeded (non-fatal, #2672)."; return 0; }
+    if echo "$merged" | RZ_CURL_HEADERS=$'Authorization: Bearer '"$OWUI_TOKEN" rz_ctr_curl openwebui -s -o /dev/null -w '%{http_code}' \
+        -X POST http://localhost:8080/api/v1/configs/tool_servers \
+        -H 'Content-Type: application/json' -d @- 2>/dev/null \
+        | grep -q '^200$'; then
+        print_substep "MCP tool servers seeded ($(echo "$emit" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))') server(s))."
+    else
+        print_warning "Open WebUI MCP tool-server seeding returned non-200 (non-fatal)."
+    fi
+}
+
+step_openwebui_provisioning() {
+    print_step "Open WebUI: Provisioning..."
+
+    # #178 review: every sub-step below used to be called as a bare
+    # statement and the function ENDED on print_success — a bash function's
+    # implicit return status is that of its LAST command, so this function
+    # structurally returned 0 regardless of what happened above, even when
+    # Open WebUI never came up or admin auth failed. Those two are genuine
+    # FAILs and must propagate (mirrors step_dify_provisioning's
+    # `... || return 1` pattern).
+    wait_for_service "Open WebUI" "http://127.0.0.1:${OPENWEBUI_PORT:-8080}/health" 120 || return 1
+    owui_ensure_admin || return 1
+    # The remaining sub-steps are genuinely best-effort — each one already
+    # warns internally on a failed API call and never returns non-zero for a
+    # partial-config failure (owui_configure_content_extraction's only
+    # `return 0` is the deliberate docling-profile-disabled no-op). Leaving
+    # them un-guarded is correct: a reranker/audio/embedding config hiccup
+    # must not mask (or be conflated with) the two real failure modes above.
+    owui_configure_connection
+    # #1401: pipeline filters (openlit_filter, #245) run only through a
+    # registered Pipelines server — register it right after the inference
+    # connection, idempotently.
+    owui_register_pipelines_connection
+    owui_configure_audio
+    owui_configure_embedding
+    owui_configure_content_extraction
+    owui_configure_retrieval_env
+    owui_configure_models
+    owui_upload_pipes
+    owui_remove_retired_pipes
+    owui_seed_mcp_servers
+    # #2507: SSO-only login once the Authentik provider answers (else the
+    # local form stays). Best-effort, like the sub-steps above.
+    owui_reconcile_sso_login || true
+    # #2515: the fleet-default embedding batch/concurrency rows, written
+    # straight to Postgres so they land even when owui_configure_embedding's
+    # API call above could not run (OWUI not up yet).
+    owui_reconcile_embedding_defaults || true
+    # #2751: the persisted Ollama URL list loses a stray .env comment.
+    owui_reconcile_ollama_urls || true
+    # #2473 D6: existing public knowledge becomes owner-private, once per box.
+    owui_privatize_public_knowledge || true
+    owui_check_scope_placeholder || true
+    # #2519: default/pinned model = the box's chat default, task-model thinking
+    # off, the chat default's calendar/automations/notifications builtin tools
+    # off (tasks stays on, operator decision 2026-09-28) — rows, because env
+    # never reaches an existing OWUI DB.
+    owui_reconcile_chat_defaults || true
+    # #3494: users' own tool servers survive the Open WebUI 0.12 crossing (the
+    # new server-wide gate goes on once when a user the permission still admits
+    # holds a server; audited).
+    owui_carry_over_direct_integrations || true
+    # #2479: the "Dokumentanalyse" preset on the chat default, seeded once
+    # (an operator's edit is kept).
+    owui_seed_preset_models || true
+
+    print_success "Open WebUI provisioning complete."
+}
+
+# ==============================================================================
+# Verification Suite
+# ==============================================================================
+VERIFY_PASS=0
+VERIFY_FAIL=0
+VERIFY_RESULTS=""
+
+verify_check() {
+    local name="$1" result="$2" detail="$3"
+    if [ "$result" = "pass" ]; then
+        VERIFY_PASS=$((VERIFY_PASS + 1))
+        VERIFY_RESULTS="${VERIFY_RESULTS}  ${GREEN}✓ PASS${NC}  $name\n"
+    else
+        VERIFY_FAIL=$((VERIFY_FAIL + 1))
+        VERIFY_RESULTS="${VERIFY_RESULTS}  ${RED}✗ FAIL${NC}  $name  ($detail)\n"
+    fi
+}
+
+# ==============================================================================
+# #1486 — a RAG consumer runs with the wiring .env says, not the exported copy
+# ==============================================================================
+# "Cognee: healthy" proves /health answers; it says nothing about WHICH backend
+# the container talks to. On the Round-6 clean install (0.175) the container
+# held gpustack:9090 / gemma4 / nomic-embed (template defaults) while .env held
+# the manager values — every embedding 422'd, the graph stayed empty, --verify
+# was green. Compare the running container's environment with the persisted
+# .env for the keys compose maps 1:1. An empty .env value means "compose
+# default" and is skipped; API keys are deliberately not compared here (they
+# would land in the verify report).
+#   $1 = container, $2 = display label, $3 = .env key prefix,
+#   $4.. = ENVSUFFIX:CONTAINERVAR pairs
+verify_rag_consumer_wiring() {
+    local svc="$1" label="$2" prefix="$3"
+    shift 3
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$svc" || return 0
+    local ctr_env pair env_key ctr_var want have drift="" compared=0
+    ctr_env=$(docker inspect "$svc" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || ctr_env=""
+    for pair in "$@"; do
+        env_key="${prefix}_${pair%%:*}"
+        ctr_var="${pair#*:}"
+        want=$(read_env_value "$ENV_FILE" "$env_key" 2>/dev/null || true)
+        [ -n "$want" ] || continue
+        compared=$((compared + 1))
+        have=$(printf '%s\n' "$ctr_env" | grep -E "^${ctr_var}=" | head -n1 | cut -d'=' -f2-)
+        if [ "$have" != "$want" ]; then
+            drift="${drift:+$drift; }${ctr_var}=${have:-<unset>} (.env ${env_key}=${want})"
+        fi
+    done
+    if [ "$compared" = "0" ]; then
+        # rev-B befund 3: every key empty in .env means the box runs on compose
+        # defaults — nothing was compared, so "matches" would be a green tick
+        # for a check that never happened.
+        verify_check "${label}: wiring matches .env" "fail" \
+            "no ${prefix}_* endpoint/model values in ${ENV_FILE} — the container runs on compose defaults; run 'rzfz post-install --refresh' to wire ${svc}"
+    elif [ -z "$drift" ]; then
+        verify_check "${label}: wiring matches .env" "pass"
+    else
+        verify_check "${label}: wiring matches .env" "fail" \
+            "${drift} — heal: docker compose up -d --force-recreate ${svc}"
+    fi
+}
+
+# #2149 (QA RZFZAI-1961): a consumer whose model name the manager does not
+# serve fails every ingestion with nothing naming the cause, and a consumer
+# without a manager key fails the same way one layer up (KeyError on the
+# empty bearer). Both were "healthy" to every check above. This one asks the
+# manager, with the CONSUMER'S OWN key, which models it serves — so a dead or
+# missing key fails here too — and compares the names the consumer was given.
+#   $1 = service (container name)   $2 = label   $3 = env prefix
+#   $4.. = env keys (without prefix) that hold model names
+verify_consumer_models_served() {
+    local svc="$1" label="$2" prefix="$3"
+    shift 3
+    _llm_manager_profile_active || return 0
+    local key
+    key=$(read_env_value "$ENV_FILE" "LLM_MANAGER_${prefix}_KEY" 2>/dev/null || true)
+    [ -n "$key" ] || key=$(read_env_value "$ENV_FILE" "${prefix}_LLM_API_KEY" 2>/dev/null || true)
+    if [ -z "$key" ]; then
+        verify_check "${label}: LLM Manager service key present" "fail" \
+            "no LLM_MANAGER_${prefix}_KEY / ${prefix}_LLM_API_KEY in ${ENV_FILE} — ${svc} calls the manager without a key (#2149); run 'rzfz post-install --refresh'"
+        return 0
+    fi
+    local served
+    served=$(curl -s --max-time 5 -K <(printf 'header = "Authorization: Bearer %s"\n' "${key}") \
+        "http://127.0.0.1:${LLM_MANAGER_PORT:-8091}/v1/models" 2>/dev/null | \
+        python3 -c 'import sys, json
+for m in json.load(sys.stdin).get("data", []):
+    print(m.get("id", ""))' 2>/dev/null) || served=""
+    if [ -z "$served" ]; then
+        verify_check "${label}: LLM Manager accepts its service key" "fail" \
+            "GET /v1/models with the ${prefix} key returned no models (dead key, or the manager is down) — run 'rzfz post-install --refresh'"
+        return 0
+    fi
+    local k name missing=""
+    for k in "$@"; do
+        name=$(read_env_value "$ENV_FILE" "${prefix}_${k}" 2>/dev/null || true)
+        [ -n "$name" ] || continue
+        if ! printf '%s\n' "$served" | grep -qxF -- "$name"; then
+            missing="${missing:+$missing; }${prefix}_${k}=${name}"
+        fi
+    done
+    if [ -z "$missing" ]; then
+        verify_check "${label}: model names are served by the LLM Manager" "pass"
+    else
+        verify_check "${label}: model names are served by the LLM Manager" "fail" \
+            "${missing} not in the served list ($(printf '%s' "$served" | tr '\n' ' ' | sed 's/ $//')) — set a served model in ${ENV_FILE} and: docker compose up -d --force-recreate ${svc}"
+    fi
+}
+
+# ==============================================================================
+# LLM Manager (#1250a) — the embedded worker is REGISTERED
+# ==============================================================================
+# "Enrolled" only means a key was minted. What makes the box usable is a
+# `workers` row, which appears ONLY after the agent's POST /api/workers is
+# ACCEPTED. On the 0.91 clean install the agent ran under a different name than
+# its key was minted for, was 401-rejected on every cycle, and nothing said so:
+# the console showed zero workers and every deployment 409'd.
+verify_llm_worker_enrollment() {
+    # Third copy of the same predicate (#1445 review). Same replacement.
+    _llm_manager_profile_active || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-worker-agent || return 0
+    local env_name ctr_name name wid
+    env_name=$(read_env_value "$ENV_FILE" LLM_WORKER_NAME 2>/dev/null || true)
+    ctr_name=$(_llm_worker_container_name)
+    # rev-B: ask about the name the CONTAINER reports, not the one .env holds.
+    # The manager keys the worker row on the REPORTED name, so that is the only
+    # name a row can exist under. `master` is compose's documented default for
+    # an un-named agent (modules/llm/node-agent/compose.yml) and is the healthy
+    # steady state of a box that is not in command_key_mode=enforce — there
+    # .env LLM_WORKER_NAME is legitimately empty, and the rev-A `hostname -s`
+    # fallback invented a third name that nothing on the box uses, FAILing a
+    # perfectly healthy box.
+    name="$ctr_name"
+    [ -n "$name" ] || name="${env_name:-master}"
+    wid=$(_llm_manager_live_worker_id "$name")
+    if [ -n "$wid" ]; then
+        verify_check "LLM Manager: embedded worker '$name' registered" "pass"
+    else
+        verify_check "LLM Manager: embedded worker '$name' registered" "fail" \
+            "no live worker row — the agent's registration is being rejected (401) or it stopped reporting; container LLM_WORKER_NAME=${ctr_name:-<unset>} vs .env LLM_WORKER_NAME=${env_name:-<empty>} (#1250)"
+    fi
+    # A SEPARATE finding: the agent is registered, but under a name .env does
+    # not agree with. Nothing is broken this second, yet the next mint or key
+    # rotation derives the credential from the .env name and the worker starts
+    # 401-looping — so it must not hide behind a green registration line.
+    if [ -n "$env_name" ] && [ -n "$ctr_name" ] && [ "$env_name" != "$ctr_name" ]; then
+        verify_check "LLM Manager: embedded worker name matches .env" "fail" \
+            "container LLM_WORKER_NAME='$ctr_name' but .env LLM_WORKER_NAME='$env_name' — the per-worker command key is HMAC(node_key, the REPORTED name), so the next mint or rotation 401-loops (#1250)"
+    fi
+    return 0
+}
+
+# ==============================================================================
+# == Wazuh agent auto-enrolment (#1874 parts 2/3) ==============================
+# Optionally enrol THIS box's wazuh-agent at post-install so a fresh master or
+# worker appears in Wazuh automatically — journald, host FIM, and an allow-listed
+# set of container logs (the stack's Docker-security surface: container stdout,
+# NOT the docker-listener socket).
+#
+# SECURITY: ships OFF (WAZUH_AGENT_AUTO_ENROLL=false, config/.env.example).
+# Auto-enrolment enlarges the SIEM's enrolment surface (and a fleet manager may
+# need a LAN-facing WAZUH_MANAGER_HOST_BIND), so flipping the default ON is an
+# explicit operator act gated by the release security assessment
+# (pre-tag-check.sh). Idempotent (the installer prunes the block it wrote last
+# time) and best-effort (never aborts the run).
+provision_wazuh_agent() {
+    [ "$(read_env_value "$ENV_FILE" WAZUH_AGENT_AUTO_ENROLL 2>/dev/null || true)" = "true" ] || return 0
+
+    local authd mgr containers installer pwfile seam_py seam_out seam_err seam_rc seam_errf seam_why
+    authd="$(read_env_value "$ENV_FILE" WAZUH_AUTHD_PASSWORD 2>/dev/null || true)"
+    if [ -z "$authd" ]; then
+        print_warning "Wazuh agent auto-enrol is ON but WAZUH_AUTHD_PASSWORD is empty - skipping (run 'rzfz init' / 'rzfz upgrade')."
+        return 0
+    fi
+
+    mgr="$(read_env_value "$ENV_FILE" WAZUH_AGENT_MANAGER_ADDRESS 2>/dev/null || true)"
+    if [ -z "$mgr" ]; then
+        case "${COMPOSE_PROFILES:-}" in
+            *wazuh*) mgr="127.0.0.1" ;;
+            *) print_warning "Wazuh agent auto-enrol is ON but WAZUH_AGENT_MANAGER_ADDRESS is empty and this box runs no wazuh manager - skipping. Set it to the fleet manager's LAN address."
+               return 0 ;;
+        esac
+    fi
+
+    containers="$(read_env_value "$ENV_FILE" WAZUH_AGENT_CONTAINERS 2>/dev/null || true)"
+    # The default is the seam matrix's answer for the active profiles: core
+    # always, plus every profile whose SIEM seam is `wired`
+    # (core/config/profiles.yaml, scripts/seam_matrix.py). An explicit
+    # WAZUH_AGENT_CONTAINERS in .env still wins. If the matrix cannot answer,
+    # the three core names are the last resort and the run says why: a silent
+    # fallback would stop collecting a wired container without a word.
+    if [ -z "$containers" ]; then
+        seam_out=""; seam_err=""; seam_rc=0; seam_why=""
+        seam_py="$SCRIPT_DIR/scripts/seam_matrix.py"
+        if [ ! -f "$seam_py" ]; then
+            seam_rc=127; seam_why="$seam_py is missing"
+        else
+            seam_errf="$(mktemp)"
+            seam_out=$(python3 "$seam_py" siem-containers \
+                --profiles-yaml "$SCRIPT_DIR/core/config/profiles.yaml" \
+                --profiles "${COMPOSE_PROFILES:-}" 2>"$seam_errf") || seam_rc=$?
+            seam_err=$(grep -v '^[[:space:]]*$' "$seam_errf" | tail -n1) || true
+            rm -f "$seam_errf"
+            case "$seam_out" in
+                '') [ "$seam_rc" -ne 0 ] || seam_rc=1; seam_why="${seam_err:-empty answer}" ;;
+                *[!A-Za-z0-9,._-]*) seam_rc=1; seam_why="unexpected answer: ${seam_out:0:120}" ;;
+                *) [ "$seam_rc" -eq 0 ] || seam_why="${seam_err:-exit status $seam_rc}" ;;
+            esac
+        fi
+        if [ "$seam_rc" -eq 0 ]; then
+            containers="$seam_out"
+        else
+            containers="caddy,postgres,authentik-server"
+            print_warning "Wazuh: the seam matrix gave no container list (rc=${seam_rc}: ${seam_why}); collecting only ${containers}. Set WAZUH_AGENT_CONTAINERS in .env to choose the list."
+        fi
+    fi
+
+    installer="$SCRIPT_DIR/scripts/install-wazuh-agent.sh"
+    if [ ! -x "$installer" ]; then
+        print_warning "Wazuh agent installer missing at $installer - skipping."
+        return 0
+    fi
+
+    print_step "Wazuh: enrolling this box's agent at ${mgr} (containers: ${containers})..."
+    # Secret via a 0600 temp file + --password-file: never argv
+    # (/proc/<pid>/cmdline is world-readable), no pipe (SIGPIPE under pipefail),
+    # no sudoers env_keep dependency. apt needs root; `sudo -n` so a
+    # non-privileged run degrades to a clear warning instead of blocking.
+    pwfile="$(mktemp)"; chmod 600 "$pwfile"; printf '%s' "$authd" > "$pwfile"
+    if sudo -n "$installer" "$mgr" --password-file "$pwfile" \
+            --containers "$containers" --agent-name "$(hostname)"; then
+        print_success "Wazuh agent enrolled at ${mgr}."
+    else
+        print_warning "Wazuh agent enrol did not complete (needs root for apt, or the manager at ${mgr} was unreachable). Enrol manually - see docs/enterprise/how-to/wazuh.md."
+    fi
+    rm -f "$pwfile"
+    return 0
+}
+
+# OpenUEM (#1907) — seed a stack-identity super-admin the operator can log in
+# with. OpenUEM's console has NO app-level OIDC and NO admin-sets-password API
+# (user creation is a pure invite/self-register flow), and NO per-user RBAC in
+# 0.12.0 — any completed `users` row is a full-access operator. So the supported
+# non-interactive way to give a stack-password login is a direct seed into
+# openuem_db, mirroring the console's own built-in-admin insert
+# (Model.CreateDefaultAdminPassword). Profile-gated; CREATE-IF-ABSENT only, so an
+# akadmin whose password the operator later changed is never re-passworted.
+# Best-effort: never aborts the run. Re-verify the columns/params on an
+# OPENUEM_VERSION bump (0.12.0-pinned; #1907 records the source).
+provision_openuem_admin() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "openuem" || return 0
+
+    local pw db pguser admin_user existing hash
+    pw="$(read_env_value "$ENV_FILE" AUTHENTIK_BOOTSTRAP_PASSWORD 2>/dev/null || true)"
+    if [ -z "$pw" ]; then
+        print_warning "OpenUEM admin seed: AUTHENTIK_BOOTSTRAP_PASSWORD is empty - skipping (run 'rzfz init')."
+        return 0
+    fi
+    # The OpenUEM admin mirrors the STACK admin identity, which is configurable.
+    admin_user="$(read_env_value "$ENV_FILE" RAZZFAZZ_ADMIN_USERNAME 2>/dev/null || true)"
+    [ -n "$admin_user" ] || admin_user="akadmin"   # RAZZFAZZ_ADMIN_USERNAME default (#1148)
+    # The username is interpolated into SQL below (psql does NOT expand :'var' in
+    # -c/-tAc, only in stdin, so we build the statements in the shell). Reject a
+    # username with anything outside a safe id charset so that interpolation can
+    # never break the statement or inject.
+    case "$admin_user" in
+        ''|*[!A-Za-z0-9._-]*)
+            print_warning "OpenUEM admin seed: admin username '${admin_user}' has unexpected characters - skipping."
+            return 0 ;;
+    esac
+    db="$(read_env_value "$ENV_FILE" OPENUEM_DB 2>/dev/null || true)"; [ -n "$db" ] || db="openuem_db"
+    pguser="$(read_env_value "$ENV_FILE" POSTGRES_USER 2>/dev/null || true)"; [ -n "$pguser" ] || pguser="postgres"
+
+    docker ps --format '{{.Names}}' | grep -qx postgres || { print_warning "OpenUEM admin seed: postgres not running - skipping (re-run 'rzfz post-install --refresh')."; return 0; }
+    docker ps --format '{{.Names}}' | grep -qx authentik-server || { print_warning "OpenUEM admin seed: authentik-server not running - skipping."; return 0; }
+
+    # CREATE-IF-ABSENT: never touch an existing admin account's password.
+    existing="$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT 1 FROM users WHERE uid='${admin_user}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$existing" = "1" ]; then
+        print_substep "OpenUEM: ${admin_user} already exists - leaving its password untouched (#1907)."
+        return 0
+    fi
+
+    print_step "OpenUEM: seeding stack-identity super-admin '${admin_user}'..."
+    # Argon2id PHC hash with OpenUEM's params (alexedwards/argon2id DefaultParams:
+    # id, v=19, m=65536, t=1, p=1, salt=16, key=32) — generated inside
+    # authentik-server (it ships argon2-cffi). The password reaches the hasher on
+    # STDIN, never argv/logs; only the HASH leaves the container. The hasher
+    # round-trips its own output (assert verify) so a hash is emitted ONLY if it
+    # authenticates the password — the guard is "can log in", not "row exists".
+    hash="$(printf '%s' "$pw" | docker exec -i authentik-server python3 -c '
+import sys
+from argon2 import PasswordHasher
+from argon2.low_level import Type
+pw = sys.stdin.read()
+ph = PasswordHasher(time_cost=1, memory_cost=65536, parallelism=1, hash_len=32, salt_len=16, type=Type.ID)
+h = ph.hash(pw)
+assert ph.verify(h, pw)
+sys.stdout.write(h)
+' 2>/dev/null)"
+    case "$hash" in
+        '$argon2id$v=19$m=65536,t=1,p=1$'*) : ;;
+        *) print_warning "OpenUEM admin seed: could not generate a verifiable argon2id hash - skipping."; return 0 ;;
+    esac
+
+    # register='users.completed' => no forced change / 2FA / email confirmation;
+    # passwd=true => userpass login. No role/tenant rows (0.12.0 has no per-user
+    # RBAC). The HASH (not the password) is the only value handed to psql; the
+    # statement is built in the shell (validated username, argon2 hash — no ':'
+    # or quote) and fed on stdin.
+    local seed_sql
+    seed_sql="INSERT INTO users (uid, name, email, email_verified, register, openid, passwd, use2fa, hash, created, modified) VALUES ('${admin_user}', '${admin_user}', 'admin@localhost', true, 'users.completed', false, true, false, '${hash}', now(), now()) ON CONFLICT (uid) DO NOTHING;"
+    if printf '%s\n' "$seed_sql" | docker exec -i postgres psql -U "$pguser" -d "$db" -v ON_ERROR_STOP=1 >/dev/null 2>&1
+    then
+        existing="$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT 1 FROM users WHERE uid='${admin_user}' AND passwd AND register='users.completed' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+        if [ "$existing" = "1" ]; then
+            print_success "OpenUEM: ${admin_user} seeded - log in with '${admin_user}' + the stack admin password (full console access)."
+        else
+            print_warning "OpenUEM admin seed: insert ran but the row is not present/usable - seed manually or use the built-in 'openuem' account."
+        fi
+    else
+        print_warning "OpenUEM admin seed: the DB insert failed - see 'docker logs postgres'. Use the built-in 'openuem' account meanwhile."
+    fi
+    return 0
+}
+
+# OpenUEM (#1992) — hand the module the stack's mail configuration.
+#
+# OpenUEM keeps NO mail setting in the environment. The console's SMTP form and
+# openuem-worker-notification read the SAME single row: the GLOBAL settings row
+# of openuem_db (`settings` WHERE tenant_settings IS NULL). Verified against the
+# pinned sources (OPENUEM_VERSION=0.12.0, github.com/open-uem/ent@2d3649b3da04):
+#   console  internal/models/smtp.go:89      IsSMTPConfigured() -> the red banner
+#                                            returns SMTPServer != "" && SMTPPort != 0
+#   worker   internal/models/settings.go:29  GetSMTPSettings()  -> what it sends with
+# So "OpenUEM inherits the stack mail configuration" can only mean: seed that row.
+# There is no API and no env var to do it with — same situation as the admin seed
+# in #1907, and the same remedy.
+#
+# SEED-IF-EMPTY, exactly like #1907: an operator who typed their own SMTP server
+# into the console is NEVER overwritten. `OPENUEM_SMTP_HOST=` (empty) opts out
+# entirely, mirroring VAULTWARDEN_SMTP_HOST.
+#
+# #2027 — why `smtp_auth='LOGIN'` and not 'NOAUTH', which is the value the
+# worker's code names explicitly. Both reach the SAME branch, because the test
+# is an OR (openuem-worker/internal/common/notifications/notifications.go:71):
+#
+#     if settings.SMTPAuth == "NOAUTH" || (settings.SMTPUser == "" && settings.SMTPPassword == "")
+#
+# With an empty user AND an empty password the second half is true, so no
+# credentials are offered either way. What differs is what the CONSOLE can do
+# with the value. At 0.12.0 its auth control is a select of exactly
+# LOGIN / PLAIN / XOAUTH2 / SCRAM-SHA-256 — NOAUTH is not in it, and no option
+# is marked selected. Measured on 0.91 (2026-09-13):
+#
+#   * an operator who opens Admin -> SMTP and presses Save without touching
+#     anything silently rewrites NOAUTH to LOGIN — we would be seeding a value
+#     the product's own UI destroys on first visit;
+#   * the console's Test button refuses the stored value outright with
+#     "Auth type is not valid", so the one button an operator would press to
+#     check our seed cannot be pressed.
+#
+# LOGIN with empty credentials is therefore identical to the worker, survives an
+# accidental Save, makes Test usable, and is already the right value if the
+# operator later fills in a username and password.
+#
+# Best-effort: never aborts the run. Re-verify the columns on an OPENUEM_VERSION
+# bump — the row is upstream's schema, not ours.
+#
+# NOT CLAIMED HERE: that a mail is delivered. openuem-worker builds its client as
+# `mail.NewClient(server, WithPort(port))` and never touches SMTPTLS/SMTPStarttls,
+# so go-mail v0.7.2's DefaultTLSPolicy (TLSMandatory, verified ServerName) applies.
+# Whether the stack relay's STARTTLS certificate satisfies that is a BOX question,
+# tracked in #1992 — this function makes the console stop warning and points the
+# worker at the right host; it does not prove the mail arrives.
+provision_openuem_smtp() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "openuem" || return 0
+
+    local host port mail_from db pguser rows row_id current
+    host="$(read_env_value "$ENV_FILE" OPENUEM_SMTP_HOST 2>/dev/null || true)"
+    if [ -z "$host" ]; then
+        # #2022: ABSENT and EMPTY are not the same state, and read_env_value
+        # returns "" for both. Measured on 0.91 (2026-09-13): the
+        # key was absent because that box had not been through the 2026.09-rc1
+        # env migration, and the operator was told "leaving OpenUEM's own mail
+        # settings alone" — which names a CHOICE they never made. The two need
+        # different remedies: one is "you opted out, nothing to do", the other
+        # is "your .env is behind, run the migration".
+        if grep -qE '^[[:space:]]*(export[[:space:]]+)?OPENUEM_SMTP_HOST=' "$ENV_FILE" 2>/dev/null; then
+            print_substep "OpenUEM: OPENUEM_SMTP_HOST is empty - leaving OpenUEM's own mail settings alone."
+        else
+            print_warning "OpenUEM: OPENUEM_SMTP_HOST is not in ${ENV_FILE} - this box predates the key, so mail is NOT configured."
+            print_info    "  It arrives with the 2026.09 env migration (\`rzfz upgrade\`), or add it by hand:"
+            print_info    "    OPENUEM_SMTP_HOST=smtp-relay"
+            print_info    "    OPENUEM_SMTP_PORT=587"
+        fi
+        return 0
+    fi
+    port="$(read_env_value "$ENV_FILE" OPENUEM_SMTP_PORT 2>/dev/null || true)"; [ -n "$port" ] || port="587"
+    # The From address is NOT cosmetic: the relay's ALLOWED_SENDER_DOMAINS is
+    # ${MAIN_DOMAIN}, so a sender outside it is refused at the relay. Reuse the
+    # stack's own SMTP_FROM, expanded the way load_env expands it (#949) - the
+    # raw file value is `razzfazz-ai-box-1@${MAIN_DOMAIN}`.
+    mail_from="$(read_env_value "$ENV_FILE" SMTP_FROM 2>/dev/null || true)"
+    case "$mail_from" in *'${'*) mail_from="$(_expand_env_refs "$mail_from")" ;; esac
+    if [ -z "$mail_from" ]; then
+        print_warning "OpenUEM SMTP seed: SMTP_FROM is empty - skipping (a message with no From is refused by the relay)."
+        return 0
+    fi
+
+    # Everything below is interpolated into SQL (psql expands :'var' only for
+    # stdin scripts, not for -c/-tAc, so the statements are built in the shell).
+    # Refuse anything outside a safe charset rather than quote-escape it.
+    case "$host" in
+        *[!A-Za-z0-9.-]*) print_warning "OpenUEM SMTP seed: OPENUEM_SMTP_HOST '${host}' has unexpected characters - skipping."; return 0 ;;
+    esac
+    case "$port" in
+        ''|*[!0-9]*) print_warning "OpenUEM SMTP seed: OPENUEM_SMTP_PORT '${port}' is not a number - skipping."; return 0 ;;
+    esac
+    case "$mail_from" in
+        *[!A-Za-z0-9.@_+-]*) print_warning "OpenUEM SMTP seed: SMTP_FROM '${mail_from}' has unexpected characters - skipping."; return 0 ;;
+    esac
+
+    db="$(read_env_value "$ENV_FILE" OPENUEM_DB 2>/dev/null || true)"; [ -n "$db" ] || db="openuem_db"
+    pguser="$(read_env_value "$ENV_FILE" POSTGRES_USER 2>/dev/null || true)"; [ -n "$pguser" ] || pguser="postgres"
+
+    docker ps --format '{{.Names}}' | grep -qx postgres || { print_warning "OpenUEM SMTP seed: postgres not running - skipping (re-run 'rzfz post-install --refresh')."; return 0; }
+    # The `settings` table is created by the console's ent auto-migration at its
+    # first start. Before that there is nothing to seed, and a missing table is a
+    # normal state on a box that just enabled the profile - not an error.
+    if [ "$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT to_regclass('public.settings') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')" != "t" ]; then
+        print_warning "OpenUEM SMTP seed: openuem_db has no 'settings' table yet - re-run 'rzfz post-install --refresh' once openuem-console has started."
+        return 0
+    fi
+
+    # The console reads the global row with First() and GetSMTPSettings() reads it
+    # with Only(). More than one global row therefore already breaks the module on
+    # its own; do not add a second write to that mess.
+    rows="$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT count(*) FROM settings WHERE tenant_settings IS NULL;" 2>/dev/null | tr -d '[:space:]')"
+    case "$rows" in
+        0)
+            print_step "OpenUEM: seeding the stack mail configuration (${host}:${port}, From ${mail_from})..."
+            # created/modified have NO database default - ent fills them in Go
+            # (time.Now), so an INSERT that goes around ent has to set them.
+            printf '%s\n' "INSERT INTO settings (smtp_server, smtp_port, smtp_user, smtp_password, smtp_auth, smtp_tls, smtp_starttls, message_from, created, modified) VALUES ('${host}', ${port}, '', '', 'LOGIN', false, false, '${mail_from}', now(), now());" \
+                | docker exec -i postgres psql -U "$pguser" -d "$db" -v ON_ERROR_STOP=1 >/dev/null 2>&1 || {
+                    print_warning "OpenUEM SMTP seed: the insert failed - see 'docker logs postgres'."; return 0; }
+            ;;
+        1)
+            current="$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT coalesce(smtp_server,'') FROM settings WHERE tenant_settings IS NULL;" 2>/dev/null | tr -d '[:space:]')"
+            if [ -n "$current" ]; then
+                print_substep "OpenUEM: SMTP server already set to '${current}' - leaving it untouched (#1992)."
+                return 0
+            fi
+            row_id="$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT id FROM settings WHERE tenant_settings IS NULL;" 2>/dev/null | tr -d '[:space:]')"
+            case "$row_id" in ''|*[!0-9]*) print_warning "OpenUEM SMTP seed: could not read the global settings row id - skipping."; return 0 ;; esac
+            print_step "OpenUEM: seeding the stack mail configuration (${host}:${port}, From ${mail_from})..."
+            printf '%s\n' "UPDATE settings SET smtp_server='${host}', smtp_port=${port}, smtp_user='', smtp_password='', smtp_auth='LOGIN', smtp_tls=false, smtp_starttls=false, message_from='${mail_from}', modified=now() WHERE id=${row_id};" \
+                | docker exec -i postgres psql -U "$pguser" -d "$db" -v ON_ERROR_STOP=1 >/dev/null 2>&1 || {
+                    print_warning "OpenUEM SMTP seed: the update failed - see 'docker logs postgres'."; return 0; }
+            ;;
+        *)
+            print_warning "OpenUEM SMTP seed: openuem_db holds ${rows} global settings rows - the console itself cannot read that (Only()). Not writing."
+            return 0
+            ;;
+    esac
+
+    # Verify against the predicate the CONSOLE uses for its banner, not against
+    # the statement we just ran: server non-empty AND port non-zero, read back
+    # from the same row the console reads (internal/models/smtp.go:89).
+    if [ "$(docker exec postgres psql -U "$pguser" -d "$db" -tAc "SELECT smtp_server <> '' AND smtp_port <> 0 FROM settings WHERE tenant_settings IS NULL;" 2>/dev/null | tr -d '[:space:]')" = "t" ]; then
+        print_success "OpenUEM: mail points at the stack relay ${host}:${port} (From ${mail_from}); the console's 'no SMTP server' banner is gone."
+    else
+        print_warning "OpenUEM SMTP seed: the write ran but the console would still call it unconfigured - check 'settings' in ${db}."
+    fi
+    return 0
+}
+
+# Wazuh (#855) — post-install verification
+# ==============================================================================
+# Wazuh has no models to deploy and no seed data to load, so there is nothing
+# to PROVISION here. What there is to verify is the thing that actually goes
+# wrong: a failed one-shot leaves the three services stuck "starting" forever
+# rather than reporting a clear error, because they are gated on
+# service_completed_successfully.
+verify_wazuh() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "wazuh" || return 0
+
+    print_substep "Checking Wazuh..."
+
+    # #2526: the UDP 514 port (compose.syslog-udp.yml) and WAZUH_SYSLOG_UDP must
+    # agree. Flag on without the overlay = a <remote> nobody can reach; overlay
+    # without the flag = UDP 514 taken from the host for nothing.
+    local _udp_flag _udp_cf=no
+    _udp_flag="$(read_env_value "$SCRIPT_DIR/.env" WAZUH_SYSLOG_UDP 2>/dev/null || true)"
+    wazuh_syslog_udp_overlay_present "$SCRIPT_DIR/.env" && _udp_cf=yes
+    if { [ "$_udp_flag" = "true" ] && [ "$_udp_cf" = yes ]; } || { [ "$_udp_flag" != "true" ] && [ "$_udp_cf" = no ]; }; then
+        verify_check "Wazuh: UDP syslog port follows WAZUH_SYSLOG_UDP" "pass"
+    else
+        verify_check "Wazuh: UDP syslog port follows WAZUH_SYSLOG_UDP" "fail" \
+            "WAZUH_SYSLOG_UDP=${_udp_flag:-<unset>} but ${RAZZFAZZ_WAZUH_SYSLOG_UDP_OVERLAY} in COMPOSE_FILE: ${_udp_cf} - run rzfz upgrade to reconcile"
+    fi
+
+    local one_shot exit_code state status
+    for one_shot in wazuh-certs-generator wazuh-securityconfig-init \
+                    wazuh-dashboard-config-init wazuh-securityadmin; do
+        # rev-B (review LOW 17): .State.ExitCode is 0 on a container that is
+        # still RUNNING, so the old check reported "completed cleanly" for a
+        # one-shot that had not finished — the single most likely state during
+        # a post-install right after `up`. Status must be `exited` AND the code
+        # must be 0.
+        status="$(docker inspect -f '{{.State.Status}}' "$one_shot" 2>/dev/null || echo "missing")"
+        exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$one_shot" 2>/dev/null || echo "missing")"
+        if [ "$status" = "exited" ] && [ "$exit_code" = "0" ]; then
+            verify_check "Wazuh: $one_shot completed cleanly" "pass"
+        elif [ "$status" = "running" ]; then
+            verify_check "Wazuh: $one_shot completed cleanly" "fail" \
+                "still running — it has not finished yet (docker logs -f $one_shot)"
+        else
+            verify_check "Wazuh: $one_shot completed cleanly" "fail" \
+                "status=$status exit=$exit_code (docker logs $one_shot)"
+        fi
+    done
+
+    local svc
+    for svc in wazuh-indexer wazuh-manager wazuh-dashboard; do
+        state="$(docker inspect -f '{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "missing")"
+        if [ "$state" = "healthy" ]; then
+            verify_check "Wazuh: $svc healthy" "pass"
+        else
+            verify_check "Wazuh: $svc healthy" "fail" "health=$state"
+        fi
+    done
+
+    # No shipped default credential may survive (#855 WZ-1). This is the one
+    # check that cannot be done statically: it proves the generated
+    # internal_users.yml actually reached the running security index.
+    # `--noproxy '*'` for the same reason every healthcheck carries it (#1130).
+    # The URL is the indexer's SAN name `wazuh.indexer` (#1259) — it is the only
+    # name on the certificate, and this probe verifies it (`--cacert`, no `-k`),
+    # so the hyphenated spelling would fail before any auth happens and report
+    # an INCONCLUSIVE 000 forever.
+    #
+    # rev-B (review LOW 17): the old form piped into `grep -q '^401$'` and
+    # treated ANY non-401 as a failure — including curl's own error path, where
+    # `-w '%{http_code}'` prints 000 or nothing at all. A DNS hiccup or a
+    # not-yet-listening indexer therefore reported "the indexer still accepts
+    # Wazuh's PUBLISHED demo password", which is a very loud claim to make on
+    # no evidence. The three outcomes are now separated.
+    local demo_code
+    demo_code="$(docker exec wazuh-indexer curl --noproxy '*' -s -o /dev/null \
+         -w '%{http_code}' \
+         --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem \
+         -u 'admin:SecretPassword' \
+         https://wazuh.indexer:9200/_cluster/health 2>/dev/null || echo "000")"
+    case "$demo_code" in
+        401|403)
+            verify_check "Wazuh: upstream demo credential rejected by the indexer" "pass" ;;
+        000|"")
+            verify_check "Wazuh: upstream demo credential rejected by the indexer" "fail" \
+                "INCONCLUSIVE — the probe could not reach the indexer at all (curl error), so nothing was proven either way; re-run once wazuh-indexer is healthy" ;;
+        *)
+            verify_check "Wazuh: upstream demo credential rejected by the indexer" "fail" \
+                "the indexer answered HTTP $demo_code to Wazuh's PUBLISHED demo password — do not expose this box" ;;
+    esac
+
+    # #855 rev-B (review MEDIUM 12): the enrolment secret is passed through the
+    # ENVIRONMENT, never on argv — on the command line it is readable in
+    # /proc/<pid>/cmdline by every local user for the whole apt run and lands in
+    # root history. `sudo -E` is what carries the variable through sudo.
+    print_info "  Next: monitor another box with"
+    print_info "    WAZUH_AUTHD_PASSWORD='<from this box .env>' \\"
+    print_info "      sudo -E scripts/install-wazuh-agent.sh <this box WAZUH_MANAGER_HOST_BIND IP> \\"
+    print_info "        --containers 'caddy,postgres,authentik-server'"
+    print_info "  (or --password-file <path>, or pipe the secret on stdin — never as an argument)"
+    print_info "  Confirm enrolment: docker exec wazuh-manager /var/ossec/bin/agent_control -l"
+    print_info "  Re-run the installer after every stack upgrade: container IDs change"
+    print_info "  and the shipped container-log paths go stale silently."
+}
+
+# ==============================================================================
+# #1247 — every razzfazz.init one-shot exited 0
+# ==============================================================================
+# `--verify` is what an operator re-runs when a module misbehaves, so it has to
+# answer "did the thing that BUILDS this module actually succeed?". On the 0.91
+# clean install it could not: `moltis-image-builder` sat at Exited(127) and
+# nothing in init, --verify or `rzfz status` looked. verify_wazuh above already
+# did exactly this check for its four NAMED one-shots; this is the same check
+# made label-driven for every module, through the shared helper in
+# scripts/lib.sh (`razzfazz_init_oneshot_status`) that init and status read too.
+#
+# A one-shot still running is INFO, not FAIL: a heavy image build legitimately
+# outlives the run that started it, and --verify is read-only. So is one that a
+# stack stop signalled out from under (137/143) — several agent builders sit on
+# an entrypoint that ignores their `command: ["true"]` and only ever die that
+# way, and a check that FAILs a stopped box is a check operators mute.
+verify_init_oneshots() {
+    print_substep "Checking razzfazz.init one-shots (#1247)..."
+    local records st name code state log
+    records=$(razzfazz_init_oneshot_status) || true
+    if [ -z "$records" ]; then
+        # #1301 (F6): an empty set is not a result — do not count a PASS for it.
+        print_info "  Init one-shots: none labelled razzfazz.init on this box — nothing to verify"
+        return 0
+    fi
+    while IFS='|' read -r st name code state log; do
+        [ -n "$st" ] || continue
+        case "$st" in
+            OK)
+                verify_check "Init one-shot: $name exited 0" "pass"
+                ;;
+            WARN)
+                print_warning "  Init one-shot: $name exited 0 but skipped its work: $log (docker logs $name)"
+                ;;
+            FAIL)
+                verify_check "Init one-shot: $name exited 0" "fail" \
+                    "exited $code: $log (docker logs $name)"
+                ;;
+            PENDING)
+                print_info "  Init one-shot: $name is still ${state} — not finished, exit code not judged yet"
+                ;;
+            STOPPED)
+                print_info "  Init one-shot: $name was signalled ($code) before it finished — nothing proven; re-check once the stack is up"
+                ;;
+            MISSING)
+                # #1302: labelled in the active profiles, never created.
+                verify_check "Init one-shot: $name was created" "fail" "$log"
+                ;;
+            UNKNOWN)
+                # #1301: no measurement — a warning, never a PASS.
+                print_warning "  Init one-shots: NOT inspected ($name: $log) — no verdict; fix docker access and re-run --verify"
+                ;;
+        esac
+    done <<< "$records"
+    return 0
+}
+
+# #1165 — the --verify login uses the same candidate list as owui_ensure_admin
+# (OPENWEBUI_ADMIN_PASSWORD, then the fleet bootstrap password). Hard-coding the
+# bootstrap password made --verify FAIL on every box whose operator rotated with
+# `set-admin-password.sh openwebui` — a red line for a healthy account.
+owui_verify_admin_login() {
+    local owui_url="http://127.0.0.1:${OPENWEBUI_PORT:-8080}"
+    local admin_email="razzfazz-ai-admin@${MAIN_DOMAIN}"
+    local _cand tried=0
+    while IFS= read -r _cand; do
+        [ -n "$_cand" ] || continue
+        tried=$((tried + 1))
+        if owui_signin "$owui_url" "$admin_email" "$_cand"; then
+            verify_check "Open WebUI: admin login" "pass"
+            return 0
+        fi
+    done < <(_owui_admin_passwords)
+    if [ "$tried" -eq 0 ]; then
+        verify_check "Open WebUI: admin login" "fail" "neither OPENWEBUI_ADMIN_PASSWORD nor AUTHENTIK_BOOTSTRAP_PASSWORD is set in .env"
+    else
+        verify_check "Open WebUI: admin login" "fail" "login failed with every known password (${tried} tried) — run cli/set-admin-password.sh openwebui"
+    fi
+    return 0
+}
+
+# ==============================================================================
+# Worker bundle served by Caddy is CURRENT (#1406)
+# ==============================================================================
+# The files a joining thin node fetches from this master (/worker-bundle/*,
+# /install-worker.sh — #1059) are single-file bind mounts into the caddy
+# container. A `git checkout`/`git pull` replaces the source file by rename,
+# the container keeps the OLD inode, and the master serves a bundle that no
+# longer matches its own checkout (0.91, 2026-09-05: lib.sh link count 0,
+# SHA differing from the repo) until caddy is recreated. `rzfz upgrade` ends in
+# `--force-recreate`; a manual checkout does not. Nothing said so — this does.
+#: served-path=repo-path, exactly the mounts in core/compose.yml.
+RAZZFAZZ_WORKER_BUNDLE_MOUNTS="/srv/worker-bundle/worker-join.sh=cli/worker-join.sh /srv/worker-bundle/lib.sh=scripts/lib.sh /srv/worker-bundle/compose.thin.yml=modules/llm/node-agent/compose.thin.yml /srv/worker-bundle/node.env.example=config/node.env.example /srv/worker-bundle/node-upgrade.sh=cli/node-upgrade.sh /srv/worker-bundle/metadata-block.sh=scripts/metadata-block.sh /srv/worker-bundle/VERSION=VERSION /srv/install-worker/install-worker.sh=scripts/install-worker.sh.tmpl"
+#: #2559: GENERATED directory mounts (served-dir=data-dir), not repo files —
+#: nothing to compare against the checkout. Each holds the Mac worker bundle
+#: (mac-agent.tar.gz + .sha256): absent is a WARN (only a Mac needs it),
+#: present but inconsistent is a FAIL (it would serve a broken installer).
+RAZZFAZZ_WORKER_BUNDLE_GENERATED="/srv/worker-bundle/generated=data/worker-bundle-generated"
+
+verify_worker_bundle_current() {
+    print_substep "Checking the worker bundle Caddy serves is current (#1406)..."
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx caddy; then
+        print_info "  Worker bundle: caddy is not running — nothing served, nothing judged"
+        return 0
+    fi
+    local pair served repo want got stale="" missing=""
+    for pair in $RAZZFAZZ_WORKER_BUNDLE_MOUNTS; do
+        served="${pair%%=*}"; repo="${pair#*=}"
+        if [ ! -f "${SCRIPT_DIR}/${repo}" ]; then
+            missing="${missing}${repo} "
+            continue
+        fi
+        want=$(sha256sum "${SCRIPT_DIR}/${repo}" 2>/dev/null | cut -c1-64)
+        got=$(docker exec caddy sha256sum "$served" 2>/dev/null | cut -c1-64)
+        if [ -z "$got" ]; then
+            missing="${missing}${served} "
+        elif [ "$got" != "$want" ]; then
+            stale="${stale}${served##*/} "
+        fi
+    done
+    if [ -n "$stale" ] || [ -n "$missing" ]; then
+        verify_check "Worker bundle: files Caddy serves match this checkout" "fail" \
+            "stale: ${stale:-none}; unreadable: ${missing:-none} — the bind-mounted source was replaced (checkout/pull); recreate the edge: docker compose up -d --force-recreate caddy"
+    else
+        verify_check "Worker bundle: files Caddy serves match this checkout" "pass"
+    fi
+    # #2559: the generated Mac bundle — built, not checked out, so it is judged
+    # for consistency only, and its absence never fails a box without a Mac.
+    local tar_sum sha_sum note
+    for pair in $RAZZFAZZ_WORKER_BUNDLE_GENERATED; do
+        served="${pair%%=*}"; repo="${pair#*=}"
+        tar_sum=$(docker exec caddy sha256sum "${served}/mac-agent.tar.gz" 2>/dev/null | cut -c1-64)
+        sha_sum=$(docker exec caddy cat "${served}/mac-agent.tar.gz.sha256" 2>/dev/null | cut -c1-64)
+        if [ -z "$tar_sum" ] && [ -z "$sha_sum" ]; then
+            note="Worker bundle: no Mac worker bundle served at ${served} — matters only if a macOS worker is installed or planned: build it with 'rzfz post-install --refresh'; if ${repo} is root-owned: sudo chown \"$(id -un)\" \"${SCRIPT_DIR}/${repo}\""
+            print_warning "  ${note}"
+            VERIFY_RESULTS="${VERIFY_RESULTS}  ${YELLOW:-}! WARN${NC:-}  ${note}\n"
+        elif [ -z "$tar_sum" ] || [ -z "$sha_sum" ] || [ "$tar_sum" != "$sha_sum" ]; then
+            verify_check "Worker bundle: the Mac worker bundle is consistent" "fail" \
+                "${served}: mac-agent.tar.gz ${tar_sum:-missing}, its .sha256 says ${sha_sum:-missing} — a Mac would get a broken installer; rebuild: rzfz post-install --refresh"
+        else
+            verify_check "Worker bundle: the Mac worker bundle is consistent" "pass"
+        fi
+    done
+    return 0
+}
+
+# #2559: the Mac worker's agent bundle — the node-agent package without the
+# Linux engine drivers, plus modules/llm/mac-agent (its *.sh.tmpl excepted: the
+# Mac installer is served only rendered, by the manager). Caddy serves it at
+# /worker-bundle/generated/mac-agent.tar.gz(.sha256) from
+# data/worker-bundle-generated (core/compose.yml). Reproducible — sorted
+# entries, fixed mtime/owner/mode, gzip without a timestamp — so the .sha256
+# changes only when the content does. Each file is replaced by rename, so a
+# download in flight keeps its inode. Non-fatal for the caller.
+#: removed from the bundle's app/ (Docker-engine code a Mac never runs); the
+#: drivers package __init__ is replaced by an empty one (it imports them all).
+RAZZFAZZ_MAC_BUNDLE_STRIP="drivers/amd.py drivers/cpu.py drivers/cuda_llamacpp.py drivers/gb10.py drivers/supervisor.py puller.py pusher.py"
+build_mac_agent_bundle() {
+    local out="${SCRIPT_DIR}/data/worker-bundle-generated" stage f sum tar_version
+    tar_version="$(tar --version 2>/dev/null || true)"
+    if [[ "$tar_version" != *"GNU tar"* ]]; then
+        print_warning "Mac worker bundle not built: it needs GNU tar for a reproducible archive (#2559)."
+        return 1
+    fi
+    mkdir -p "$out" 2>/dev/null || true
+    if [ ! -w "$out" ]; then
+        print_warning "Mac worker bundle not built: ${out} is not writable by $(id -un) (Docker created it root-owned) — fix: sudo chown \"$(id -un)\" \"${out}\" (#2559)."
+        return 1
+    fi
+    stage="$(mktemp -d)" || return 1
+    if ! cp -R "${SCRIPT_DIR}/modules/llm/node-agent/app" "$stage/app" \
+       || ! cp -R "${SCRIPT_DIR}/modules/llm/mac-agent" "$stage/mac-agent"; then
+        rm -rf "$stage"; return 1
+    fi
+    for f in $RAZZFAZZ_MAC_BUNDLE_STRIP; do rm -f "$stage/app/$f"; done
+    : > "$stage/app/drivers/__init__.py"
+    find "$stage" \( -name '__pycache__' -o -name '*.pyc' -o -name '*.sh.tmpl' -o -name '.DS_Store' \) -prune -exec rm -rf {} +
+    if ! (cd "$stage" && tar --sort=name --format=gnu --owner=0 --group=0 --numeric-owner \
+              --mtime='2026-01-01 00:00:00Z' --mode='u+rwX,go+rX,go-w' -cf - app mac-agent) \
+            | gzip -9n > "$out/.mac-agent.tar.gz.tmp"; then
+        rm -rf "$stage" "$out/.mac-agent.tar.gz.tmp"; return 1
+    fi
+    rm -rf "$stage"
+    sum=$(sha256sum "$out/.mac-agent.tar.gz.tmp" | cut -c1-64)
+    printf '%s  mac-agent.tar.gz\n' "$sum" > "$out/.mac-agent.tar.gz.sha256.tmp"
+    mv -f "$out/.mac-agent.tar.gz.tmp" "$out/mac-agent.tar.gz"
+    mv -f "$out/.mac-agent.tar.gz.sha256.tmp" "$out/mac-agent.tar.gz.sha256"
+    print_success "Mac worker bundle built: mac-agent.tar.gz sha256:${sum:0:12} (#2559)"
+}
+
+# #1370 — report blueprint instances that are not `successful`.
+#
+# Split out of the verify suite so the same reader can be used from anywhere
+# (and so it is testable without running the whole suite). Never fatal on its
+# own terms: a box where the query cannot run reports that, rather than a green
+# tick or a red one it cannot justify.
+_bp_broken_blueprints() {
+    docker exec postgres psql -U "${POSTGRES_USER:-docker}" \
+        -d "${AUTHENTIK_DB:-authentik_db}" -tA -F'|' -c \
+        "SELECT name, path, status, EXTRACT(EPOCH FROM (now() - last_applied))::bigint
+           FROM authentik_blueprints_blueprintinstance
+          WHERE status <> 'successful' AND enabled
+          ORDER BY last_applied;" 2>/dev/null || true
+}
+
+_bp_check_authentik_blueprints() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres || return 0
+
+    local rows
+    rows=$(_bp_broken_blueprints)
+    if [ -z "$(printf '%s' "$rows" | tr -d '[:space:]')" ]; then
+        verify_check "Authentik: blueprints applied" "pass"
+        return 0
+    fi
+
+    # A row that errored SECONDS ago is a window we ran into, not a verdict:
+    # authentik re-applies periodically and it may well be green by the time the
+    # operator reads this. One that has sat in error for longer is stuck.
+    # verify_check knows only pass and fail — anything else prints FAIL — so a
+    # fresh row is WAITED OUT rather than reported in a third colour that does
+    # not exist.
+    local fresh_window="${RZFZ_BLUEPRINT_FRESH_SECONDS:-300}"
+    local settle="${RZFZ_BLUEPRINT_SETTLE_SECONDS:-60}"
+    local stuck="" fresh="" name path status age
+    while IFS='|' read -r name path status age; do
+        [ -n "$name" ] || continue
+        case "${age:-0}" in ''|*[!0-9-]*) age=0 ;; esac
+        if [ "$age" -gt "$fresh_window" ]; then
+            stuck="${stuck:+${stuck}, }${name} (${path})"
+        else
+            fresh="${fresh:+${fresh}, }${name} (${path})"
+        fi
+    done <<< "$rows"
+
+    if [ -z "$stuck" ] && [ -n "$fresh" ]; then
+        print_substep "  Blueprints applying right now (${fresh}) — waiting up to ${settle}s before judging."
+        local waited=0
+        while [ "$waited" -lt "$settle" ]; do
+            sleep 10
+            waited=$((waited + 10))
+            rows=$(_bp_broken_blueprints)
+            if [ -z "$(printf '%s' "$rows" | tr -d '[:space:]')" ]; then
+                verify_check "Authentik: blueprints applied" "pass"
+                return 0
+            fi
+        done
+        stuck="$fresh"
+    fi
+
+    verify_check "Authentik: blueprints applied" "fail" \
+        "not applied: ${stuck} — the module's application and its policy bindings are missing, so its tile is gone and forward-auth 404s. The reason is only in the worker log at apply time: docker logs authentik-worker | grep -v 'deadlock detected' (#1350/#1370)"
+}
+
+run_verification_suite() {
+    print_step "Running verification suite..."
+    VERIFY_PASS=0
+    VERIFY_FAIL=0
+    VERIFY_RESULTS=""
+    
+    load_env
+    local api_key="${GPUSTACK_API_KEY}"
+    
+    # Disable errexit for verification (checks may fail intentionally)
+    set +e
+    
+    # #1250b: the three GPUStack checks below only mean anything on a box that
+    # actually RUNS GPUStack. On an LLM-Manager box they probed a dead endpoint
+    # with a GPUStack key that box never had, under model names it never used
+    # (`nomic-embed-text`), and reported three red FAILs for a healthy stack.
+    # Backend-gated: GPUStack box -> GPUStack checks, Manager box -> Manager
+    # checks against the canonical /v1 endpoint, a box running both -> both.
+    if _gpustack_profile_active; then
+        # 1. GPUStack — models listed
+        print_substep "Checking GPUStack..."
+        local gpustack_models
+        gpustack_models=$(curl -sf --max-time 10 -K <(printf 'header = "Authorization: Bearer %s"\n' "$api_key") \
+            "http://127.0.0.1:${GPUSTACK_PORT:-9090}/v1-openai/models" 2>/dev/null | \
+            python3 -c "import sys,json; print(len(json.load(sys.stdin).get('data',[])))" 2>/dev/null)
+        if [ -n "$gpustack_models" ] && [ "$gpustack_models" -gt 0 ]; then
+            verify_check "GPUStack: $gpustack_models models available" "pass"
+        else
+            verify_check "GPUStack: models available" "fail" "no models or unreachable"
+        fi
+    
+        # 2. GPUStack — chat completion against the always-on default chat model
+        # (NOT a hardcoded alias — gemma4/coder-next are auto_start:false at 0
+        # replicas and would 503). qwen3.6 ships thinking-ON by default (ga.2 /
+        # #150), so give a generous output budget (2048) so reasoning AND the final
+        # answer both fit — that's the whole point of the day-1 fix. We still fall
+        # back to reasoning_content for proof-of-life, but with this budget a healthy
+        # box lands a real answer in `content`.
+        local chat_model
+        chat_model=$(_default_chat_alias)
+        local chat_resp
+        chat_resp=$(curl -sf --max-time 90 -K <(printf 'header = "Authorization: Bearer %s"\n' "$api_key") \
+            -H "Content-Type: application/json" \
+            "http://127.0.0.1:${GPUSTACK_PORT:-9090}/v1-openai/chat/completions" \
+            -d "{\"model\":\"${chat_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"max_tokens\":2048}" 2>/dev/null | \
+            python3 -c "
+import sys, json
+try:
+    msg = json.load(sys.stdin)['choices'][0]['message']
+    content = msg.get('content', '') or msg.get('reasoning_content', '')
+    print(content[:20] if content else 'empty')
+except: pass
+" 2>/dev/null)
+        if [ -n "$chat_resp" ]; then
+            verify_check "GPUStack: chat completion ($chat_model)" "pass"
+        else
+            verify_check "GPUStack: chat completion ($chat_model)" "fail" "no response"
+        fi
+    
+        # 3. GPUStack — embedding
+        local embed_resp
+        embed_resp=$(curl -sf --max-time 15 -K <(printf 'header = "Authorization: Bearer %s"\n' "$api_key") \
+            -H "Content-Type: application/json" \
+            "http://127.0.0.1:${GPUSTACK_PORT:-9090}/v1-openai/embeddings" \
+            -d '{"model":"nomic-embed-text","input":"test"}' 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['data'][0]['embedding']))" 2>/dev/null)
+        if [ -n "$embed_resp" ] && [ "$embed_resp" -gt 0 ]; then
+            verify_check "GPUStack: embedding (nomic-embed-text, dim=$embed_resp)" "pass"
+        else
+            verify_check "GPUStack: embedding (nomic-embed-text)" "fail" "no response"
+        fi
+    fi
+
+    # 1b. LLM Manager — the same four questions asked of the backend this box
+    # really uses: the metered /v1 surface, with the stack/openwebui service
+    # key, under the manifest's own default aliases (#1250b). #1441: the gate
+    # asks the SAME question the deploy arms ask — llm_manager_owns_standard_set
+    # — so a box where a GPUStack profile holds the GPU gets ONE line naming
+    # the cause (and #1442) instead of four probe failures that hide it.
+    if llm_manager_owns_standard_set; then
+        llm_manager_verify_models
+        llm_manager_verify_manifest_drift   # #1263
+    elif _llm_manager_profile_active; then
+        llm_manager_verify_standard_set_ownership
+    fi
+
+    # 4. Open WebUI — login
+    print_substep "Checking Open WebUI..."
+    
+    # Wait briefly for Open WebUI to start if it was just restarted
+    local owui_waited=0
+    while [ $owui_waited -lt 30 ]; do
+        if curl -sf --max-time 2 "http://127.0.0.1:${OPENWEBUI_PORT:-8080}/health" > /dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+        owui_waited=$((owui_waited + 2))
+    done
+
+    owui_verify_admin_login
+    
+
+    
+    # 4c. Komodo — health (login omitted due to cookie auth complexity)
+    if echo "${COMPOSE_PROFILES:-}" | grep -q "monitor"; then
+        print_substep "Checking Komodo health..."
+        if curl -sf --max-time 10 "http://127.0.0.1:${KOMODO_PORT:-8180}/" > /dev/null 2>&1; then
+            verify_check "Komodo: healthy" "pass"
+        else
+            verify_check "Komodo: healthy" "fail" "unreachable"
+        fi
+    fi
+    
+    # 5. Open WebUI — GPUStack connection: enabled AND a RESOLVED key (not the ${...}
+    # literal). OWUI 0.6.x exposes this at /openai/config (ENABLE_OPENAI_API +
+    # OPENAI_API_KEYS); the old /api/v1/configs/export::openai.enable probe was a
+    # false-negative on 0.6.x (#200). chr(36)='$' detects an unresolved ${...} key.
+    if [ -n "$owui_token" ]; then
+        local owui_cfg
+        owui_cfg=$(curl -sf --max-time 10 -K <(printf 'header = "Authorization: Bearer %s"\n' "$owui_token") \
+            "http://127.0.0.1:${OPENWEBUI_PORT:-8080}/openai/config" 2>/dev/null)
+        if echo "$owui_cfg" | python3 -c "import sys,json; d=json.load(sys.stdin); ks=d.get('OPENAI_API_KEYS',[]); sys.exit(0 if (d.get('ENABLE_OPENAI_API') and ks and ks[0] and not ks[0].startswith(chr(36))) else 1)" 2>/dev/null; then
+            verify_check "Open WebUI: $(_llm_backend_display_name) connection configured" "pass"
+        else
+            verify_check "Open WebUI: $(_llm_backend_display_name) connection configured" "fail" "not enabled or key unresolved"
+        fi
+    fi
+
+    # 5b. Open WebUI — the `model` rows (#1266) and the .env/DB agreement
+    # (#1252). Check 5 above only asks OWUI whether SOME key is set; neither an
+    # empty `model` table nor a .env that disagrees with the persisted config
+    # is visible from there.
+    verify_owui_model_rows_and_env
+    verify_owui_pipelines_registered
+
+    # 6. Dify — setup complete & login
+    print_substep "Checking Dify..."
+    local dify_setup
+    dify_setup=$(docker exec dify-api curl -sf --max-time 10 http://localhost:5001/console/api/setup 2>/dev/null | \
+        python3 -c "import sys,json; print(json.load(sys.stdin).get('step',''))" 2>/dev/null)
+    if [ "$dify_setup" = "finished" ]; then
+        verify_check "Dify: setup complete" "pass"
+
+        # 6b. Dify — model-provider icons (#160). Each provider list / model-config
+        # icon is an <img> to the plugin-daemon-backed icon endpoint; a runtime
+        # failure of that endpoint renders a broken image. Probe every installed
+        # provider's icon endpoint and surface the exact failing provider+status
+        # (500 => plugin-daemon/plugin asset; 404 => host/route; 302/HTML => SSO).
+        local broken_icons
+        broken_icons=$(dify_broken_provider_icons)
+        if [ -z "$broken_icons" ]; then
+            verify_check "Dify: model-provider icons render" "pass"
+        else
+            verify_check "Dify: model-provider icons render" "fail" \
+                "broken $(echo "$broken_icons" | awk '{printf "%s(HTTP %s) ", $1, $2}') — re-run 'rzfz post-install' (reinstalls provider plugins); #160"
+        fi
+
+        # 6c. #1248: the workspace defaults must EXIST and name the backend this
+        # box actually runs. Icons rendering says nothing about whether Dify has
+        # a model it can call.
+        dify_verify_default_models
+        # #3233: a structured-output node with a boolean field, through Dify's own path
+        dify_verify_structured_output
+    else
+        verify_check "Dify: setup complete" "fail" "step=$dify_setup"
+    fi
+
+
+
+    # 7. SearXNG — search endpoint reachability + engine health.
+    # #201: pass on reachable + valid JSON. A 0-result probe is a transient
+    # external-engine/rate-limit condition (the upstream engines, not the stack),
+    # so it must NOT fail the verify — only unreachable/invalid-JSON does.
+    print_substep "Checking SearXNG..."
+    local searx_n
+    searx_n=$(curl -sf --max-time 15 \
+        "http://127.0.0.1:${SEARXNG_PORT:-8088}/search?q=test&format=json" 2>/dev/null | \
+        python3 -c "import sys,json; print(len(json.load(sys.stdin).get('results',[])))" 2>/dev/null)
+    if [ -z "$searx_n" ]; then
+        # SearXNG may be on a different host port — probe the container directly.
+        searx_n=$(docker exec searxng curl -sf --max-time 10 \
+            "http://localhost:8080/search?q=test&format=json" 2>/dev/null | \
+            python3 -c "import sys,json; print(len(json.load(sys.stdin).get('results',[])))" 2>/dev/null)
+    fi
+    if [ -z "$searx_n" ]; then
+        verify_check "SearXNG: search endpoint reachable" "fail" "unreachable or invalid JSON"
+    elif [ "$searx_n" -gt 0 ]; then
+        verify_check "SearXNG: search returns results ($searx_n)" "pass"
+    else
+        # Reachable + valid JSON but zero results — external engines transiently
+        # empty / rate-limited. The search backend is up; not a stack break.
+        verify_check "SearXNG: search endpoint reachable (0 results — external engines transiently empty/rate-limited)" "pass"
+    fi
+    
+    # 8. Speaches — the pinned models, the ones Open WebUI is configured to call.
+    # #3072: only with stts on; a box without the module has nothing to find.
+    case ",$(printf '%s' "${COMPOSE_PROFILES:-}" | tr -d ' ')," in
+        *,stts,*)
+            print_substep "Checking Speaches..."
+            local speaches_missing
+            if ! speaches_missing=$(razzfazz_speaches_missing_models); then
+                verify_check "Speaches: models installed" "fail" "Speaches did not answer"
+            elif [ -z "$speaches_missing" ]; then
+                verify_check "Speaches: STT + TTS models installed" "pass"
+            else
+                verify_check "Speaches: models installed" "fail" "missing: $(printf '%s' "$speaches_missing" | paste -sd, - | sed 's/,/, /g'); run: rzfz post-install --refresh"
+            fi
+            ;;
+    esac
+    
+    # 9. LightRAG — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -q "lightrag"; then
+        print_substep "Checking LightRAG..."
+        local lightrag_health
+        lightrag_health=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:${LIGHTRAG_PORT:-9621}/health" 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+        if [ "$lightrag_health" = "ready" ] || [ "$lightrag_health" = "healthy" ]; then
+            verify_check "LightRAG: healthy" "pass"
+        else
+            verify_check "LightRAG: healthy" "fail" "status=$lightrag_health"
+        fi
+        # #1486: healthy ≠ wired — compare the container with .env.
+        verify_rag_consumer_wiring lightrag LightRAG LIGHTRAG \
+            LLM_ENDPOINT:LLM_BINDING_HOST LLM_MODEL:LLM_MODEL \
+            EMBEDDING_ENDPOINT:EMBEDDING_BINDING_HOST EMBEDDING_MODEL:EMBEDDING_MODEL \
+            EMBEDDING_DIM:EMBEDDING_DIM
+        # #2149: wired ≠ served — the key must be accepted and the names must exist.
+        verify_consumer_models_served lightrag LightRAG LIGHTRAG LLM_MODEL EMBEDDING_MODEL
+    fi
+    
+    # 10. Cognee — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -q "cognee"; then
+        print_substep "Checking Cognee..."
+        local cognee_health
+        cognee_health=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:${COGNEE_PORT:-8000}/health" 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('health',''))" 2>/dev/null)
+        if [ "$cognee_health" = "healthy" ]; then
+            verify_check "Cognee: healthy" "pass"
+        else
+            verify_check "Cognee: healthy" "fail" "health=$cognee_health"
+        fi
+        # #1486: healthy ≠ wired — compare the container with .env.
+        verify_rag_consumer_wiring cognee Cognee COGNEE \
+            LLM_ENDPOINT:LLM_ENDPOINT LLM_MODEL:LLM_MODEL \
+            EMBEDDING_ENDPOINT:EMBEDDING_ENDPOINT EMBEDDING_MODEL:EMBEDDING_MODEL \
+            EMBEDDING_DIM:EMBEDDING_DIMENSIONS
+        # #1249: a healthy cognee with an EMPTY COGNEE_MCP_API_KEY still leaves
+        # every MCP agent without a memory backend — cognee-mcp reads that key
+        # as API_TOKEN. The mint step's "mcp registry: valid" line validates
+        # core/mcp/mcp-servers.yaml only, so a failed mint used to pass --verify
+        # in silence.
+        if [ -n "$(read_env_value "$ENV_FILE" COGNEE_MCP_API_KEY 2>/dev/null || true)" ]; then
+            verify_check "Cognee: cognee-mcp API key minted" "pass"
+        else
+            verify_check "Cognee: cognee-mcp API key minted" "fail" \
+                "COGNEE_MCP_API_KEY empty — cognee-mcp cannot authenticate to cognee; re-run 'rzfz post-install --refresh'"
+        fi
+    fi
+
+    # 10b. Apache Tika — health + smoke test (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "tika"; then
+        print_substep "Checking Apache Tika..."
+        local tika_version
+        tika_version=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:${TIKA_PORT:-9998}/tika" 2>/dev/null | head -1)
+        if [ -n "$tika_version" ]; then
+            verify_check "Tika: healthy (${tika_version:0:40})" "pass"
+        else
+            verify_check "Tika: healthy" "fail" "unreachable"
+        fi
+        # Functional smoke test: PUT plain text → expect text/plain extraction
+        local tika_smoke
+        tika_smoke=$(curl -sf --max-time 10 \
+            -X PUT "http://127.0.0.1:${TIKA_PORT:-9998}/tika" \
+            -H "Content-Type: text/plain" \
+            -H "Accept: text/plain" \
+            --data "Hello Tika smoke test" 2>/dev/null)
+        if [ -n "$tika_smoke" ]; then
+            verify_check "Tika: text extraction smoke test" "pass"
+        else
+            verify_check "Tika: text extraction smoke test" "fail" "no response"
+        fi
+    fi
+
+    # 10c. Docling — health + VLM config check (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "docling"; then
+        print_substep "Checking Docling..."
+        local docling_health
+        docling_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${DOCLING_PORT:-5001}/health" 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+        if [ "$docling_health" = "ok" ] || [ -n "$docling_health" ]; then
+            verify_check "Docling: healthy" "pass"
+        else
+            verify_check "Docling: healthy" "fail" "status=${docling_health:-unreachable}"
+        fi
+        # Confirm the container is up: /version returns 200. docling-serve's /version
+        # is COMPONENT-KEYED, e.g. {"docling-serve":"1.27.0","docling":"2.113.0",...} —
+        # there is no flat "version" key, so read the docling-serve component version.
+        local docling_version
+        docling_version=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:${DOCLING_PORT:-5001}/version" 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('docling-serve') or d.get('version') or '')" 2>/dev/null)
+        if [ -n "$docling_version" ]; then
+            verify_check "Docling: version endpoint (${docling_version})" "pass"
+        else
+            verify_check "Docling: version endpoint" "fail" "no response"
+        fi
+        # Confirm VLM configured: docling 2026.08 uses DOCLING_SERVE_DEFAULT_VLM_PRESET
+        # (superseded the pre-2026.08 ALLOWED_VLM_ENGINES env). Non-empty preset = ok.
+        local docling_vlm
+        docling_vlm=$(docker inspect docling 2>/dev/null | \
+            python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+env = d[0].get('Config',{}).get('Env',[])
+for e in env:
+    if 'DOCLING_SERVE_DEFAULT_VLM_PRESET' in e:
+        print(e.split('=',1)[-1])
+        break
+" 2>/dev/null)
+        if [ -n "$docling_vlm" ]; then
+            verify_check "Docling: VLM preset (${docling_vlm})" "pass"
+        else
+            verify_check "Docling: VLM preset" "fail" "DOCLING_SERVE_DEFAULT_VLM_PRESET not set"
+        fi
+    fi
+
+    # 10d. Presidio — health + analyzer smoke test (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "presidio"; then
+        print_substep "Checking Presidio..."
+        # Analyzer health
+        local analyzer_health
+        analyzer_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${PRESIDIO_ANALYZER_PORT:-5100}/health" 2>/dev/null)
+        if [ -n "$analyzer_health" ]; then
+            verify_check "Presidio Analyzer: healthy" "pass"
+        else
+            verify_check "Presidio Analyzer: healthy" "fail" "unreachable"
+        fi
+        # Anonymizer health
+        local anonymizer_health
+        anonymizer_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${PRESIDIO_ANONYMIZER_PORT:-5300}/health" 2>/dev/null)
+        if [ -n "$anonymizer_health" ]; then
+            verify_check "Presidio Anonymizer: healthy" "pass"
+        else
+            verify_check "Presidio Anonymizer: healthy" "fail" "unreachable"
+        fi
+        # Image Redactor health
+        local redactor_health
+        redactor_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${PRESIDIO_IMAGE_REDACTOR_PORT:-5200}/health" 2>/dev/null)
+        if [ -n "$redactor_health" ]; then
+            verify_check "Presidio Image Redactor: healthy" "pass"
+        else
+            verify_check "Presidio Image Redactor: healthy" "fail" "unreachable"
+        fi
+        # Analyzer smoke test: detect PERSON entity in sample text
+        local entity_count
+        entity_count=$(curl -sf --max-time 20 \
+            -X POST "http://127.0.0.1:${PRESIDIO_ANALYZER_PORT:-5100}/analyze" \
+            -H "Content-Type: application/json" \
+            -d '{"text":"My name is John Smith, call me at 212-555-0100","language":"en"}' \
+            2>/dev/null | \
+            python3 -c "import sys,json; r=json.load(sys.stdin); print(len(r))" 2>/dev/null)
+        if [ -n "$entity_count" ] && [ "$entity_count" -gt 0 ]; then
+            verify_check "Presidio Analyzer: entity detection ($entity_count entities)" "pass"
+        else
+            verify_check "Presidio Analyzer: entity detection" "fail" "count=${entity_count:-0}"
+        fi
+    fi
+
+    # 10e. Stirling-PDF — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "stirling-pdf"; then
+        print_substep "Checking Stirling-PDF..."
+        local stirling_health
+        stirling_health=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:${STIRLING_PDF_PORT:-8181}/api/v1/info/status" 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null)
+        if [ "$stirling_health" = "UP" ] || [ -n "$stirling_health" ]; then
+            verify_check "Stirling-PDF: healthy (status=${stirling_health})" "pass"
+        else
+            verify_check "Stirling-PDF: healthy" "fail" "status=${stirling_health:-unreachable}"
+        fi
+    fi
+
+    # 10f. Gotenberg — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "gotenberg"; then
+        print_substep "Checking Gotenberg..."
+        local gotenberg_health
+        gotenberg_health=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:${GOTENBERG_PORT:-3005}/health" 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null)
+        if [ "$gotenberg_health" = "up" ] || [ -n "$gotenberg_health" ]; then
+            verify_check "Gotenberg: healthy (status=${gotenberg_health})" "pass"
+        else
+            verify_check "Gotenberg: healthy" "fail" "unreachable — run: docker compose logs gotenberg"
+        fi
+    fi
+
+    # 10g. Paperclip — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "paperclip"; then
+        print_substep "Checking Paperclip..."
+        local paperclip_health
+        paperclip_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${PAPERCLIP_PORT:-3100}/api/health" 2>/dev/null)
+        if [ -n "$paperclip_health" ]; then
+            verify_check "Paperclip: healthy" "pass"
+        else
+            verify_check "Paperclip: healthy" "fail" "unreachable — run: docker compose logs paperclip"
+        fi
+    fi
+
+    # 10h. Moltis — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "moltis"; then
+        print_substep "Checking Moltis..."
+        local moltis_health
+        moltis_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${MOLTIS_PORT:-13131}/health" 2>/dev/null)
+        if [ -n "$moltis_health" ]; then
+            verify_check "Moltis: healthy" "pass"
+        else
+            verify_check "Moltis: healthy" "fail" "unreachable — run: docker compose logs moltis"
+        fi
+    fi
+
+    # 10i. Hermes Agent status page — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "hermes"; then
+        print_substep "Checking Hermes Agent..."
+        local hermes_health
+        hermes_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${HERMES_PORT:-3101}/health" 2>/dev/null)
+        if [ -n "$hermes_health" ]; then
+            verify_check "Hermes Agent: status page healthy" "pass"
+        else
+            verify_check "Hermes Agent: status page healthy" "fail" "unreachable — run: docker compose logs hermes-agent"
+        fi
+    fi
+
+    # 10j. Synapse + Element Web — health (only if matrix profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "matrix"; then
+        print_substep "Checking Synapse..."
+        local synapse_health
+        synapse_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:8008/_matrix/client/versions" 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('versions') else 'empty')" 2>/dev/null)
+        if [ "$synapse_health" = "ok" ]; then
+            verify_check "Synapse: Matrix client API healthy" "pass"
+        else
+            verify_check "Synapse: Matrix client API healthy" "fail" "unreachable — run: docker compose logs synapse"
+        fi
+        print_substep "Checking Element Web..."
+        local element_health
+        element_health=$(curl -sf --max-time 10 \
+            "http://127.0.0.1:8009/" 2>/dev/null | grep -c "Element" || true)
+        if [ "${element_health:-0}" -gt 0 ]; then
+            verify_check "Element Web: healthy" "pass"
+        else
+            verify_check "Element Web: healthy" "fail" "unreachable — run: docker compose logs element-web"
+        fi
+    fi
+
+    # 10k. Paperless-ngx — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "paperless-ngx"; then
+        print_substep "Checking Paperless-ngx..."
+        local paperless_health
+        paperless_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${PAPERLESS_PORT:-8001}/accounts/login/" 2>/dev/null | grep -c "Paperless" || true)
+        if [ "${paperless_health:-0}" -gt 0 ]; then
+            verify_check "Paperless-ngx: healthy" "pass"
+        else
+            verify_check "Paperless-ngx: healthy" "fail" "unreachable — run: docker compose logs paperless-ngx"
+        fi
+    fi
+
+    # 10l. Vaultwarden — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "vaultwarden"; then
+        print_substep "Checking Vaultwarden..."
+        local vaultwarden_health
+        vaultwarden_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${VAULTWARDEN_PORT:-8222}/alive" 2>/dev/null)
+        if [ -n "$vaultwarden_health" ]; then
+            verify_check "Vaultwarden: healthy" "pass"
+        else
+            verify_check "Vaultwarden: healthy" "fail" "unreachable — run: docker compose logs vaultwarden"
+        fi
+        # #3044: a mail host Vaultwarden cannot reach blocks every first master
+        # password. Shared verdict: scripts/lib.sh vaultwarden_smtp_verdict.
+        local vw_mail
+        vw_mail=$(vaultwarden_smtp_verdict "${VAULTWARDEN_SMTP_HOST:-}")
+        case "${vw_mail%%|*}" in
+            pass) verify_check "Vaultwarden: mail host reachable" "pass" ;;
+            fail) verify_check "Vaultwarden: mail host reachable" "fail" "${vw_mail#*|}" ;;
+            *)    print_info "${vw_mail#*|}" ;;
+        esac
+    fi
+
+    # 10m. Infisical — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "infisical"; then
+        print_substep "Checking Infisical..."
+        local infisical_health
+        infisical_health=$(curl -sf --max-time 15 \
+            "http://127.0.0.1:${INFISICAL_PORT:-8888}/api/status" 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('date') else 'empty')" 2>/dev/null)
+        if [ "$infisical_health" = "ok" ]; then
+            verify_check "Infisical: healthy" "pass"
+        else
+            verify_check "Infisical: healthy" "fail" "unreachable — run: docker compose logs infisical"
+        fi
+    fi
+
+    # 10n. Onyx — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "onyx"; then
+        print_substep "Checking Onyx..."
+        local onyx_health
+        onyx_health=$(docker exec onyx-api python -c \
+            "import urllib.request; urllib.request.urlopen('http://localhost:8080/health'); print('ok')" 2>/dev/null)
+        if [ "$onyx_health" = "ok" ]; then
+            verify_check "Onyx API: healthy" "pass"
+        else
+            verify_check "Onyx API: healthy" "fail" "unreachable — run: docker compose logs onyx-api"
+        fi
+    fi
+
+    # 10p. Coding Tools — health (only if profile enabled)
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "coding-tools"; then
+        print_substep "Checking Coding Tools..."
+        local coding_tools_health
+        coding_tools_health=$(docker exec coding-tools gsd --version 2>/dev/null)
+        if [ -n "$coding_tools_health" ]; then
+            verify_check "Coding Tools: gsd ${coding_tools_health} present" "pass"
+        else
+            verify_check "Coding Tools: gsd present" "fail" "gsd binary missing — run: docker compose logs coding-tools"
+        fi
+    fi
+
+    # 11. Authentik — health
+    # #2213: the authentik-server image ships neither curl nor wget, so the
+    # old `docker exec authentik-server curl …` failed with exec rc 127 on
+    # EVERY box and `2>/dev/null` turned "no probe binary" into "unreachable"
+    # — a false FAIL about a security-critical service, on every run of this
+    # suite (0.79, journey C, twice). Probe with the interpreter the image has,
+    # and keep the exec's own failure apart from the service's answer.
+    print_substep "Checking Authentik..."
+    local authentik_probe_rc=0 authentik_probe_out=""
+    authentik_probe_out=$(docker exec authentik-server python3 -c '
+import sys, urllib.request
+try:
+    with urllib.request.urlopen("http://localhost:9000/-/health/live/", timeout=10) as r:
+        print("HTTP", r.status)
+        sys.exit(0 if 200 <= r.status < 300 else 2)
+except Exception as e:
+    print("ERR", e)
+    sys.exit(2)
+' 2>&1) || authentik_probe_rc=$?
+    case "$authentik_probe_rc" in
+        0)   verify_check "Authentik: healthy" "pass" ;;
+        2)   verify_check "Authentik: healthy" "fail" "health endpoint answered: ${authentik_probe_out:-no response}" ;;
+        126|127)
+             verify_check "Authentik: healthy" "fail" "probe could not run inside authentik-server (exec rc ${authentik_probe_rc}: ${authentik_probe_out:-no interpreter}) — this is the probe, not the service (#2213)" ;;
+        *)   verify_check "Authentik: healthy" "fail" "probe failed (rc ${authentik_probe_rc}): ${authentik_probe_out:-container not running?}" ;;
+    esac
+
+    # 11b. Authentik — blueprint STATE, not reachability (#1370).
+    #
+    # A box with twelve broken blueprints passes the liveness check above. The
+    # failure has no other reporter: BlueprintInstance carries no error column,
+    # `git grep BlueprintInstance` over cli/ scripts/ core/ finds one comment
+    # and no reader, and the reason exists only in the worker log at apply time
+    # — where #1350's deadlock lines bury it. A blueprint in `error` means the
+    # module's Application and its policy bindings are missing, so the tile is
+    # gone and forward-auth 404s: a wiring defect, not a cosmetic one.
+    #
+    # `last_applied` decides how loud to be. Authentik re-applies periodically,
+    # so a row that errored SECONDS ago is very likely a window we ran into and
+    # will heal itself; one that has been in error for an hour is stuck.
+    _bp_check_authentik_blueprints
+
+    # 12. Supporting Containers
+    print_substep "Checking Supporting Containers..."
+    
+    if curl -sfk --max-time 5 "https://help.${MAIN_DOMAIN}/healthz" > /dev/null 2>&1; then
+        verify_check "Supporting: Help Center" "pass"
+    else
+        verify_check "Supporting: Help Center" "fail" "unreachable"
+    fi
+    
+    if curl -sfk --max-time 5 "https://license.${MAIN_DOMAIN}/healthz" > /dev/null 2>&1; then
+        verify_check "Supporting: Licenses" "pass"
+    else
+        verify_check "Supporting: Licenses" "fail" "unreachable"
+    fi
+    
+    # #22: setup.<domain> removed — its functions live in the Config Portal.
+    if curl -sfk --max-time 5 "https://backup.${MAIN_DOMAIN}/healthz" > /dev/null 2>&1; then
+        verify_check "Supporting: Backup UI" "pass"
+    else
+        verify_check "Supporting: Backup UI" "fail" "unreachable"
+    fi
+
+    if echo "${COMPOSE_PROFILES:-}" | grep -q "gitea"; then
+        if curl -sf --max-time 5 "http://127.0.0.1:${GITEA_HTTP_PORT:-3000}/api/healthz" > /dev/null 2>&1; then
+            verify_check "Supporting: Gitea" "pass"
+        else
+            verify_check "Supporting: Gitea" "fail" "unreachable"
+        fi
+    fi
+
+    # 13. Wazuh (#855) — one-shot exit codes, service health, and proof that
+    #     the upstream demo credential is rejected. No-ops when the opt-in
+    #     profile is disabled.
+    verify_wazuh
+
+    # 14. #1250a: the LLM Manager's embedded worker is REGISTERED, not merely
+    #     "enrolled". Read-only and independent of whether this run did the
+    #     enrolment, so a `--verify`-only run catches a box that silently
+    #     401-loops (the 0.91 clean-install defect). Without a worker row the
+    #     manager can place no model at all, so this is a FAIL, not a warning.
+    verify_llm_worker_enrollment
+
+    # 15. #1247: every razzfazz.init one-shot (the agent image builders, the
+    #     *-init bootstraps) exited 0. A non-zero exit means the artifact a
+    #     module needs was never built — the 0.91 clean install shipped a
+    #     moltis-image-builder at Exited(127) and every gate said "green".
+    verify_init_oneshots
+
+    # 9c. Worker bundle (#1406) — a stale bind-mounted inode is invisible until a
+    # thin node joins with a lib.sh that does not match its worker-join.sh.
+    verify_worker_bundle_current
+
+    # ── Report ────────────────────────────────────────────────────────
+    echo ""
+    echo -e "${BLUE}======================================================================${NC}"
+    echo -e "${BLUE}     Verification Report${NC}"
+    echo -e "${BLUE}======================================================================${NC}"
+    echo -e "$VERIFY_RESULTS"
+    echo -e "${BLUE}----------------------------------------------------------------------${NC}"
+    local total=$((VERIFY_PASS + VERIFY_FAIL))
+    if [ $VERIFY_FAIL -eq 0 ]; then
+        echo -e "  ${GREEN}All $total checks passed.${NC}"
+    else
+        echo -e "  ${GREEN}$VERIFY_PASS passed${NC}, ${RED}$VERIFY_FAIL failed${NC} (of $total)"
+    fi
+    echo -e "${BLUE}======================================================================${NC}"
+    echo ""
+    
+    set -e
+    return $VERIFY_FAIL
+}
+
+# ==============================================================================
+# CLI & Main
+# ==============================================================================
+print_help() {
+    echo "rzfz.ai Post-Install Provisioning Script"
+    echo ""
+    echo "Usage:"
+    echo "  $0 --preset standard|developer    Provision models and services"
+    echo "  $0 --refresh                      Idempotent re-config (DNS + API key)"
+    echo "  $0 --verify                       Run verification checks only"
+    echo "  $0 --preset standard --verify     Provision + verify"
+    echo "  $0 --help                         Show this help"
+    echo ""
+    echo "Modes:"
+    echo "  --preset PRESET     Model preset: 'standard' or 'developer'."
+    echo "                      DESTRUCTIVE on an existing stack: redeploys"
+    echo "                      default models, resets Open WebUI / Dify /"
+    echo "                      Gitea defaults to script-managed values."
+    echo "                      Refuses to run on a previously-initialised box"
+    echo "                      unless --force is also passed."
+    echo "  --refresh           IDEMPOTENT post-upgrade re-config: refreshes"
+    echo "                      /etc/hosts entries for any new module"
+    echo "                      subdomains and auto-provisions GPUSTACK_API_KEY"
+    echo "                      if it is empty/placeholder. Installs only what"
+    echo "                      is missing (default models, Speaches STT/TTS"
+    echo "                      models); does NOT touch operator-set defaults."
+    echo "                      This is what razzfazz-upgrade.sh's post-upgrade"
+    echo "                      reminder points at."
+    echo "  --verify            Read-only API + UI verification suite."
+    echo ""
+    echo "Options:"
+    echo "  --force             Allow --preset on an existing stack (operator"
+    echo "                      acknowledges destruction risk to non-default"
+    echo "                      models / Open WebUI / Dify / Gitea state)."
+    echo "  --allow-single-arch Publish the worker agent for this host's architecture only"
+    echo "                      when the other cannot be built (default: fail)."
+    echo "  --skip-models       Skip model deployment (configure services only)."
+    echo "                      Other --preset steps still run, so this still"
+    echo "                      requires --force on an existing stack."
+    echo "  --skip-dns          Skip /etc/hosts DNS setup (in --preset / --refresh)."
+    echo "  --skip-wait         Skip waiting for model downloads (deploy only)."
+    echo "  --reconcile-models  With --refresh / --preset on an LLM Manager box: apply"
+    echo "                      manifest changes (params/task) to existing standard-set"
+    echo "                      deployments (#1263). Without it, drift is only reported."
+    echo "  --accept-model-risk Deploy a model that carries a risk flag (e.g. the Qwen3.8"
+    echo "                      family, egress: denied-only) without asking. Without it"
+    echo "                      --preset in a terminal asks; every other run skips the"
+    echo "                      model. No shipped preset deploys a flagged model on its"
+    echo "                      own today. Same as RAZZFAZZ_ACCEPT_MODEL_RISK=1."
+    echo "  --debug             Enable verbose bash trace output (set -x)."
+    echo ""
+    echo "Presets:"
+    echo "  standard   qwen3.6 (default, always-on) + gemma4 (on-demand spare) + embeddings + reranker"
+    echo "  developer  qwen3.6 (default, always-on) + qwen3-coder-next (on-demand spare) + embeddings + reranker"
+    echo ""
+    echo "Prerequisites:"
+    echo "  - razzfazz-init.sh completed successfully"
+    echo "  - Stack is running: docker compose ps"
+    echo "  - Internet access for model downloads (--preset only)"
+}
+
+# Parse arguments
+PRESET=""
+DO_VERIFY=false
+DO_REFRESH=false
+ALLOW_SINGLE_ARCH=false
+DO_FORCE=false
+SKIP_MODELS=false
+SKIP_DNS=false
+SKIP_WAIT=false
+SKIP_WAIT_AUTO=false   # #2195: true only when we chose it, not the operator
+DO_RECONCILE_MODELS=false   # #1263: apply manifest drift to existing LLM Manager deployments
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --preset)
+            PRESET="$2"
+            if [[ "$PRESET" != "standard" && "$PRESET" != "developer" ]]; then
+                print_error "Invalid preset: $PRESET (must be 'standard' or 'developer')"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --verify)
+            DO_VERIFY=true
+            shift
+            ;;
+        --refresh)
+            DO_REFRESH=true
+            shift
+            ;;
+        --force)
+            DO_FORCE=true
+            shift
+            ;;
+        --skip-models)
+            SKIP_MODELS=true
+            shift
+            ;;
+        --allow-single-arch)
+            ALLOW_SINGLE_ARCH=true
+            shift
+            ;;
+        --skip-dns)
+            SKIP_DNS=true
+            shift
+            ;;
+        --skip-wait)
+            SKIP_WAIT=true
+            shift
+            ;;
+        --reconcile-models)
+            DO_RECONCILE_MODELS=true
+            shift
+            ;;
+        --accept-model-risk)
+            # #3394: deploy a risk-flagged model (e.g. the Qwen3.8 family)
+            # without asking; read by cli/lib-llm-manager-deploy.sh.
+            export RAZZFAZZ_ACCEPT_MODEL_RISK=1
+            shift
+            ;;
+        --debug)
+            DEBUG_MODE=true
+            # #2697: the trace prints every secret this run handles, and the
+            # run-log tee keeps it. Say so before it starts.
+            echo "[debug] bash trace on: the run log ${RZFZ_RUN_LOG:-} (mode 0600) will contain secret values. Delete it once you are done." >&2
+            set -x
+            shift
+            ;;
+        --help|-h)
+            print_help
+            exit 0
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            print_help
+            exit 1
+            ;;
+    esac
+done
+
+# Require at least one mode
+if [ -z "$PRESET" ] && [ "$DO_VERIFY" = false ] && [ "$DO_REFRESH" = false ]; then
+    print_error "Please specify --preset, --refresh, and/or --verify"
+    echo ""
+    print_help
+    exit 1
+fi
+
+# #3394: only an explicit model deploy (`--preset`) may ask the operator about
+# a risk-flagged model, and only from a terminal (cli/lib-llm-manager-deploy.sh
+# checks that). `--refresh` — what `rzfz upgrade` runs — and every other path
+# never stop at a question: they skip the model with one line unless
+# --accept-model-risk / RAZZFAZZ_ACCEPT_MODEL_RISK=1 is given.
+if [ -n "$PRESET" ]; then
+    export RAZZFAZZ_MODEL_RISK_MAY_ASK=1
+else
+    export RAZZFAZZ_MODEL_RISK_MAY_ASK=0
+fi
+
+# ==============================================================================
+# Main Execution
+# ==============================================================================
+echo -e "${BLUE}======================================================================${NC}"
+echo -e "${BLUE}     rzfz.ai Post-Install Provisioning${NC}"
+if [ -n "$PRESET" ]; then
+echo -e "${BLUE}     Preset: ${GREEN}${PRESET}${NC}"
+fi
+echo -e "${BLUE}======================================================================${NC}"
+
+# Load environment
+check_prerequisites
+load_env
+print_info "Domain: ${MAIN_DOMAIN:-NOT SET} | GPUStack port: ${GPUSTACK_PORT:-9090 (default)}"
+
+# #2840: before anything uses a stored admin password (Dify setup first), replace
+# one that fails the shared policy. A compliant password is never touched.
+if [ -n "$PRESET" ] || [ "$DO_REFRESH" = true ]; then
+    heal_noncompliant_admin_passwords || print_warning "Admin-password policy check reported a problem (see above)."
+fi
+# A delivery blob that no longer matches .env (the box was handed over with
+# set-admin-password by an older release) would make a factory reset restore an
+# outdated, possibly the internal install, password. Re-seal it; the upgrade runs
+# this refresh.
+if [ -n "$PRESET" ] || [ "$DO_REFRESH" = true ]; then
+    reseal_delivery_blob_if_stale ".env" || print_warning "Delivery credentials could not be re-sealed; run: rzfz set-admin-password --all"
+fi
+
+# #187: CPU boxes deploy models slowly (no GPU). Waiting for the downloads inline is
+# what made post-install appear to "hang" at "Updating .env with model configuration".
+# Default CPU installs to --skip-wait so models deploy in the background; the operator
+# can still force a blocking wait by not passing --skip-wait on a GPU box. HARDWARE is
+# populated by load_env above; SKIP_WAIT is the parsed flag (default false).
+_obs_fam=$(llm_observed_hardware_family 2>/dev/null || true)
+if { [ "$_obs_fam" = cpu ] || { [ -z "$_obs_fam" ] && [ "${HARDWARE:-}" = cpu ]; }; } && [ "$SKIP_WAIT" = false ]; then
+    SKIP_WAIT=true
+    # #2195: WHO chose the skip decides what happens afterwards. An operator who
+    # typed --skip-wait asked not to wait and keeps #1507 review finding 4's
+    # behaviour; a CPU box that got it by default asked for nothing, and its
+    # consumer wiring must still be repaired once the weights land.
+    SKIP_WAIT_AUTO=true
+    print_info "HARDWARE=cpu detected — defaulting to --skip-wait (models deploy in background)."
+fi
+
+# rc6.4: destructive-state guard. --preset re-deploys default models, resets
+# Open WebUI / Dify / Gitea defaults, and re-installs Dify plugins. On a
+# previously-initialised stack that's almost always destructive of operator
+# state the upgrade just preserved. Detect operator state up-front and
+# refuse to proceed without --force; --verify and --refresh stay safe.
+# Counts that can say "unknown" (rc 1) instead of a silent 0.
+_count_manager_deployments() {
+    local n
+    n=$(timeout 20 docker exec -i llm-manager python3 - 2>/dev/null <<'PY'
+import sys
+sys.path.insert(0, "/app")
+from app.db import session_scope
+from app.models import Deployment
+with session_scope() as s:
+    print(s.query(Deployment).count())
+PY
+    ) || return 1
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    echo "$n"
+}
+
+_count_gpustack_models() {
+    local key body n
+    key=$(read_env_value "$ENV_FILE" GPUSTACK_API_KEY)
+    { [ -n "$key" ] && [ "$key" != "your-gpustack-api-key-here" ]; } || return 1
+    # The key travels on stdin (curl -K -), never on argv.
+    body=$(printf 'header = "Authorization: Bearer %s"\n' "$key" \
+        | curl -fsS --max-time 5 -K - "http://127.0.0.1:${GPUSTACK_PORT:-9090}/v1/models" 2>/dev/null) || return 1
+    n=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); i=d.get('items', d.get('data', [])); print(len(i) if isinstance(i, list) else '')" <<<"$body" 2>/dev/null) || return 1
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    echo "$n"
+}
+
+# Returns 0 = refuse (state exists OR cannot be ruled out), 1 = proven fresh.
+# A backend whose profile is off holds nothing --preset could touch: a known 0.
+# "Unknown" is reserved for an installed backend that did not answer. The
+# LLM Manager count must always be READ when the manager is installed; the
+# fresh-init marker may stand in only for an unreadable GPUStack (the key is
+# minted inside the first preset), and it is consumed when it does.
+detect_existing_state() {
+    local indicators=() state_dir="${SCRIPT_DIR}/backups/state" mgr=0 gs=0 ind
+    local fresh="${state_dir}/fresh-init"
+
+    # BUG-1 (2026-05-16): an API key or the init marker alone is init
+    # bootstrap, not operator state; only deployed models count. The converse
+    # holds too (#2304): a count that could not be READ is not a zero.
+    if [ -f "${state_dir}/post-install-preset.done" ]; then
+        indicators+=("a --preset already completed on this box ($(head -n 1 "${state_dir}/post-install-preset.done" 2>/dev/null || true))")
+    fi
+    if _llm_manager_profile_active; then mgr=$(_count_manager_deployments) || mgr=""; fi
+    if _gpustack_profile_active; then gs=$(_count_gpustack_models) || gs=""; fi
+    if [ -n "$mgr" ] && [ "$mgr" -gt 0 ]; then
+        indicators+=("the LLM Manager already has ${mgr} deployment(s) - --preset would (re-)deploy the defaults alongside")
+    fi
+    if [ -n "$gs" ] && [ "$gs" -gt 0 ]; then
+        indicators+=("GPUStack already has ${gs} model(s) - --preset would (re-)deploy the defaults alongside")
+    fi
+    # Models exist: whatever init once said about this box is history.
+    if { [ -n "$mgr" ] && [ "$mgr" -gt 0 ]; } || { [ -n "$gs" ] && [ "$gs" -gt 0 ]; }; then
+        rm -f "$fresh"
+    fi
+    if [ ${#indicators[@]} -eq 0 ]; then
+        if [ "$mgr" = 0 ] && [ "$gs" = 0 ]; then
+            return 1
+        fi
+        if [ "$mgr" = 0 ] && [ -f "$fresh" ]; then
+            rm -f "$fresh"      # one guard pass per marker
+            return 1
+        fi
+        if [ -z "$mgr" ]; then
+            indicators+=("the LLM Manager did not answer, so its deployments could not be counted - start the stack and retry")
+        else
+            indicators+=("GPUStack did not answer and nothing proves this box is fresh")
+        fi
+    fi
+    print_warning "Detected existing operator state on this box:"
+    for ind in "${indicators[@]}"; do
+        print_info "  - $ind"
+    done
+    print_warning "What --preset would touch:"
+    print_info "  - LLM Manager / GPUStack: deploys the preset's models"
+    print_info "  - Open WebUI: default model selection, embedding, audio config reset to script defaults"
+    print_info "  - Dify: re-installs default plugins; resets configured model providers"
+    print_info "  - Gitea: resets admin user password to AUTHENTIK_BOOTSTRAP_PASSWORD"
+    print_info "  - Onyx: re-runs first-time provisioning"
+    return 0
+}
+
+# rc6.4: --refresh — idempotent post-upgrade safe re-config. Runs ONLY:
+#   - setup_local_dns (data-driven from .env *_DOMAIN keys; idempotent)
+#   - ensure_gpustack_api_key (only fires when key is empty/placeholder)
+# This is what razzfazz-upgrade.sh's post-upgrade reminder points operators
+# at after a stack-version bump that introduced new module subdomains.
+# Every image:tag the manifest defines, for the hardware class given ($1), plus
+# its legacy alias. Used by the build and by the publish step.
+_runner_images_for_hardware() {
+    local want="$1" row image dockerfile hw legacy args
+    while IFS=$'\037' read -r image dockerfile hw legacy args; do
+        [ -n "$image" ] || continue
+        [ "$hw" = "$want" ] || continue
+        printf '%s\n' "$image"
+    done < <(razzfazz_runner_manifest_rows "$SCRIPT_DIR" "$(razzfazz_runner_channels "${SCRIPT_DIR}/.env")" | tr '\t' '\037')
+}
+
+# #3403: the LLM Manager reads RAZZFAZZ_EXPERIMENTAL_RUNNER from its environment
+# (it refuses a deployment onto the experimental runner while it is off). The
+# documented switch is "set it in .env, then rzfz post-install --refresh", so the
+# refresh recreates the manager when the value it carries differs from .env —
+# the same shape as the GPU group ids for the worker agent below.
+sync_experimental_runner_flag_to_manager() {
+    local want cur
+    want="false"
+    razzfazz_experimental_runner_enabled "$ENV_FILE" && want="true"
+    _llm_manager_running || return 0
+    cur=$(docker inspect llm-manager --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^RAZZFAZZ_EXPERIMENTAL_RUNNER=//p' | head -1 || true)
+    case "$(printf '%s' "$cur" | tr '[:upper:]' '[:lower:]')" in true|1|yes|on) cur=true ;; *) cur=false ;; esac
+    [ "$cur" = "$want" ] && return 0
+    if RAZZFAZZ_EXPERIMENTAL_RUNNER="$want" docker compose up -d --no-deps --force-recreate llm-manager >/dev/null 2>&1; then
+        print_substep "llm-manager recreated with RAZZFAZZ_EXPERIMENTAL_RUNNER=${want} (#3403)."
+    else
+        print_warning "llm-manager recreate returned non-zero — it keeps RAZZFAZZ_EXPERIMENTAL_RUNNER=${cur} until it is recreated (#3403)."
+    fi
+    return 0
+}
+
+# ENGINE_GPU_GIDS-BEGIN
+# #2393: an AMD engine runs as nobody only with the host's video/render GIDs
+# (RAZZFAZZ_GPU_GROUP_GIDS) — it opens /dev/kfd and /dev/dri through them;
+# without them it stays root (capless, read-only). Idempotent: an operator's
+# value is never overwritten — `none` (the explicit opt-out) included. A host without a `render` group still yields
+# `video` — getent's non-zero exit is not the answer, its output is.
+# --recreate (the --refresh arm, i.e. `rzfz upgrade`): the running
+# llm-worker-agent reads the key from its environment, so it is recreated when
+# the value it carries differs from .env — handed to compose explicitly, as the
+# #1250 name repair does, so load_env's stale empty export cannot shadow it.
+ensure_engine_gpu_group_gids() {
+    [ "${HARDWARE:-$(read_env_value "$ENV_FILE" HARDWARE)}" = amd ] || return 0
+    local gids cur
+    gids=$(read_env_value "$ENV_FILE" RAZZFAZZ_GPU_GROUP_GIDS)
+    if [ -z "$gids" ]; then
+        gids=$(detect_engine_gpu_group_gids)
+        if [ -z "$gids" ]; then
+            print_warning "No video/render group on this host — AMD engines keep running as root (capless) (#2393)."
+            return 0
+        fi
+        update_env_value "$ENV_FILE" RAZZFAZZ_GPU_GROUP_GIDS "$gids"
+        print_substep "AMD engines run as nobody with GPU groups ${gids} (#2393)."
+    fi
+    export RAZZFAZZ_GPU_GROUP_GIDS="$gids"
+    [ "${1:-}" = --recreate ] || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-worker-agent || return 0
+    cur=$(docker inspect llm-worker-agent --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^RAZZFAZZ_GPU_GROUP_GIDS=//p' | head -1 || true)
+    [ "$cur" = "$gids" ] && return 0
+    if RAZZFAZZ_GPU_GROUP_GIDS="$gids" docker compose up -d --no-deps --force-recreate llm-worker-agent >/dev/null 2>&1; then
+        print_substep "llm-worker-agent recreated with RAZZFAZZ_GPU_GROUP_GIDS=${gids}; engines move to nobody at their next relaunch — rzfz upgrade does it at its end, or run: rzfz relaunch-engines"
+    else
+        print_warning "llm-worker-agent recreate returned non-zero — AMD engines stay root until it is recreated (#2393)."
+    fi
+    return 0
+}
+# ENGINE_GPU_GIDS-END
+
+refresh_llama_vulkan_runner() {
+    # rc6.7 #18 / rc6.8: build the local llama-* runner images if missing.
+    # Already triggered from razzfazz-init.sh (Step 7b) and razzfazz-
+    # upgrade.sh (Step 9b), but boxes that were init'd before those
+    # steps existed (or where the build failed silently in the past)
+    # still lack the images. Adding a third trigger here makes the
+    # operator's normal post-upgrade --refresh workflow self-heal.
+    # Idempotent: skipped if the image is already present.
+    #
+    # rc6.8: now covers all three runner images (vulkan / rocm / cpu),
+    # all of which bundle the llama-server-shim that translates GPUStack
+    # `--flag=value` backend_parameters into `--flag value`.
+    # #184 WS2b: building a runner image pulls a base image + apt → internet
+    # egress. On an air-gapped box these are loaded from the offline package.
+    if razzfazz_offline_skip "llama-runner image builds"; then
+        return 0
+    fi
+    # #1373: the images are consumed by the `llm` custom backends AND by the
+    # `llm-worker-agent` node-agent (its AMD/CPU defaults ARE these images).
+    # Gate on the shared consumer list; read the FILE, not the load_env export.
+    local _rl_profiles
+    _rl_profiles=$(read_env_value .env COMPOSE_PROFILES)
+    if ! razzfazz_runner_images_wanted "$_rl_profiles"; then
+        print_substep "No runner-image consumer profile active (one of: ${RAZZFAZZ_RUNNER_IMAGE_CONSUMER_PROFILES}) — skipping llama-runner image builds."
+        return 0
+    fi
+    local hw="${HARDWARE:-amd}"
+    # The build context is runners.yaml's build_context (the runners directory:
+    # the Dockerfiles COPY the shared shim from there).
+    local runners_ctx runners_dir
+    runners_ctx=$(razzfazz_runner_build_context "$SCRIPT_DIR")
+    runners_dir="${SCRIPT_DIR}/${runners_ctx}"
+    if [ ! -d "$runners_dir" ]; then
+        return 0
+    fi
+    _build_one() {
+        # $1 image:tag, $2 dockerfile (relative to runners_dir's parent),
+        # $3… build args (KEY=VALUE each). #628: the vulkan Dockerfile's
+        # LLAMA_CPP_TAG default moves with the current release — building an
+        # OLD tag without pinning the arg silently produces the NEW binary
+        # under the old tag (a rollback that isn't one). #3403: every arg is
+        # passed — a CUDA target pins LLAMA_CPP_TAG and LLAMA_CPP_COMMIT.
+        local img="$1" df="$2" a bargs=() bline=""
+        shift 2
+        for a in "$@"; do bargs+=(--build-arg "$a"); bline="${bline} --build-arg ${a}"; done
+        if docker image inspect "$img" >/dev/null 2>&1; then
+            return 0
+        fi
+        print_step "Building $img (llama-server-shim runner image)..."
+        if razzfazz_docker_build -t "$img" "${bargs[@]}" -f "${SCRIPT_DIR}/$df" "$runners_dir" 2>&1 | tail -5; then
+            print_success "$img built."
+        else
+            print_warning "$img build failed — models targeting the matching backend will fail to start."
+            print_info "  Re-run manually: docker build -t $img${bline} -f $df $runners_ctx"
+        fi
+    }
+    # #1516 (E5): driven by modules/llm/runners/runners.yaml. `nvidia`/`cuda`
+    # boxes build BOTH CUDA targets — sm_120 (RTX PRO 6000) and sm_121a (GB10):
+    # CUDA 12.8's nvcc does not know sm_121, so one image cannot serve both, and
+    # running the wrong one dies with "no kernel image is available for
+    # execution on the device" (measured on the GB10, 2026-09-05). Which of the
+    # two a node uses is decided on the node (#1517), not here.
+    local _hw_class
+    _hw_class=$(razzfazz_runner_hw_class "$hw")
+    local _rows _image _dockerfile _rhw _legacy _args _built_any=0
+    # #3403: US-delimited — an empty legacy field (the experimental targets)
+    # must not let the build args slide into it (see cli/init.sh Step 7b).
+    # #3403: the experimental runner only on a box that opted in.
+    _rows=$(razzfazz_runner_manifest_rows "$SCRIPT_DIR" "$(razzfazz_runner_channels "${SCRIPT_DIR}/.env")" | tr '\t' '\037')
+    if [ -n "$_rows" ]; then
+        while IFS=$'\037' read -r _image _dockerfile _rhw _legacy _args; do
+            [ -n "$_image" ] || continue
+            [ "$_rhw" = "$_hw_class" ] || continue
+            _build_one "$_image" "$_dockerfile" $_args
+            _built_any=1
+            # One cycle of back-compat: a box pinned to the old name via
+            # RAZZFAZZ_ENGINE_IMAGE_* must keep resolving locally.
+            if [ -n "$_legacy" ] && docker image inspect "$_image" >/dev/null 2>&1; then
+                docker tag "$_image" "$_legacy" >/dev/null 2>&1 || true
+            fi
+        done <<< "$_rows"
+    fi
+    if [ "$_built_any" = "0" ]; then
+        print_substep "No runner target for hardware '${_hw_class}' in modules/llm/runners/runners.yaml — nothing built."
+    fi
+}
+
+
+# #1472: publish the init-built runner images into the hub registry, so a thin
+# node that lacks one can pull `<hub>/runners/<image>` (node-agent
+# ensure_engine_image) instead of letting docker resolve the bare name against
+# docker.io (404 — measured on 0.175, and a public-registry reach #307 forbids).
+# Zot is reachable from THIS host at 127.0.0.1:${LLM_REGISTRY_PORT} (plain
+# HTTP; the hub's Basic auth sits at the Caddy edge, #571). Since #3302 it
+# serves anonymous reads only, so the pushes log in first. Idempotent: a push of an unchanged image is a no-op for Zot.
+# Self-gated: llm-registry profile off → nothing; image absent → skipped.
+RAZZFAZZ_RUNNER_REPO_PREFIX="runners"
+# #1438 (E2): the node-agent image itself is delivered the same way — a thin
+# node never builds it (compose.thin.yml has no build: block any more);
+# worker-join pulls <hub>/node/razzfazz-llm-worker-agent:latest at join time.
+RAZZFAZZ_NODE_REPO_PREFIX="node"
+# Also defined in scripts/lib.sh (package.sh needs it too); keep the two equal.
+RAZZFAZZ_PUBLISHED_NODE_IMAGES="razzfazz-llm-worker-agent:latest"
+# #1516 (E5): no hand-kept list any more — every target in
+# modules/llm/runners/runners.yaml is a publish candidate, and each is pushed
+# only if it is present locally. That is what makes #1497 impossible to repeat:
+# the list and the build read the same file. Legacy aliases are published too,
+# for one cycle, so a pinned box keeps resolving.
+_published_runner_images() {
+    local image dockerfile hw legacy args
+    while IFS=$'\037' read -r image dockerfile hw legacy args; do
+        [ -n "$image" ] || continue
+        printf '%s\n' "$image"
+        [ -n "$legacy" ] && printf '%s\n' "$legacy"
+    done < <(razzfazz_runner_manifest_rows "$SCRIPT_DIR" "$(razzfazz_runner_channels "${SCRIPT_DIR}/.env")" | tr '\t' '\037')
+}
+push_runner_images_to_registry() {
+    local _profiles
+    _profiles=$(read_env_value .env COMPOSE_PROFILES)
+    if ! printf '%s' "$_profiles" | tr ',' '\n' | grep -qx "llm-registry"; then
+        print_info "llm-registry profile not active — runner images stay local (nothing to publish)."
+        return 0
+    fi
+    local port registry i
+    port=$(read_env_value .env LLM_REGISTRY_PORT); port="${port:-8093}"
+    registry="127.0.0.1:${port}"
+    for i in 1 2 3 4 5 6; do
+        curl -fsS --max-time 5 "http://${registry}/v2/" >/dev/null 2>&1 && break
+        sleep 10
+    done
+    if ! curl -fsS --max-time 5 "http://${registry}/v2/" >/dev/null 2>&1; then
+        print_warning "Hub registry not reachable on http://${registry}/v2/ — runner images NOT published; thin nodes without a local runner cannot serve until the next --refresh (#1472)."
+        return 0
+    fi
+    # #3302: the registry refuses anonymous writes. Log in for this run
+    # (password on stdin) and out again after the last push below.
+    rzfz_registry_login "$registry" .env \
+        || print_warning "Could not log in to the hub registry (LLM_REGISTRY_WRITE_PASSWORD missing in .env?) — the pushes below will be refused; 'rzfz upgrade' generates the credential."
+    local _allow_single=0 refused=0 node_pushed=0 _single_now=0 _single_why=""
+    { [ "${ALLOW_SINGLE_ARCH:-false}" = true ] || [ "${RZFZ_ALLOW_SINGLE_ARCH:-}" = 1 ]; } && _allow_single=1
+    local img pushed=0 failed=0 missing_node=0 missing_runner=0 kind ref hw arch build host_arch foreign_arch
+    # #2530: the node images' release tag names the code that BUILT them — the
+    # checkout's VERSION file, not .env's RAZZFAZZ_VERSION, which lags the code
+    # from checkout until the upgrade's final stamp (#1593). A tag must never
+    # re-point an older release's tag at newer bits (that orphans the very
+    # rollback manifest it exists to keep), so on any doubt it is skipped;
+    # :latest is pushed as always.
+    local _release_tag="" _code_version _env_version _upgrade_to
+    _code_version=$(tr -d '[:space:]' 2>/dev/null < "${SCRIPT_DIR}/VERSION" || true)
+    _env_version=$(read_env_value .env RAZZFAZZ_VERSION)
+    _upgrade_to=$(read_env_value .env RAZZFAZZ_UPGRADE_IN_PROGRESS)
+    if [ -z "$_code_version" ]; then
+        print_warning "  No VERSION file in ${SCRIPT_DIR} — node images get no release tag this run (only :latest)."
+    elif [ -n "$_upgrade_to" ]; then
+        print_warning "  An upgrade to ${_upgrade_to} is still in progress (code VERSION=${_code_version}, .env RAZZFAZZ_VERSION=${_env_version:-<unset>}) — node images get no release tag this run (only :latest)."
+    elif [ "$_env_version" != "$_code_version" ]; then
+        print_warning "  Code VERSION=${_code_version} differs from .env RAZZFAZZ_VERSION=${_env_version:-<unset>} — node images get no release tag this run (only :latest)."
+    else
+        _release_tag="$_code_version"
+    fi
+    host_arch="$(rzfz_normalize_arch "$(uname -m)")"
+    # #2429: the same plan the packager uses (#1309/#2154) — every declared
+    # target, carried when present, NAMED when not. A hardware class with no
+    # runner in the hub fails at node-join time, on the new hardware, far from
+    # this master (a CPU master's hub once served AMD workers nothing at all).
+    # Legacy aliases come through as `carry` rows when present, as before.
+    while IFS=$'\t' read -r kind ref hw arch build; do
+        case "$kind" in
+            carry)
+                if docker tag "$ref" "${registry}/${RAZZFAZZ_RUNNER_REPO_PREFIX}/${ref}" >/dev/null 2>&1 \
+                   && docker push "${registry}/${RAZZFAZZ_RUNNER_REPO_PREFIX}/${ref}" >/dev/null 2>&1; then
+                    pushed=$((pushed + 1))
+                else
+                    failed=$((failed + 1))
+                    print_warning "  push of ${ref} to ${registry}/${RAZZFAZZ_RUNNER_REPO_PREFIX}/ failed (non-fatal)."
+                fi ;;
+            absent)
+                missing_runner=$((missing_runner + 1))
+                if [ "$arch" = "$host_arch" ]; then
+                    print_warning "  runner ${ref} (${hw}) is not on this master and could have been built here — a ${hw} worker joining this hub finds no runner (#2429). Build it: ${build}"
+                else
+                    print_warning "  runner ${ref} (${hw}, ${arch}) is not on this master; this ${host_arch:-unknown} host cannot build it — it needs a ${arch} builder (#2429)."
+                fi ;;
+        esac
+    done < <(razzfazz_runner_package_plan "$SCRIPT_DIR" "$(razzfazz_runner_channels "${SCRIPT_DIR}/.env")")
+    for img in $RAZZFAZZ_PUBLISHED_NODE_IMAGES; do
+        # rev-B (#1438 review befund 5): a missing node image was skipped in
+        # silence, the summary read "0 pushed", and a joining node then sent the
+        # operator back here — a loop, because this run publishes nothing again.
+        if ! docker image inspect "$img" >/dev/null 2>&1; then
+            missing_node=$((missing_node + 1))
+            print_warning "  ${img} is not on this master — nothing to publish. Build it first" \
+                          "(docker compose --profile llm-worker-agent build), then re-run --refresh;" \
+                          "a thin node cannot pull what the hub never received."
+            continue
+        fi
+        # #2898: a worker of the OTHER architecture (a GB10 is arm64, masters are
+        # mostly amd64) pulled the single-arch image and died with `exec format
+        # error`. Publish a manifest list over both variants when the foreign one
+        # is available (built here under emulation, or carried by the offline
+        # package); otherwise fall back to a single-arch push with the reason
+        # and the exact command already warned by the helper.
+        foreign_arch="$(rzfz_foreign_arch)"
+        # #2952: never publish an image under this release that was not built for
+        # it - the host-arch image must carry the code's own version.
+        local _host_v
+        _host_v="$(rzfz_image_version "$img" || true)"
+        if [ -n "$_code_version" ] && [ "$_host_v" != "$_code_version" ]; then
+            failed=$((failed + 1)); refused=1
+            print_error "  ${img} on this master is release ${_host_v:-<unlabelled>}, not ${_code_version} - NOT published. Rebuild it: docker compose --profile llm-worker-agent build"
+            continue
+        fi
+        # The same release can be built from different code (a rebuilt
+        # candidate): the image must carry this tree's build identity. An image
+        # without one was built by hand; it is published with a warning.
+        local _host_c _tree_c
+        _host_c="$(rzfz_image_build_context "$img" || true)"
+        _tree_c="$(rzfz_node_context_digest "$SCRIPT_DIR")"
+        if [ -n "$_tree_c" ] && [ -z "$_host_c" ]; then
+            print_warning "  ${img} on this master carries no build identity (it was built by hand or by an earlier release), so it cannot be checked against this tree's code. The next upgrade's image build adds it."
+        elif [ -n "$_tree_c" ] && [ "$_host_c" != "$_tree_c" ]; then
+            if razzfazz_is_offline 2>/dev/null; then
+                print_warning "  ${img} on this master was built from other code than this tree (build context ${_host_c}, this tree ${_tree_c}); this box is offline and cannot rebuild it, so it is published as it is."
+            else
+                failed=$((failed + 1)); refused=1
+                print_error "  ${img} on this master was built from other code than this tree (build context ${_host_c}, this tree ${_tree_c}) - NOT published. Rebuild it: RZFZ_NODE_AGENT_BUILD_CONTEXT=${_tree_c} docker compose --profile llm-worker-agent build llm-worker-agent"
+                continue
+            fi
+        fi
+        if rzfz_ensure_node_image_variant "$img" "$foreign_arch" "$SCRIPT_DIR" "$_code_version"; then
+            local _base="${registry}/${RAZZFAZZ_NODE_REPO_PREFIX}/${img%:*}" _t _ok=1
+            for _t in "${img##*:}" ${_release_tag:+"$_release_tag"}; do
+                if docker tag "$img" "${_base}:${_t}-${host_arch}" >/dev/null 2>&1 \
+                   && docker push "${_base}:${_t}-${host_arch}" >/dev/null 2>&1 \
+                   && docker tag "$(rzfz_node_image_variant_ref "$img" "$foreign_arch")" "${_base}:${_t}-${foreign_arch}" >/dev/null 2>&1 \
+                   && docker push "${_base}:${_t}-${foreign_arch}" >/dev/null 2>&1 \
+                   && rzfz_registry_manifest_list "${_base}:${_t}" "${_base}:${_t}-${host_arch}" "${_base}:${_t}-${foreign_arch}"; then
+                    :
+                else
+                    _ok=0
+                    print_warning "  multi-arch manifest ${_base}:${_t} (${host_arch}+${foreign_arch}) was not published (non-fatal)."
+                fi
+            done
+            if [ "$_ok" = 1 ]; then
+                pushed=$((pushed + 1)); node_pushed=$((node_pushed + 1))
+                print_substep "  ${img}: published for ${host_arch} + ${foreign_arch}."
+                continue
+            fi
+        fi
+        # #2952: the other architecture could not be built in this run. Claiming
+        # both, or leaving the hub's older list in place, is what shipped a stale
+        # arm64 agent; so this is a failure unless the operator accepts one arch.
+        # #3016: an OFFLINE master cannot build the other architecture at all; it can
+        # only have it from the package. When the package does not carry it, failing
+        # here failed every first boot from such a stick while every service ran.
+        # Publish this architecture with the consequence named instead; online
+        # masters keep the #2952 refusal (they could build it).
+        if [ "$_allow_single" != 1 ] && razzfazz_is_offline 2>/dev/null; then
+            _single_now=1
+            _single_why="offline box; the installed package does not carry the ${foreign_arch} variant"
+            print_warning "  ${img}: this box is offline and the installed package does not carry the ${foreign_arch} variant for ${_code_version:-this release} - publishing ${host_arch} only. ${foreign_arch} worker nodes (e.g. NVIDIA GB10) can join once a ${foreign_arch} worker agent for this release is published: install a package that carries it, or run 'rzfz post-install --refresh' on this box while it is online with ${foreign_arch} emulation."
+        elif [ "$_allow_single" != 1 ]; then
+            failed=$((failed + 1)); refused=1
+            print_error "  ${img}: the ${foreign_arch} variant for ${_code_version:-this release} is not available, so NOTHING was published for it (the hub keeps whatever it had - run scripts/verify-hub-images.sh). Enable ${foreign_arch} emulation or build it (commands above), then re-run --refresh; or pass --allow-single-arch to publish ${host_arch} only."
+            continue
+        fi
+        if docker tag "$img" "${registry}/${RAZZFAZZ_NODE_REPO_PREFIX}/${img}" >/dev/null 2>&1 \
+           && docker push "${registry}/${RAZZFAZZ_NODE_REPO_PREFIX}/${img}" >/dev/null 2>&1; then
+            pushed=$((pushed + 1)); node_pushed=$((node_pushed + 1))
+            print_warning "  ${img} was published for ${host_arch} ONLY (${_single_why:---allow-single-arch}) - ${foreign_arch} workers cannot run it."
+            # #2530: a release tag next to :latest - the hub's rollback source
+            # once :latest moves on (a worker's old manifest was 404 on the hub
+            # after a re-push of :latest). Empty _release_tag = skipped, see above.
+            if [ -n "$_release_tag" ]; then
+                docker tag "$img" "${registry}/${RAZZFAZZ_NODE_REPO_PREFIX}/${img%:*}:${_release_tag}" >/dev/null 2>&1 \
+                  && docker push "${registry}/${RAZZFAZZ_NODE_REPO_PREFIX}/${img%:*}:${_release_tag}" >/dev/null 2>&1 \
+                  || print_warning "  release tag ${_release_tag} of ${img} not pushed (non-fatal)."
+            fi
+        else
+            failed=$((failed + 1))
+            print_warning "  push of ${img} to ${registry}/${RAZZFAZZ_NODE_REPO_PREFIX}/ failed (non-fatal)."
+        fi
+    done
+    # #2952: read back what the hub now serves - every architecture of every tag
+    # written above must carry THIS release, whatever the logic above believed.
+    if [ -n "$_code_version" ] && [ "$refused" = 0 ]; then
+        local _vt _vimg _vargs
+        _vargs=(--registry "http://${registry}" --expect "$_code_version")
+        { [ "$_allow_single" = 1 ] || [ "$_single_now" = 1 ]; } && _vargs+=(--allow-single-arch)
+        for _vt in ${_release_tag:+"$_release_tag"} latest; do
+            for _vimg in $RAZZFAZZ_PUBLISHED_NODE_IMAGES; do
+                [ "$node_pushed" -gt 0 ] || continue
+                if ! bash "${RZFZ_VERIFY_HUB_IMAGES:-${SCRIPT_DIR}/scripts/verify-hub-images.sh}" "$_vt" "${_vargs[@]}" --image "${_vimg%:*}" >&2; then
+                    failed=$((failed + 1)); refused=1
+                    print_error "  the hub does not serve ${_vimg%:*}:${_vt} as release ${_code_version} for every architecture (see above)."
+                fi
+            done
+        done
+    fi
+    rzfz_registry_logout "$registry"
+    if [ "$refused" = 1 ]; then
+        print_error "Node image publish FAILED: ${failed} problem(s). The hub is not guaranteed to serve this release's agent for every architecture."
+        return 1
+    fi
+    print_success "Runner + node images published to the hub registry (${RAZZFAZZ_RUNNER_REPO_PREFIX}/…, ${RAZZFAZZ_NODE_REPO_PREFIX}/…): ${pushed} pushed, ${failed} failed$( [ "$missing_runner" -gt 0 ] && printf ', %s declared runner target(s) absent' "$missing_runner")$( [ "$missing_node" -gt 0 ] && printf ', %s node image(s) absent' "$missing_node")."
+}
+
+
+prepull_agent_manager_images() {
+    # #36 (pre-pull all module images, #120 principle): make the agent-manager-
+    # offered EXPERIMENTAL agents actually provisionable out of the box.
+    #
+    # The agent-manager (agents profile) offers paperclip in its catalog
+    # regardless of whether the `paperclip` COMPOSE_PROFILE is on — it spawns
+    # per-user containers directly via the docker socket. But
+    # razzfazz-stack-paperclip is a catalog-only image name (built by the
+    # paperclip-image helper in modules/agents/compose.yml, but only when a
+    # `docker compose build` runs for the agents profile), so it is NEVER
+    # covered by `docker compose pull`. Without this the FIRST time a user
+    # provisions paperclip they hit ImageNotFound → the `_friendly_launch_error`
+    # "isn't available on this box yet" dead-end. Build here so the offer
+    # matches reality.
+    #
+    # Gated on the `agents` profile (that's what enables the agent-manager),
+    # NOT on paperclip. Idempotent: skips an image already present.
+    if ! echo ",${COMPOSE_PROFILES:-}," | grep -q ",agents,"; then
+        return 0
+    fi
+
+    # #184 WS2b: this function `docker build`s paperclip → base-image egress. On
+    # an air-gapped box the image is loaded from the offline package; skip the
+    # network fetch here.
+    if razzfazz_offline_skip "agent-manager image build (paperclip)"; then
+        return 0
+    fi
+
+    # Paperclip: catalog-named image built by the paperclip-image helper. Build
+    # if missing (registry pull would 404 — it's a local build).
+    if docker image inspect "razzfazz-stack-paperclip:latest" >/dev/null 2>&1; then
+        print_substep "Paperclip image already present (razzfazz-stack-paperclip:latest)."
+    else
+        print_step "Building Paperclip image (razzfazz-stack-paperclip:latest)..."
+        local pc_tag
+        pc_tag=$(read_env_value .env PAPERCLIP_VERSION 2>/dev/null)
+        pc_tag="${pc_tag:-v2026.609.0}"
+        if razzfazz_docker_build --build-arg "PAPERCLIP_TAG=${pc_tag}" \
+                -t razzfazz-stack-paperclip:latest \
+                "${SCRIPT_DIR}/modules/apps/paperclip" 2>&1 | tail -5; then
+            print_success "Paperclip image built (${pc_tag})."
+        else
+            print_warning "Paperclip build failed — provisioning it will fall back to the friendly 'not available' error until built."
+            print_info "  Re-run manually: docker build --build-arg PAPERCLIP_TAG=${pc_tag} -t razzfazz-stack-paperclip:latest modules/apps/paperclip"
+        fi
+    fi
+}
+
+
+# #2745: after --refresh rebuilds images, recreate EXACTLY the existing containers whose
+# image changed: the rebuilt services plus any service sharing a rebuilt image ref
+# (agent-docker-guard shares agent-manager's). Untouched services and services that
+# have no container (disabled modules) are left alone. Failures are non-fatal.
+_recreate_after_rebuild() {
+    local profiles="$1" svcs="$2" refs="$3"
+    [ -n "$svcs" ] || return 0
+    local want=" ${svcs} " r cref s i existing
+    local -a crefs=()
+    local IFS_SAVE="$IFS"
+    IFS=',' read -r -a _refs <<< "$refs"
+    for r in "${_refs[@]}"; do [ -n "$r" ] && crefs+=("$(razzfazz_canonical_image_ref "$r")"); done
+    while IFS=$'\t' read -r s i; do
+        [ -n "$s" ] && [ -n "$i" ] || continue
+        cref="$(razzfazz_canonical_image_ref "$i")"
+        for r in "${crefs[@]}"; do
+            [ "$cref" = "$r" ] && { case "$want" in *" $s "*) ;; *) want="${want}${s} " ;; esac; break; }
+        done
+    done < <(COMPOSE_PROFILES="$profiles" docker compose config --format json 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for n,v in (d.get("services") or {}).items():
+    if v.get("image"): print(n+"\t"+v["image"])' 2>/dev/null)
+    # The ALL-profiles set ($profiles) is a BUILD-time view, right for mapping image ->
+    # service and nothing else. `up` bakes COMPOSE_PROFILES into the recreated container's
+    # environment, so it must carry the box's ACTIVE set from .env — else the start
+    # portal lists tiles for disabled modules (#2745 follow-up).
+    local active
+    active="$(read_env_value "$ENV_FILE" COMPOSE_PROFILES 2>/dev/null || true)"
+    [ -n "$active" ] || active="${COMPOSE_PROFILES:-}"
+    existing=" $(COMPOSE_PROFILES="$active" docker compose ps --all --services 2>/dev/null | tr '\n' ' ') "
+    local -a todo=()
+    for s in $want; do case "$existing" in *" $s "*) todo+=("$s") ;; esac; done
+    [ "${#todo[@]}" -gt 0 ] || return 0
+    print_substep "Recreating ${#todo[@]} container(s) on a rebuilt image (#2745): ${todo[*]}"
+    if COMPOSE_PROFILES="$active" docker compose up -d --no-deps --force-recreate "${todo[@]}" >/dev/null 2>&1; then
+        print_success "Recreated: ${todo[*]}"
+    else
+        print_warning "Recreate failed (non-fatal). Run: docker compose up -d --no-deps --force-recreate ${todo[*]}"
+    fi
+}
+
+prebuild_all_custom_images() {
+    # Issue A (ga.1) — pre-build EVERY custom-build (build:) module image now, so a
+    # later module-enable never triggers a LIVE build on the box. init's
+    # `build --parallel` + `pull` only cover the profiles active AT init (single-box:
+    # chat,dify,llm-legacy,monitor,searxng,stts,gotenberg,gitea), so cognee / agents /
+    # mcp / paperclip — and dify-web / openwebui-seed when their profile was off at
+    # init — have NO local image. The Config-portal enable path
+    # (core/config/.../apply_manager.py: `docker compose up -d --no-deps
+    # --force-recreate <svc>`, no pre-pull, no image-presence check) then does a live
+    # `docker compose build` → base-image pull + apt/pip/npm → HTTP 403 "Request
+    # forbidden by administrative rules" on egress-restricted / air-gapped boxes.
+    # Building them HERE (same window init used, egress still open) makes every later
+    # enable instant + offline-safe. #36 / #120.
+    #
+    # Idempotent: skips any image already built (the active-profile images built at
+    # init are no-ops). Best-effort PER image — one failing optional build warns +
+    # continues, never aborts post-install (project_postinstall_set_e_abort_pattern).
+    # gpustack*/model-sync* are excluded: HARDWARE-specific llm-runtime images, built
+    # at init for the active llm profile; the heavy inactive variants (e.g.
+    # gpustack:vulkan on a CPU box) are out of scope for the enable-403 class.
+    print_step "Pre-building custom module images (so later module-enable is offline-safe)..."
+
+    # #184 WS2b: a `docker compose build` pulls base images + apt/pip/npm →
+    # internet egress. On an air-gapped box every custom image is loaded from the
+    # offline package, so there is nothing to pre-build here — skip and rely on
+    # 'rzfz verify-images' to confirm the loaded set is complete.
+    if razzfazz_offline_skip "custom module-image pre-build (loaded from the offline package)"; then
+        return 0
+    fi
+
+    # The FULL custom-build image set — and the profile set used to render it —
+    # come from the SHARED source-of-truth module
+    # core/config/app/services/build_preflight.py, the SAME code the Config-Portal
+    # module-enable pre-flight (apply_manager.py) uses to decide "which images
+    # must exist". Deriving both from ONE module means the pre-build set and the
+    # enable-time check can never drift — a module the pre-flight demands but the
+    # pre-build skipped is exactly the #174/#184 enable-403 (the ga.1
+    # razzfazz-mcp-manager / cognee regression). The module:
+    #   • drops the three llm-runtime profiles (llm / llm-legacy / llm-cpu) whose
+    #     shared gpustack/model-sync `container_name` would abort `compose config`
+    #     → an empty enumeration → NOTHING pre-built;
+    #   • excludes gpustack*/model-sync* (HARDWARE-specific, built at init for the
+    #     ACTIVE llm profile);
+    #   • resolves the derived `<project>-<service>` image name for build services
+    #     with no explicit `image:` (cognee → razzfazz-stack-cognee, etc.), so the
+    #     rows carry the REAL ref the present-check needs.
+    # Every docker call it makes is a client-side compose parse or an IMAGES-endpoint
+    # read (no /build), so it is safe to run here. #36 / #120 / #174 / #184.
+    local preflight="${SCRIPT_DIR}/core/config/app/services/build_preflight.py"
+    if [ ! -f "$preflight" ]; then
+        print_warning "Shared build-image enumerator not found ($preflight) — skipping custom-image pre-build."
+        print_info "  Module-enable may trigger a live build on egress-restricted boxes; re-run later: rzfz post-install --refresh"
+        return 0
+    fi
+
+    # Profile set to render/build with (all profiles minus the llm-runtime trio).
+    local all_profiles
+    all_profiles=$(python3 "$preflight" --stack-root "$SCRIPT_DIR" --build-profiles 2>/dev/null)
+    if [ -z "$all_profiles" ]; then
+        print_warning "Could not list compose profiles — skipping custom-image pre-build."
+        print_info "  Module-enable may trigger a live build on egress-restricted boxes; re-run later: rzfz post-install --refresh"
+        return 0
+    fi
+
+    # (service<TAB>resolved-image) for EVERY custom-build service across all
+    # profiles — the full set apply_manager's pre-flight demands.
+    local rows
+    rows=$(python3 "$preflight" --stack-root "$SCRIPT_DIR" --all-build-images 2>/dev/null)
+    if [ -z "$rows" ]; then
+        print_warning "Could not enumerate build services (docker compose config failed?) — skipping pre-build."
+        print_info "  Module-enable may trigger a live build on egress-restricted boxes; re-run later: rzfz post-install --refresh"
+        return 0
+    fi
+
+    # #184 WS2a: strip the no-build overlay so `docker compose build <svc>` below
+    # actually builds (the overlay neutralises `build:`; this is the explicit
+    # pre-build path that must keep the build: contexts). No-op pre-#184.
+    local _build_cf; _build_cf="$(compose_file_for_build)"
+    # #2006 part 2: "present" used to be the skip rule — and a present image can be
+    # nine days older than the Dockerfile fix (0.175, #2105), or carry the right
+    # tag from a different tree. Ask the provenance verdicts ONCE for the whole
+    # set and skip ONLY what is this tree's build (or the package's build of the
+    # same context). Stale images are rebuilt; a missing helper falls back to
+    # the presence rule and says so.
+    local verdicts; verdicts="$(razzfazz_custom_image_verdicts "$all_profiles")" || verdicts=""
+    [ -n "$verdicts" ] || print_warning "  Provenance verdicts unavailable — falling back to the presence rule (a present image is skipped even if it predates this tree; #2006)."
+    local built=0 present=0 failed=0 stale=0 svc img verdict detail built_refs="" built_svcs=""
+    # #2560: each build below hides its output; name the bound it runs under.
+    print_substep "Build bounds (#2560): $(razzfazz_build_jobs) job(s) inside each build, one service per build."
+    while IFS=$'\t' read -r svc img; do
+        [ -z "$svc" ] && continue
+        verdict=""; detail=""
+        if [ -n "$img" ] && [ -n "$verdicts" ]; then
+            local vref; vref="$(razzfazz_canonical_image_ref "$img")"   # #2659: verdicts are keyed on name:tag
+            # #2745: rows are per SERVICE; a no-build service sharing the image ("pulled
+            # present") must never mask the build service's row. Prefer the 'custom' row.
+            local _row
+            _row="$(printf '%s\n' "$verdicts" | awk -F'\t' -v r="$vref" '$1==r && $2=="custom"{print; found=1; exit} $1==r && first==""{first=$0} END{if(!found && first!="")print first}')"
+            verdict="$(printf '%s\n' "$_row" | awk -F'\t' '{print $3}')"
+            detail="$(printf '%s\n' "$_row" | awk -F'\t' '{print $4}')"
+        fi
+        case "$verdict" in
+            this-build|package-build|unknown)
+                # unknown = present, digest not computable (no git) — presence is
+                # all that can be known there; the verdict says so, not hidden.
+                present=$((present + 1)); continue ;;
+            stale)
+                # #2566: compare against the RUNNING container, not only the tag.
+                if razzfazz_refresh_keeps_running_build "$svc" "$img" "$all_profiles"; then
+                    print_substep "Keeping ${svc} (${img}): its running container already runs this tree's build."
+                    present=$((present + 1)); continue
+                fi
+                print_substep "Rebuilding ${svc} (${img}) — present but NOT this tree's build: ${detail}"
+                stale=$((stale + 1)) ;;
+            missing)
+                # #2566: only the local tag is gone (a prune) while the hub tag
+                # keeps the recorded build: put the name back, then re-judge it
+                # — a restored id can still be stale by its build context.
+                if [ -n "$img" ] && razzfazz_retag_from_hub "$img"; then
+                    verdict="$(razzfazz_custom_image_verdict_of "$all_profiles" "$img")"
+                    case "$verdict" in
+                        this-build|package-build|unknown)
+                            print_substep "Re-tagged ${svc} (${img}) from its hub tag — this tree's build, not rebuilt."
+                            present=$((present + 1)); continue ;;
+                    esac
+                    print_substep "Re-tagged ${svc} (${img}) from its hub tag, but it is ${verdict:-unverifiable} — rebuilding."
+                fi ;;
+            *)
+                # No verdict for this image (helper unavailable, or the image is
+                # not in the render): the old presence rule.
+                if [ -n "$img" ] && docker image inspect "$img" >/dev/null 2>&1; then
+                    present=$((present + 1)); continue
+                fi ;;
+        esac
+        print_substep "Building ${svc}${img:+ ($img)}..."
+        if COMPOSE_FILE="$_build_cf" COMPOSE_PROFILES="$all_profiles" razzfazz_compose_build "$svc" >/dev/null 2>&1; then
+            print_success "Built ${svc}."
+            built=$((built + 1))
+            [ -z "$img" ] || built_refs="${built_refs:+${built_refs},}${img}"
+            built_svcs="${built_svcs:+${built_svcs} }${svc}"
+        else
+            print_warning "Build of '${svc}' failed (non-fatal) — enabling it later may trigger a live build. Re-run (memory-bounded): rzfz post-install --refresh"
+            failed=$((failed + 1))
+        fi
+    done <<< "$rows"
+    # #2006 part 2: record what this pass built so the next init/post-install can
+    # tell this tree's images from adopted ones. #2659: ONLY what it built — a
+    # skipped or failed image keeps its record.
+    razzfazz_record_custom_image_builds "$all_profiles" built "" "$built_refs"
+    # #2745: a rebuilt image changes nothing for a container that is already running.
+    _recreate_after_rebuild "$all_profiles" "$built_svcs" "$built_refs"
+
+    # #433: a run with failures must not end on a green check mark.
+    if [ "$failed" -gt 0 ]; then
+        print_warning "Custom-image pre-build finished WITH FAILURES (built=$built of which stale-rebuilt=$stale, already-this-tree=$present, failed=$failed) — enabling an affected module later may trigger a live build."
+    else
+        print_success "Custom-image pre-build done (built=$built of which stale-rebuilt=$stale, already-this-tree=$present, failed=$failed)."
+    fi
+}
+
+
+# Issue B (ga.1) PRIMARY fix — "OWUI shows 0 models".
+# OpenWebUI runs with ENABLE_PERSISTENT_CONFIG (modules/chat/compose.yml), so the
+# OpenAI connection (base URL + OPENAI_API_KEYS) is read from env ONLY on the
+# container's FIRST boot and thereafter lives in the `config` table (openwebui_db).
+# That first boot was during `rzfz init`, when .env still held the placeholder
+# GPUSTACK_API_KEY — so OWUI's persisted connection carries the DEAD placeholder
+# key, can't auth to gpustack (401 on /v1-openai/models) and shows 0 models. NO
+# .env edit or plain container recreate fixes it: the persisted DB value wins over
+# env. We rewrite the placeholder → the REAL key ensure_gpustack_api_key wrote,
+# directly in the persisted JSON, so the openwebui recreate in Step 8 reloads a
+# working connection. This is the fix that actually makes models appear. Idempotent
+# (the LIKE guard makes it a no-op once the placeholder is gone); best-effort.
+_owui_fix_persisted_gpustack_key() {
+    # #1250b: GPUStack-only by construction — the placeholder it rewrites is a
+    # GPUStack key, and a Manager box's OWUI connection is reconciled by
+    # scripts/owui_config_reconcile.py (#1185) instead. Without this gate a
+    # clean Manager install printed "live GPUStack key not available yet —
+    # skipping" as a WARNING for something it will never have.
+    _gpustack_profile_active || return 0
+    local placeholder="gpustack_CHANGEME_AFTER_FIRST_START" real_key
+    real_key=$(read_env_value "$ENV_FILE" GPUSTACK_API_KEY)
+    if [ -z "$real_key" ] || [ "$real_key" = "$placeholder" ]; then
+        print_warning "OWUI key-fix: live $(_llm_backend_display_name) key not available yet — skipping persisted-key rewrite."
+        return 0
+    fi
+    local db="${OPENWEBUI_DB:-openwebui_db}" pguser="${POSTGRES_USER:-docker}"
+    # OWUI's `config` table schema differs by version:
+    #   • ≤0.9.x  — a SINGLE row with a `data` json/jsonb column holding the whole
+    #               config tree (openai.api_keys[] etc. nested inside `data`).
+    #   • 0.10.x  — a KEY-VALUE table: columns `key` (text) + `value` (json), one
+    #               row per dotted config path (`openai.api_keys`, plus a nested
+    #               `openai` blob). The placeholder lives in the flattened
+    #               `openai.api_keys` row, which OWUI reads on boot — the admin-API
+    #               `/api/v1/configs/import` only rewrites the nested `openai` blob,
+    #               NOT the flattened leaf, so it does NOT clear the placeholder.
+    # Detect which schema is present and rewrite the placeholder in-place in EVERY
+    # row that still carries it (covers openai.api_keys[], api_configs.*, and the
+    # RAG openai/reranker keys — all seeded from the same placeholder). ::text
+    # round-trip is shape-agnostic; psql -v :'…' quoting is injection-safe.
+    #
+    # ga.1 iter4 ROOT-CAUSE FIX: the UPDATE below MUST be fed on STDIN (here-string),
+    # NOT via `-c`. psql performs `:'var'` client-side interpolation only when the
+    # SQL is read from a file or stdin — with `-c` the `:'ph'`/`:'key'` tokens reach
+    # the server verbatim and it errors "syntax error at or near :". The prior `-c`
+    # form silently failed (its output is swallowed by `> /dev/null 2>&1`), so the
+    # placeholder in the flattened `openai.api_keys` leaf was NEVER rewritten and
+    # OWUI kept showing 0 gpustack models (qwen3.6 absent) even after this fix
+    # "ran". Same constraint cli/lib-set-password.sh documents at its :'em' UPDATE.
+    local data_col value_col
+    data_col=$(docker exec postgres psql -U "$pguser" -d "$db" -tAc \
+        "SELECT data_type FROM information_schema.columns WHERE table_name='config' AND column_name='data';" \
+        2>/dev/null | tr -d '[:space:]')
+    value_col=$(docker exec postgres psql -U "$pguser" -d "$db" -tAc \
+        "SELECT data_type FROM information_schema.columns WHERE table_name='config' AND column_name='value';" \
+        2>/dev/null | tr -d '[:space:]')
+
+    local target_col target_type
+    if [ "$data_col" = "json" ] || [ "$data_col" = "jsonb" ]; then
+        target_col="data";  target_type="$data_col"           # ≤0.9.x single-row
+    elif [ "$value_col" = "json" ] || [ "$value_col" = "jsonb" ]; then
+        target_col="value"; target_type="$value_col"          # 0.10.x key-value
+    else
+        print_warning "OWUI key-fix: no config json column (neither 'data' nor 'value' present — OWUI config not initialised?) — skipping."
+        return 0
+    fi
+
+    if docker exec -i postgres psql -v ON_ERROR_STOP=1 -U "$pguser" -d "$db" \
+            -v ph="$placeholder" -v key="$real_key" \
+            <<< "UPDATE config SET ${target_col} = replace(${target_col}::text, :'ph', :'key')::${target_type} WHERE ${target_col}::text LIKE '%' || :'ph' || '%';" \
+            > /dev/null 2>&1; then
+        print_substep "OWUI persisted OpenAI-connection key rewritten to the live $(_llm_backend_display_name) key (config.${target_col})."
+    else
+        print_warning "OWUI key-fix: persisted-key UPDATE returned non-zero (non-fatal) — OWUI may still show 0 models."
+    fi
+}
+
+# #976: repoint OWUI's PERSISTED OpenAI connection to the LLM Manager.
+#
+# Same ENABLE_PERSISTENT_CONFIG trap as _owui_fix_persisted_gpustack_key: the
+# connection base URL + key live in `openwebui_db.config` and the env
+# OPENAI_API_BASE_URLS/KEYS are read ONLY on first boot. So on an llm-manager
+# box a .env edit + recreate never moves the persisted connection.
+#
+# #1185: this used to be an SQL text `replace()` over the serialised JSON —
+# which is exactly how `[gpustack, manager]` became `[manager, manager]`
+# (two identical connections, both with the stale .env key) on 0.91. It is
+# now the JSON-aware upsert in scripts/owui_config_reconcile.py, driven by
+# owui_reconcile_openai_keys with a key _owui_llm_key has VALIDATED. Runs
+# from wire_llm_manager_consumers, AFTER the env seed. Best-effort.
+_owui_repoint_persisted_openai_to_manager() {
+    # #1445 (C5c) re-review: this writes an ADDRESS into OWUI's persisted
+    # config, and since C5 the address is canonical on every box — so the
+    # question is "does this box run the manager, and is it up?", not "does the
+    # manager own the models?". On a dual, not-yet-federated box ownership was
+    # false and the repoint simply never ran, leaving .env and openwebui_db
+    # disagreeing with each other.
+    _llm_manager_profile_active && _llm_manager_running || return 0   # #1445
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx openwebui || return 0
+    local owui_key
+    owui_key=$(_owui_llm_key)
+    if [ -z "$owui_key" ]; then
+        print_warning "OWUI repoint: no manager service key available — persisted connection left as-is."
+        return 0
+    fi
+    owui_reconcile_openai_keys "$(_owui_llm_base_url)" "$owui_key" "$(_owui_rerank_url)"
+}
+
+
+# Issue B (ga.1) fix #1 — recreate the ACTIVE model-sync variant so it re-reads the
+# real GPUStack API key. model-sync polls gpustack /v1-openai/models and writes the
+# model list into openwebui_db; init started it with the placeholder key, so without
+# a recreate it keeps 401'ing and writing 0 models. --no-deps is MANDATORY: every
+# model-sync variant depends_on gpustack(-legacy), and a plain recreate would pull +
+# recreate gpustack and unload the running models (this actually broke the box during
+# ga.1 testing). Picks the variant by the active llm profile. Best-effort.
+recreate_active_model_sync() {
+    local msync=""
+    # #1447 (cutover C7) DoD: the two arms below used to pick `model-sync-cpu`
+    # and `model-sync`, and NEITHER SERVICE EXISTS any more — C7a removed the
+    # GPUStack 2.x stack and C7b folded the CPU variant into llm-legacy. On a
+    # box that still carried the retired token this ran
+    # `docker compose up -d --no-deps --force-recreate model-sync-cpu`, compose
+    # refused an undefined service, and the else-branch below printed
+    # "model-sync-cpu recreate returned non-zero — see verify report" — a
+    # warning that points the operator at a report instead of saying the service
+    # was retired. Best-effort, so nothing broke; it just misinformed.
+    case ",$(read_env_value "$ENV_FILE" COMPOSE_PROFILES)," in
+        *,llm-legacy,*) msync="model-sync-legacy" ;;
+    esac
+    [ -z "$msync" ] && return 0
+    if docker compose up -d --no-deps --force-recreate "$msync" > /dev/null 2>&1; then
+        print_substep "model-sync ($msync) recreated with the live $(_llm_backend_display_name) key (--no-deps)."
+    else
+        print_warning "$msync recreate returned non-zero — see verify report below."
+    fi
+}
+
+
+# ga.1 iter3 (agents → gpustack local-model wire). Coding-agent instances get
+# their {{GPUSTACK_API_KEY}} env placeholder substituted from the AGENT-MANAGER
+# container's OWN os.environ at provision time (provisioner._resolve_env). The
+# agent-manager container is created during `rzfz init` while .env still holds the
+# placeholder GPUStack key, so its env carries the dead placeholder and EVERY
+# agent it provisions (incl. the user's own coding agents) is wired with
+# `OPENAI_API_KEY=gpustack_CHANGEME_AFTER_FIRST_START` → gpustack 401 → local
+# inference fails. `sync_consumers` does not re-key existing instances, and
+# provisioner.upgrade() short-circuits ("nothing to do") when the image version is
+# unchanged, so a plain relaunch won't re-resolve the env either.
+#
+# Fix, in two halves:
+#   (a) recreate agent-manager (--no-deps) so its env picks up the live key from
+#       .env → all FUTURE provisions are correct.
+#   (b) force-relaunch every RUNNING instance whose baked wiring no longer
+#       matches a fresh provision, via provisioner.upgrade(force=True), so the
+#       baked OPENAI_API_KEY / GPUSTACK_API_KEY are re-resolved to the live key.
+#
+# #1446 (cutover C6, point 4): (b) used to cover the four SANDBOXED_TYPES only.
+# hermes, moltis, paperclip and pre-split coding-tools were never
+# re-wired by an upgrade — they kept the LLM endpoint, the LLM key and the
+# user's MCP proxies (the per-user cognee proxy among them, #785 LOW 1) that
+# were resolved when their owner provisioned them. On a cutover box that is the
+# retired gpustack endpoint, and the agent goes quiet rather than loud: the
+# container is healthy, it just talks to something that is not there.
+# The filter is now the DIFFERENCE, not the type: provisioner.stale_wiring()
+# compares what the container carries against what a fresh provision would
+# produce, so an in-sync instance is left alone whatever its type.
+# Profile-gated (agents) + best-effort. No-op on a fresh box (no instances yet —
+# the user self-provisions later against the now-correct agent-manager).
+rekey_coding_agents() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "agents" || return 0
+    docker ps --format '{{.Names}}' | grep -qx "agent-manager" || return 0
+    # #1250b: the step is backend-agnostic (it recreates agent-manager so its
+    # env reloads whatever key .env now holds); only the LABEL was GPUStack-era.
+    # #1445 (C5c) re-review: this is a LABEL, and it contradicted the label two
+    # lines down. `_rekey_backend` followed ownership while
+    # `_llm_backend_display_name` follows the profile, so on a dual,
+    # not-yet-federated box the same step printed "re-keying to the live
+    # GPUStack key" and then "recreated with the live LLM Manager key". One
+    # question, one answer: the helper that exists for exactly this.
+    local _rekey_backend
+    _rekey_backend=$(_llm_backend_display_name)
+    print_step "Coding agents: re-keying to the live ${_rekey_backend} key..."
+
+    # (a) recreate agent-manager so its env reloads the real GPUSTACK_API_KEY.
+    if docker compose up -d --no-deps --force-recreate agent-manager > /dev/null 2>&1; then
+        print_substep "agent-manager recreated with the live $(_llm_backend_display_name) key (--no-deps)."
+    else
+        print_warning "agent-manager recreate returned non-zero — newly-provisioned agents may still carry the placeholder."
+    fi
+
+    # Wait for the Flask app inside agent-manager to be importable again.
+    local waited=0
+    while [ "$waited" -lt 60 ]; do
+        if docker exec agent-manager python3 -c "from app import create_app; create_app()" > /dev/null 2>&1; then
+            break
+        fi
+        sleep 3; waited=$((waited + 3))
+    done
+
+    # (b) force-relaunch running sandboxed coding-agent instances so their env is
+    # re-resolved with the live key. Uses the manager's own provisioner/catalog
+    # context (authoritative), exactly like the day-1 provisioner probe.
+    docker exec -e RAZZFAZZ_ADMIN_USERNAME="${RAZZFAZZ_ADMIN_USERNAME:-}" \
+        agent-manager python3 -c '
+import json
+import os
+from app import create_app
+try:
+    # #2518 fix round 2: THE success predicate, shared with the API routes.
+    from app.services.provisioner import upgrade_succeeded
+    predicate = "shared"
+except ImportError:  # an agent-manager image older than 2026.09-ga.4
+    predicate = "fallback"
+    def upgrade_succeeded(iid, msg):
+        return bool(iid) and "failed" not in (msg or "").lower()
+app = create_app()
+rekeyed = []; skipped = []; failed = []; unknown = []
+with app.app_context():
+    for inst in app.db.get_all_instances():
+        if inst.get("state") != "running":
+            skipped.append((inst.get("container_name"), inst.get("state")))
+            continue
+        # #1148 review: the bare literal here made a nameless instance
+        # rekey under the OLD superuser name on a box that no longer has one.
+        who = (inst.get("user_id") or inst.get("user_slug")
+               or os.environ.get("RAZZFAZZ_ADMIN_USERNAME") or "akadmin")
+        # #1446 (C6/4): recreate the instances whose BAKED wiring no longer
+        # matches a fresh provision — whatever their type. The old filter was
+        # the four sandboxed coding types, so hermes / moltis /
+        # paperclip kept the endpoint, the key and the MCP proxies they were
+        # created with, through every upgrade (#785 LOW 1).
+        try:
+            stale = app.provisioner.stale_wiring(inst, who)
+        except Exception as e:
+            unknown.append((inst.get("container_name"), repr(e)))
+            continue
+        if stale is None:
+            unknown.append((inst.get("container_name"), "cannot tell"))
+            continue
+        if not stale:
+            skipped.append((inst.get("container_name"), "in sync"))
+            continue
+        try:
+            iid, msg = app.provisioner.upgrade(inst["id"], who, force=True)
+            (rekeyed if upgrade_succeeded(iid, msg) else failed).append(
+                (inst.get("container_name"), stale, msg))
+        except Exception as e:
+            failed.append((inst.get("container_name"), stale, repr(e)))
+print("REKEY_JSON:" + json.dumps({"rekeyed": rekeyed, "skipped": skipped,
+                                  "failed": failed, "unknown": unknown,
+                                  "predicate": predicate}))
+' 2>&1 | while IFS= read -r line; do
+        case "$line" in
+            REKEY_JSON:*) print_substep "coding-agent re-key: ${line#REKEY_JSON:}" ;;
+        esac
+    done
+    print_success "Coding-agent re-key complete."
+}
+
+
+# ga.1 (upgrade day-1-green) — the idempotent GPUStack-key/wiring self-heal subset.
+# This is the SAME provisioning fix set the --preset "Step 8" restart block applies
+# on a fresh install (KEEP IN SYNC with cli/post-install.sh Step 8, ~the
+# `_owui_fix_persisted_gpustack_key` / `recreate_active_model_sync` / Dify-pgvector /
+# `rekey_coding_agents` sequence). Splitting it into a named function lets the
+# --refresh path run it too, so an UPGRADED box self-heals to day-1-green without a
+# destructive --preset --force re-deploy: `rzfz upgrade` calls `post-install --refresh`
+# automatically after the upgrade. Every step is idempotent, profile-gated and
+# best-effort (never aborts). It does NOT deploy/redeploy models and has no
+# "already has models" short-circuit — so it runs regardless of GPUStack model state.
+refresh_apply_day1_wiring_fixes() {
+    print_step "Applying day-1 wiring self-heal (OWUI key, model-sync, Dify pgvector, coding-agent re-key)..."
+    # #152 (2026.07-ga.3): rebuild certs/caddy-ca.pem as an OIDC CA superset
+    # (system public CA bundle + Caddy internal root CA on TLS_MODE=internal) and
+    # restart the running OIDC clients (openwebui/gitea/vaultwarden). Upgraded boxes
+    # need this precisely because init.sh does NOT run on `rzfz upgrade`; prod 8.246
+    # broke OIDC/SSO login on Let's Encrypt (authlib CERTIFICATE_VERIFY_FAILED) until
+    # this superset was rebuilt by hand. Run it FIRST so the CA is correct before the
+    # openwebui recreate below (the helper also restarts openwebui; the recreate that
+    # follows is idempotent). ensure_oidc_ca_superset is defined in scripts/lib.sh,
+    # sourced at the top of this script; it returns 3 when a consumer that was running is not running afterwards, which fails the ca-bundle step (a critical step: post-install exits non-zero).
+    # DEVICE_OVERLAY_REPAIR-BEGIN
+    # #2308: a package crossing driven by an older upgrader can arrive without
+    # the device overlay the llm-legacy service needs (#1448); this tree knows.
+    if razzfazz_device_overlay_repair "$ENV_FILE"; then
+        print_warning "COMPOSE_FILE lacked the ${HARDWARE:-?} device overlay the llm-legacy service needs (#1448) — added; recreating gpustack-legacy (#2308)."
+        # Later compose calls in this run see the repaired chain through this
+        # script's update_env_value, which mirrors every $ENV_FILE write into
+        # the copy load_env exported (#1486).
+        COMPOSE_FILE="$(read_env_value "$ENV_FILE" COMPOSE_FILE)" \
+            docker compose up -d --no-deps --force-recreate gpustack-legacy 2>&1 | sed 's/^/    /' || true
+    fi
+    # DEVICE_OVERLAY_REPAIR-END
+    ensure_oidc_ca_superset || STEP_STATUS[ca-bundle]=FAIL
+    # #3375: the host docker daemon pulls this box's runner images from the hub;
+    # on TLS_MODE=internal it must trust Caddy's root for that host too.
+    rzfz_trust_box_hub_ca "$ENV_FILE" \
+        || print_warning "Docker does not trust the hub's certificate yet - the LLM engines cannot move to a new runner until it does (rzfz post-install --refresh, then rzfz relaunch-engines)."
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "chat"; then
+        # Rewrite OWUI's persisted placeholder GPUStack key -> the live key, THEN
+        # recreate openwebui (--no-deps) so it reloads a working OpenAI connection
+        # and models finally appear. See _owui_fix_persisted_gpustack_key.
+        _owui_fix_persisted_gpustack_key
+        docker compose up -d --no-deps --force-recreate openwebui > /dev/null 2>&1 \
+            || print_warning "openwebui recreate returned non-zero (non-fatal) — OWUI may still show 0 models until re-run."
+    fi
+    # Recreate the ACTIVE model-sync variant (--no-deps) so it re-reads the live key
+    # and writes the real model list into openwebui_db. Gated on the active llm profile.
+    recreate_active_model_sync
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "dify"; then
+        # #160 (model-provider icons broken since Dify 1.15): dify-api builds provider
+        # icon_small / file URLs from its public-URL env (CONSOLE_API_URL, FILES_URL, …),
+        # sourced from .env.dify as `https://${DIFY_DOMAIN}`. Compose's interpolation of the
+        # nested ${DIFY_DOMAIN}->dify.${MAIN_DOMAIN} at container-create is context-flaky and
+        # has left the literal `dify.${MAIN_DOMAIN}` in the running env → the console renders
+        # <img src="https://dify.${MAIN_DOMAIN}/…"> against a bogus host → broken icons.
+        # Resolve the real host from .env (respecting a custom DIFY_DOMAIN) and bake it into
+        # .env.dify so dify-api never depends on interpolation; also self-heals a post-init
+        # MAIN_DOMAIN change (S20 class). Idempotent. The recreate below applies it.
+        _md160=$(grep -E '^MAIN_DOMAIN=' "${SCRIPT_DIR}/.env" 2>/dev/null | cut -d= -f2- | tr -d '"') || true
+        _dd160=$(grep -E '^DIFY_DOMAIN=' "${SCRIPT_DIR}/.env" 2>/dev/null | cut -d= -f2- | tr -d '"') || true
+        _dd160="${_dd160//\$\{MAIN_DOMAIN\}/$_md160}"; _dd160="${_dd160//\$MAIN_DOMAIN/$_md160}"
+        if [ -n "$_dd160" ] && ! printf '%s' "$_dd160" | grep -q '[${]'; then
+            for _k in CONSOLE_API_URL CONSOLE_WEB_URL APP_API_URL APP_WEB_URL FILES_URL TRIGGER_URL WEB_API_CORS_ALLOW_ORIGINS CONSOLE_CORS_ALLOW_ORIGINS; do
+                # #1381: inode-preserving. .env.dify is a single-FILE bind mount
+                # (core/compose.yml → razzfazz-config /stack/.env.dify); `sed -i`
+                # renamed a new inode over it and the Config UI kept the stale one
+                # (#4 class). update_env_value truncates the same inode.
+                grep -qE "^${_k}=https?://" "${SCRIPT_DIR}/.env.dify" 2>/dev/null \
+                    && update_env_value "${SCRIPT_DIR}/.env.dify" "$_k" "https://${_dd160}"
+            done
+            print_substep "Baked resolved host into .env.dify Dify URLs -> https://${_dd160} (#160) — provider icons render regardless of Compose interpolation."
+        fi
+        # Recreate the pgvector-consuming Dify services so the corrected PGVECTOR_PASSWORD
+        # lands (heals dataset-indexing 401s) AND the #160 URL bake above takes effect. --no-deps.
+        docker compose up -d --no-deps --force-recreate dify-api dify-worker dify-worker-dataset dify-worker-beat > /dev/null 2>&1 \
+            || print_warning "Dify pgvector-service recreate returned non-zero (non-fatal) — see verify report."
+    fi
+    # Re-key provisioned coding agents to the live GPUStack key (gated on agents).
+    rekey_coding_agents
+    # Give the recreated openwebui + model-sync time to come up and complete their
+    # first gpustack /v1-openai/models poll → write the model list into openwebui_db,
+    # so a day-1 check that runs right after (e.g. the post-upgrade suite) sees the
+    # models. Mirrors the fresh-install Step 8 "stabilize" wait. Only when chat/llm
+    # is active (nothing to wait for otherwise).
+    # #1447: the retired `llm` / `llm-cpu` tokens are gone from this gate. They
+    # could only match a box the upgrade has not migrated yet, and on such a box
+    # the wait is for a model-sync that does not start.
+    if echo ",${COMPOSE_PROFILES:-}," | grep -qE ',chat,|,llm-legacy,'; then
+        print_substep "Waiting 15s for openwebui + model-sync to stabilize..."
+        sleep 15
+    fi
+    print_success "Day-1 wiring self-heal complete."
+}
+
+
+# ga.1 (§16 handover): leave an as-built security-posture assessment on the box.
+# The security-architecture doc §16 (customer day-1 handover checklist) lists the
+# posture a fresh box must satisfy — public signup closed on the user-facing apps,
+# host firewall restricted, secrets/TLS/backups sane. `rzfz security-check` is the
+# tool that verifies exactly that; until now NOTHING ran it, contradicting the
+# script's own "what rzfz.ai runs on each box post-install" claim. Run it here
+# (both --preset and --refresh) so every box carries a dated as-built posture
+# report under security-run/. `--no-cve` skips the slow Trivy/Grype pass (a
+# release-time / on-demand concern that can starve a freshly-provisioned stack);
+# the posture checks (signup / firewall / secrets / TLS / backups) are what the
+# day-1 handover needs. Non-fatal: a posture WARNING must not abort provisioning,
+# but the operator is told where the report is + whether anything FAILED.
+run_security_selfcheck() {
+    local script="${SCRIPT_DIR}/cli/security-check.sh"
+    if [ ! -x "$script" ]; then
+        print_warning "security-check.sh not present — skipping day-1 posture assessment."
+        return 0
+    fi
+    print_step "Day-1 security posture: leaving an as-built assessment (rzfz security-check --no-cve)..."
+    local rc=0
+    "$script" --no-cve || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "security-check reported ${rc} FAIL item(s) — a §16 posture item needs attention (see the dated report under security-run/). Non-fatal for provisioning."
+    fi
+    return 0
+}
+
+
+# ga.1 (#147 follow-up — upgrade day-1-green, MISSING-MODELS case): make sure the
+# standard preset's DEFAULT models are actually DEPLOYED in gpustack after the
+# wiring self-heal. refresh_apply_day1_wiring_fixes above re-wires OWUI / model-sync /
+# Dify / coding-agents to the live GPUStack key, but it deliberately never deploys
+# models (see its header: "does NOT deploy/redeploy models"). So a box whose gpustack
+# came up on a fresh / version-reset gpustack_db with 0 registered models (native
+# /v1/models=0 — e.g. after the 2026.07 vulkan-image rebuild) stays at 0 models: OWUI
+# + gpustack list nothing, and the AFTER-upgrade day-1 suite fails
+# (test_gpustack_lists_at_least_one_model, test_openwebui_lists_at_least_one_model,
+# test_default_chat_model_answers_non_empty, the wire1/wire2 model checks, OWUI-knowledge).
+#
+# Idempotent by construction:
+#   • the DEFAULT aliases come from standard-models.yaml's `defaults` block
+#     (distinct values across chat/coding/general/vision/embedding/reranker — never
+#     hardcoded; today qwen3.6 + qwen3-embedding + qwen3-reranker);
+#   • we query the live registered-model set ONCE and only invoke the deploy path
+#     when at least one default is MISSING;
+#   • when a real customer's models already persist across the upgrade every default
+#     is present → we SKIP entirely (no re-download, no reset, no scale change);
+#   • the deploy itself reuses deploy_all_models, which is also idempotent
+#     (deploy_model early-returns for any already-registered model) and honours the
+#     iteration-1 order (always-on qwen3.6 first; auto_start:false spares registered
+#     + scaled to 0, non-blocking — no wait_for_all_models so `rzfz upgrade` doesn't
+#     hang on multi-GB downloads).
+#
+# Profile-gated + best-effort (never aborts the refresh). The gate is
+# `llm_manager_deploys_standard_set || _gpustack_profile_active`, and since
+# #1447 the latter matches `llm-legacy` ALONE — `llm` is removed and
+# `llm-cpu` folded in. The old list of three named a gate that no longer
+# exists, which is how a reader learns a rule the code stopped following.
+# #2512 fix round 1: recreate the RUNNING containers that read
+# LLM_MASTER_ROLE at start (a stopped one reads it on its next start).
+_recreate_llm_master_role_readers() {
+    local svc
+    for svc in llm-worker-agent agent-manager; do
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$svc"; then
+            docker compose up -d --no-deps --force-recreate "$svc" >/dev/null 2>&1 || true
+            print_substep "$svc recreated to read LLM_MASTER_ROLE (#2512)."
+        fi
+    done
+}
+
+refresh_ensure_default_models_deployed() {
+    # #2512: the upgrade derives LLM_MASTER_ROLE before the restart; when the
+    # manager could not be asked then, the key is still empty — ask now, BEFORE
+    # the catalogue hardware is resolved from it. A set value is never touched.
+    if llm_manager_deploys_standard_set && _llm_manager_running; then
+        llm_master_role_ensure "$ENV_FILE" || true
+        # Fix round 1: restart_stack already recreated the containers that
+        # read the role at START with an EMPTY one — the embedded worker-agent
+        # (fleet -> registers draining) and agent-manager (the agents' model
+        # lists). Re-read it now, not at some later recreate.
+        [ "${_LLMM_ROLE_WRITTEN:-0}" = "1" ] && _recreate_llm_master_role_readers
+    fi
+    _export_catalog_hardware   # #2460: a CPU master serving through GPU workers is that GPU class
+    # #1441/#1442: the manager arm is chosen by llm_manager_deploys_standard_set
+    # (the --preset arm asks the same); a GPUStack box deploys in GPUStack below
+    # and federates it afterwards. No LLM profile at all → nothing to do.
+    if ! llm_manager_deploys_standard_set && ! _gpustack_profile_active; then
+        return 0
+    fi
+    if llm_manager_deploys_standard_set; then
+        # rev-B (2): `rzfz upgrade` provisions through `post-install --refresh`,
+        # and --refresh is MUTUALLY EXCLUSIVE with --preset — so the #1250b
+        # manager deploy, which lives in the --preset arm, never runs on an
+        # upgrade. An upgraded Manager box therefore kept the exact defect
+        # #1250b fixes: .env pointing every consumer at qwen3.6 /
+        # qwen3-embedding while /api/deployments stayed []. Same call, same
+        # single manifest, idempotent by construction (an existing deployment is
+        # left untouched), and best-effort — a refresh must never abort here.
+        # SKIP_WAIT is honoured so `--skip-wait` still returns immediately
+        # instead of blocking the upgrade on a multi-GB weight download.
+        if _llm_manager_running; then
+            local _llmm_refresh_wait
+            if [ "${SKIP_WAIT:-false}" = true ]; then _llmm_refresh_wait=false; else _llmm_refresh_wait=true; fi
+            # #1507 review finding 2: `rzfz upgrade` comes through HERE, not
+            # through the --preset arm, and this arm is worse off — OWUI's
+            # model-sync already ran (refresh_apply_day1_wiring_fixes, above),
+            # so its list predates this deploy. Remember both cases: a deploy
+            # that did not reach "all ready", and one that CREATED something
+            # the earlier model-sync could not have seen. The late reconcile
+            # after Dify's step re-runs exactly the two enumerating steps.
+            if llm_manager_deploy_standard_set "standard" "$_llmm_refresh_wait"; then
+                if [ "${_LLMM_DEPLOYED_NEW:-0}" -gt 0 ]; then
+                    _LLMM_DEPLOY_INCOMPLETE=1
+                fi
+            else
+                print_warning "LLM Manager standard-set deploy reported an issue (non-fatal) — open the LLM Manager console, or re-run 'rzfz post-install --preset standard'."
+                _LLMM_DEPLOY_INCOMPLETE=1
+            fi
+            # #1263: a manifest change never reached a box that had already
+            # deployed (the deploy above skips existing rows). Report always;
+            # apply only when the operator asked for it.
+            llm_manager_manifest_drift_report "standard" || true
+            if [ "${DO_RECONCILE_MODELS:-false}" = true ]; then
+                llm_manager_reconcile_standard_set "standard" \
+                    || print_warning "LLM Manager reconcile reported an issue (non-fatal) — see above."
+            fi
+        else
+            print_warning "llm-manager profile active but the container is not running — the standard model set was not deployed. Start the stack and re-run 'rzfz post-install --preset standard'. (#1250b)"
+        fi
+        return 0
+    fi
+
+    print_step "Ensuring the standard preset's default models are deployed (post-upgrade day-1)..."
+
+    # GPUStack must be up + keyed to query/deploy. Read the key straight from .env
+    # (grep, never source .env); gpustack_api / deploy_model consume the exported var.
+    local gp_key
+    gp_key=$(read_env_value "$ENV_FILE" GPUSTACK_API_KEY)
+    if [ -z "$gp_key" ] || [ "$gp_key" = "gpustack_CHANGEME_AFTER_FIRST_START" ]; then
+        print_warning "GPUSTACK_API_KEY not set yet — skipping default-model ensure (re-run --refresh once the key exists)."
+        return 0
+    fi
+    if ! curl -fsS --max-time 5 "http://127.0.0.1:${GPUSTACK_PORT:-9090}/healthz" >/dev/null 2>&1; then
+        print_warning "GPUStack not reachable — skipping default-model ensure."
+        return 0
+    fi
+    export GPUSTACK_API_KEY="$gp_key"
+
+    # Resolve the DEFAULT model aliases from standard-models.yaml `defaults` block
+    # (distinct values). This is the single source-of-truth — never a hardcoded
+    # list; if the operator repoints a default the check follows automatically.
+    # #2193 (journey C's rc4 dry run on 0.79): this read the FLAT defaults
+    # block, so a box the upgrade had just migrated to HARDWARE=cpu still asked
+    # for the 1M-context fleet default — which was registered and pending
+    # forever — and never for the CPU chat default #2158 gives it. The aliases
+    # come through the one hardware rule, like every other resolver in this
+    # file (_default_chat_alias, _model_rows_for_preset).
+    local default_aliases
+    default_aliases=$(HW="$(_catalog_hardware)" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import yaml, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+try:
+    spec = yaml.safe_load(open(os.environ['YAML_PATH'])) or {}
+except Exception:
+    spec = {}
+seen = []
+models = spec.get('models') or {}
+for v in hc.defaults_for(spec, os.environ.get('HW')).values():
+    # a default that is a SPARE on this hardware (vision on a cpu box: the
+    # fleet model, not always-on there) is not demanded by this gate
+    if v and v not in seen and hc.entry_auto_start(models.get(v) or {}, os.environ.get('HW')):
+        seen.append(v)
+print('\n'.join(seen))
+" 2>/dev/null)
+    if [ -z "$default_aliases" ]; then
+        print_warning "standard-models.yaml defaults block unreadable — skipping default-model ensure."
+        return 0
+    fi
+
+    # #2193: a default is satisfied only when it is registered AND SERVING — a
+    # running instance. "Registered" alone let a row that will never start
+    # (qwen3.6 pending forever at ~36 GiB on a 30 GB box, GPUStack's verdict
+    # settled within seconds) satisfy the gate, and the upgrade reported
+    # success on a box that could not answer a chat request. One model list,
+    # one instance list; a registered-but-not-serving default is named with
+    # GPUStack's own state and message.
+    local prefix serving registered_only
+    prefix=$(gpustack_api_prefix)
+    serving=$( { gpustack_api GET "${prefix}/models"; echo "=====INSTANCES====="; gpustack_api GET "${prefix}/model-instances"; } | python3 -c "
+import sys, json
+raw = sys.stdin.read()
+models_raw, _, inst_raw = raw.partition('=====INSTANCES=====')
+def items(t):
+    try:
+        return (json.loads(t) or {}).get('items', [])
+    except Exception:
+        return []
+running = {i.get('model_name') for i in items(inst_raw) if str(i.get('state') or '').lower() == 'running'}
+for m in items(models_raw):
+    n = m.get('name')
+    if not n:
+        continue
+    if n in running:
+        print('serving\t' + n)
+    else:
+        inst = next((i for i in items(inst_raw) if i.get('model_name') == n), None)
+        st = (inst or {}).get('state') or ('no instance' if (m.get('replicas') or 0) else '0 replicas')
+        msg = ((inst or {}).get('state_message') or '').replace(chr(10), ' ')[:160]
+        print('registered\t' + n + '\t' + str(st) + ('\t' + msg if msg else ''))
+" 2>/dev/null)
+    registered_only=$(printf '%s\n' "$serving" | awk -F'\t' '$1=="registered"')
+    serving=$(printf '%s\n' "$serving" | awk -F'\t' '$1=="serving"{print $2}')
+
+    # Which defaults are MISSING from the SERVING set?
+    local missing="" a row
+    while IFS= read -r a; do
+        [ -z "$a" ] && continue
+        if ! printf '%s\n' "$serving" | grep -qxF "$a"; then
+            missing="${missing:+$missing }$a"
+            row=$(printf '%s\n' "$registered_only" | awk -F'\t' -v n="$a" '$2==n{print $3 ($4?" — "$4:"")}' | head -n1)
+            if [ -n "$row" ]; then
+                print_warning "  Default '$a' is registered but NOT serving (${row}) — a registered row is not a served model (#2193)."
+            fi
+        fi
+    done <<< "$default_aliases"
+
+    if [ -z "$missing" ]; then
+        print_success "All default models registered AND serving ($(printf '%s' "$default_aliases" | tr '\n' ' ')) — skipping deploy (customer models preserved)."
+        return 0
+    fi
+
+    print_info "Default model(s) not serving: ${missing} — deploying the standard preset set (idempotent; already-registered models are skipped)."
+    # Reuse the canonical deploy path. deploy_all_models submits the always-on
+    # defaults (qwen3.6 + embedding + reranker) FIRST, then registers the
+    # auto_start:false spares scaled to 0 (non-blocking). Best-effort — a non-zero
+    # return must not abort the surrounding refresh.
+    deploy_all_models "standard" \
+        || print_warning "deploy_all_models returned non-zero (non-fatal) — check the GPUStack UI / re-run --refresh."
+
+    # Post-upgrade only: we just deployed missing defaults, so wait for the
+    # always-on default CHAT model to become READY — otherwise the box is
+    # chat-blind for the ~20 min the model takes to download after an upgrade.
+    # The skip branch above already returned, so a real customer whose models
+    # persisted never reaches here and is never delayed. Only the chat default is
+    # waited on (the auto_start:false spares stay non-blocking). Read from
+    # defaults.chat — never hardcode. Best-effort: a timeout warns + returns 0
+    # (the model finishes in the background), it must not abort the refresh.
+    local chat_alias=""
+    # #2193: the box's chat default, through the hardware rule. If the shared
+    # resolver is unavailable or answers nothing, ask the rule directly (same
+    # catalogue, same HARDWARE) rather than skip the wait — the wait is the
+    # point, and the flat defaults block is never the answer on a cpu box.
+    chat_alias=$(_default_chat_alias 2>/dev/null) || chat_alias=""
+    if [ -z "$chat_alias" ]; then
+        chat_alias=$(HW="$(_catalog_hardware)" YAML_PATH="$SCRIPT_DIR/core/llm/standard-models.yaml" python3 -c "
+import yaml, os, sys
+sys.path.insert(0, os.path.dirname(os.environ['YAML_PATH']))
+import hardware_catalog as hc
+spec = yaml.safe_load(open(os.environ['YAML_PATH'])) or {}
+print(hc.defaults_for(spec, os.environ.get('HW')).get('chat') or '')
+" 2>/dev/null) || chat_alias=""
+    fi
+    if [ -n "$chat_alias" ]; then
+        local m chat_was_missing=0
+        for m in $missing; do [ "$m" = "$chat_alias" ] && chat_was_missing=1; done
+        if [ "$chat_was_missing" = "1" ]; then
+            wait_for_model "$chat_alias" 2400 \
+                || print_warning "Default chat model '$chat_alias' not READY within the wait window (non-fatal) — it will finish downloading in the background."
+        fi
+    fi
+    # #1442: the refresh path deploys into GPUStack above; federate (or re-sync
+    # the model list) so the manager fronts what GPUStack serves.
+    llm_manager_federate_gpustack || true
+}
+
+
+openuem_report_readiness() {
+    # #1075 — OpenUEM readiness report. Non-fatal by design: an opt-in module
+    # must never fail post-install. Profile-gated, idempotent, read-only.
+    case ",${COMPOSE_PROFILES:-}," in
+        *,openuem,*) ;;
+        *) return 0 ;;
+    esac
+
+    print_step "OpenUEM: verifying PKI bootstrap and console readiness..."
+
+    # 1. The one-shot must have exited 0 — everything else depends on it.
+    local certs_exit
+    certs_exit=$(docker inspect -f '{{.State.ExitCode}}' openuem-certs 2>/dev/null || echo "missing")
+    if [ "$certs_exit" != "0" ]; then
+        print_warning "openuem-certs did not complete successfully (exit=${certs_exit})."
+        print_info    "  Inspect with: docker compose logs openuem-certs"
+        return 0
+    fi
+    print_success "OpenUEM PKI bootstrap completed."
+
+    # 2. Console health.
+    local health
+    health=$(docker inspect -f '{{.State.Health.Status}}' openuem-console 2>/dev/null || echo "missing")
+    if [ "$health" = "healthy" ]; then
+        print_success "OpenUEM console is healthy at https://${OPENUEM_DOMAIN:-openuem.${MAIN_DOMAIN}}"
+    else
+        print_warning "OpenUEM console health is '${health}' — it may still be starting."
+    fi
+
+    # 3. The three things an operator needs and cannot guess.
+    print_info "First login: the built-in 'openuem' account's password is printed once by the console."
+    print_info "  docker compose logs openuem-console | grep -i password"
+    print_info "Agent enrolment material:"
+    print_info "  docker cp openuem-certs:/certificates/agents/agent.cer ."
+    print_info "  docker cp openuem-certs:/certificates/agents/agent.key ."
+    print_info "Admin user certificate (not required for login here):"
+    print_info "  docker cp openuem-certs:/certificates/users/admin.pfx ."
+    if [ "${OPENUEM_NATS_HOST_BIND:-127.0.0.1}" = "127.0.0.1" ]; then
+        print_info "Broker is loopback-bound: agents on OTHER machines cannot reach it yet."
+        print_info "  Set OPENUEM_NATS_HOST_BIND to a specific LAN IP (never 0.0.0.0) to serve a fleet."
+    fi
+    return 0
+}
+
+
+openlit_align_admin() {
+    # rc6.7 #44 / #2900: add the stack admin to OpenLit and lock its seeded
+    # `user@openlit.io` login (public upstream password; OpenLit re-creates a
+    # missing one on every start, so it is locked, not removed). ONE
+    # implementation, shared with the Configuration Portal's enable:
+    # module_hooks.openlit_post_start (secrets on stdin, idempotent, proves the
+    # effect with real sign-ins).
+    # The same hook first sets the clickhouse-backup volume to ClickHouse's
+    # uid 101:101 (module_hooks.clickhouse_backup_owner): docker creates it
+    # root-owned and every ClickHouse backup fails until it is repaired. A
+    # no-op on a volume that already has that owner; `rzfz upgrade` ends in
+    # --refresh, so an upgrade repairs a box whose volume is root-owned.
+    if ! docker ps --format '{{.Names}}' | grep -qx openlit; then
+        return 0
+    fi
+    print_step "Observability: ClickHouse backup volume owner, OpenLit admin aligned to stack credentials..."
+    if python3 "${SCRIPT_DIR}/core/config/app/services/module_hooks.py" post-start observability --stack "${SCRIPT_DIR}"; then
+        print_success "Observability post-start steps done (backup volume owner, OpenLit admin)."
+    else
+        print_warning "Observability post-start steps failed (see above) — OpenLit's upstream default login may still work, or ClickHouse backups may keep failing; 'rzfz status' reports the login."
+    fi
+}
+
+
+refresh_help_cache() {
+    # rc6.7 #15: warm the help docs cache for any uncached app. The
+    # razzfazz-help container's autowarm thread (rc6.7 #14) does the
+    # same on container start, but operators upgrading without recreating
+    # the help container won't trigger it. Calling mirror_all from outside
+    # via docker exec is idempotent (CacheManager.mirror_docs short-
+    # circuits already-cached apps).
+    print_step "Warming help documentation cache (background)..."
+    if ! docker ps --format '{{.Names}}' | grep -qx razzfazz-help; then
+        print_warning "razzfazz-help not running — skipping help cache warm."
+        return 0
+    fi
+    # #210: an offline / air-gapped box cannot reach the upstream doc sites, so
+    # the per-app `wget --mirror` would only burn 3×30s timeouts each with nothing
+    # to show for it. Skip the external warm in offline mode — the Help-UI serves
+    # the already-cached / community-bundled docs.
+    if [ "$(read_env_value "$ENV_FILE" RAZZFAZZ_NETWORK_MODE)" = "offline" ]; then
+        print_info "Offline network mode — skipping external help-doc mirror (serving cached docs only)."
+        return 0
+    fi
+    # #210: warm the cache in the BACKGROUND (docker exec -d — same pattern as the
+    # /api/refresh-all trigger elsewhere) so it NEVER blocks the upgrade. This
+    # mirror walks ~30 upstream doc sites via `wget --mirror`; running it on the
+    # upgrade's critical path took 30–60 min and made upgrades look hung. The
+    # razzfazz-help container's own autowarm thread does the same on (re)start;
+    # this detached trigger covers the no-recreate case. warm() captures only
+    # what needs_capture() names — never captured, failed, outcome-less or
+    # older than HELP_MIRROR_MAX_AGE_DAYS (#2418); per-app outcome + reason in
+    # the razzfazz-help log and /data/meta/warm.json.
+    #
+    # #1284: AS appuser. `docker exec` runs as the container's default user —
+    # root — while the app itself is dropped to appuser by the entrypoint. A
+    # warm started here mirrored as root and left root-owned trees under
+    # /data/cache for exactly the apps that were not cached yet; every later
+    # refresh by the app (appuser) then died with "Cannot write to
+    # /data/cache/<app>/index.html (Permission denied)" — a permanent `failed`
+    # in cache-status until the next container start's chown (0.91, openlit,
+    # 2026-09-05). The user exists in the image (core/help/Dockerfile).
+    if docker exec -d --user appuser razzfazz-help python3 -c "
+import sys; sys.path.insert(0, '/app')
+from cache_manager import CacheManager
+CacheManager().warm()
+" 2>/dev/null; then
+        print_success "Help cache warm triggered in background (progress in razzfazz-help logs)."
+    else
+        print_warning "Help cache warm trigger failed (non-fatal)."
+    fi
+}
+
+
+# #2903: Paperless-ngx's superuser promotion is idempotent and defined ONCE, here, so
+# the --refresh arm (which `rzfz upgrade` runs and which exits before the --preset
+# path) reaches it too; an inline copy in the --preset block never did.
+# (#191) Reusable paperless-ngx superuser promotion. Authentik forwards
+# the X-Authentik-Username header on first login, which paperless-ngx's
+# header-auth middleware uses to auto-CREATE a Django user — but never a
+# superuser, so it can't see folder-consumed (no-owner) documents. akadmin
+# is the header value for the built-in Authentik admin; razzfazz-ai-admin
+# is auto-created on first SSO login by any other operator account.
+# Promote both to cover either login path. Idempotent: get_or_create + an
+# unconditional is_superuser=True write on every call. Reused by both
+# step_paperless_provisioning (Step 8c, below; --preset and --refresh) and
+# paperless_m007_report (the M007 repair pass, further down — the
+# toggle-only-enable flow) so neither reimplements the promotion.
+paperless_promote_superusers() {
+    docker exec paperless-ngx python3 manage.py shell -c "
+from django.contrib.auth.models import User
+from documents.models import UiSettings
+
+def promote_or_create(username, email, password):
+    u, created = User.objects.get_or_create(username=username)
+    u.email = email
+    u.is_staff = True
+    u.is_superuser = True
+    if created:
+        u.set_password(password)
+    u.save()
+    ui, _ = UiSettings.objects.get_or_create(user=u)
+    settings = ui.settings or {}
+    settings.setdefault('theme', {})['color'] = '#CD1719'
+    ui.settings = settings
+    ui.save()
+    print(f'  {username}: superuser={u.is_superuser} (created={created})')
+
+promote_or_create('${RAZZFAZZ_ADMIN_USERNAME:-akadmin}', 'razzfazz-ai-admin@${MAIN_DOMAIN}', '${AUTHENTIK_BOOTSTRAP_PASSWORD}')
+promote_or_create('razzfazz-ai-admin', 'razzfazz-ai-admin@${MAIN_DOMAIN}', '${AUTHENTIK_BOOTSTRAP_PASSWORD}')
+"
+}
+
+# Step 8c: Paperless-ngx provisioning (shared by --preset and --refresh, #2903)
+step_paperless_provisioning() {
+    if ! echo "${COMPOSE_PROFILES:-}" | grep -qw "paperless-ngx"; then
+        return 0
+    fi
+    print_step "Paperless-ngx: Provisioning..."
+
+    local waited=0
+    while [ $waited -lt 120 ]; do
+        if docker exec paperless-ngx curl -sf http://localhost:8000/accounts/login/ \
+            > /dev/null 2>&1; then
+            break
+        fi
+        sleep 5; waited=$((waited + 5))
+    done
+    if [ $waited -ge 120 ]; then
+        print_warning "Paperless-ngx not ready after 120s — NOT provisioned (its superusers are not promoted). Complete it with: rzfz post-install --refresh"
+        return 0
+    fi
+
+    # Authentik sends X-Authentik-Username as the akadmin username
+    # razzfazz-ai-admin is auto-created when they first log in via SSO
+    # We promote both to superuser to cover both cases
+    paperless_promote_superusers 2>&1 | while IFS= read -r line; do print_substep "$line"; done \
+        && print_success "Paperless-ngx: users promoted + brand colour set." \
+        || print_warning "Paperless-ngx: provisioning failed - complete it with: rzfz post-install --refresh"
+}
+
+
+# #2864: Onyx's provisioning (the LLM Manager key, the provider registration and
+# correction, the re-index on change) is defined ONCE, here, and called from BOTH the
+# --preset path and the --refresh arm: `rzfz upgrade` runs --refresh, which exits
+# before the preset path, so a copy there never reached an upgraded box.
+# Step 8a: Onyx provisioning (shared by --preset and --refresh)
+step_onyx_provisioning() {
+    if ! echo "${COMPOSE_PROFILES:-}" | grep -qw "onyx"; then
+        return 0
+    fi
+    print_step "Onyx: Provisioning..."
+
+    local onyx_api_url="http://127.0.0.1:$(docker inspect onyx-api \
+        --format '{{range $p,$conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' 2>/dev/null || echo '')"
+
+    # Wait for onyx-api to be ready — asking exactly what its own
+    # healthcheck asks (#1786).
+    #
+    # This probe used to differ from `modules/apps/onyx/compose.yml`'s
+    # healthcheck in TWO ways, and both can make it time out against a
+    # container docker already calls healthy (measured on 0.91,
+    # 2026-09-09: healthcheck green after 40 s, this loop still timing out
+    # at 120 s):
+    #
+    #   path   `/api/health` here vs `/health` in the healthcheck
+    #   proxy  plain urlopen() here — which HONOURS http_proxy from the
+    #          container env — vs `build_opener(ProxyHandler({}))` there,
+    #          which is exactly why the healthcheck bypasses it. On a box
+    #          with a corporate proxy (#181) a plain urlopen of
+    #          `localhost` goes to the proxy and fails.
+    #
+    # So: same URL, same proxy-free opener. The healthcheck is the
+    # authority on "is this API up"; a second, differently-worded opinion
+    # is how the two drift apart.
+    local waited=0
+    while [ $waited -lt 120 ]; do
+        if docker exec onyx-api python3 -c \
+            "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://localhost:8080/health', timeout=3)" \
+            > /dev/null 2>&1; then
+            break
+        fi
+        sleep 5; waited=$((waited + 5))
+    done
+    if [ $waited -ge 120 ]; then
+        # #1786/#1805: NOT a silent skip. Onyx then keeps its bundled
+        # default embedding (nomic-ai/nomic-embed-text-v1, 768 dim) while
+        # this box serves qwen3-embedding at 4096 — every Onyx search runs
+        # against a model the box does not have, and nothing says so. The
+        # step still returns 0 (post-install must not stop for one module),
+        # but it says what it left behind and how to finish it.
+        print_error "Onyx API did not answer /health inside 120s — provisioning SKIPPED."
+        print_info  "  Onyx keeps its BUNDLED default embedding model, not this box's"
+        print_info  "  ($(_default_embedding_alias)). Its search index is then built"
+        print_info  "  against a model the box does not serve."
+        print_info  "  Docker health of onyx-api: $(docker inspect --format '{{.State.Health.Status}}' onyx-api 2>/dev/null || echo unknown)"
+        print_info  "  Re-run once it is up:  rzfz post-install --refresh"
+        record_step_status onyx WARN
+        return 0
+    fi
+    print_substep "Onyx API ready, configuring..."
+
+    # Write provisioning script into the container and run it
+    docker exec -i onyx-api bash -c 'cat > /tmp/onyx_post_install.py' << 'PYEOF'
+import urllib.request, urllib.parse, urllib.error, json, http.cookiejar, sys, os, time
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
+BASE = "http://localhost:8080"
+# #2858: Onyx (fastapi-users / email-validator) refuses special-use names
+# (.local, .test, .localhost, .invalid, .onion, .arpa) in /auth/register. The
+# admin address is an identity for Onyx's own login, not a mailbox, so on such
+# a domain it moves to a fixed valid one (as the cognee image does, #2091).
+ADMIN_LOCAL = "razzfazz-ai-admin"
+FALLBACK_DOMAIN = "razzfazz.ai"
+SPECIAL_USE = ("arpa", "invalid", "local", "localhost", "onion", "test")
+
+def email_ok(addr):
+    try:
+        import email_validator
+    except ImportError:
+        dom = addr.rsplit("@", 1)[-1].lower()
+        return not any(dom == d or dom.endswith("." + d) for d in SPECIAL_USE)
+    try:
+        email_validator.validate_email(addr, check_deliverability=False)
+        return True
+    except email_validator.EmailNotValidError:
+        return False
+
+EMAIL = ADMIN_LOCAL + "@" + os.environ["MAIN_DOMAIN"]
+if not email_ok(EMAIL):
+    print("  NOTE: " + EMAIL + " is not accepted by Onyx (special-use domain); using "
+          + ADMIN_LOCAL + "@" + FALLBACK_DOMAIN + " as the Onyx admin login instead.")
+    EMAIL = ADMIN_LOCAL + "@" + FALLBACK_DOMAIN
+PASSWORD = os.environ["AUTHENTIK_BOOTSTRAP_PASSWORD"]
+# The Onyx-only LLM Manager service key (cost centre stack/onyx). The manager
+# refuses GPUSTACK_API_KEY with a 401, so that key never reaches this script.
+ONYX_KEY = (os.environ.get("LLM_MANAGER_ONYX_KEY") or "").strip()
+LLM_BASE = "http://llm:8080/v1"   # #1445: canonical endpoint; chat (openai provider) appends /chat/completions
+# Onyx's litellm embedding client POSTs to api_url AS GIVEN (it appends nothing),
+# so the provider must carry the full embeddings endpoint, not the /v1 base.
+EMBED_URL = LLM_BASE + "/embeddings"
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
+POSTGRES_USER = os.environ.get("POSTGRES_USER", "docker")
+POSTGRES_PASS = os.environ.get("POSTGRES_PASSWORD", "")
+POSTGRES_DB   = os.environ.get("POSTGRES_DB", "onyx_db")
+DEFAULT_CHAT  = os.environ.get("DEFAULT_CHAT", "qwen3.6")
+DEFAULT_EMBED = os.environ.get("DEFAULT_EMBED", "qwen3-embedding")
+_dim_raw = (os.environ.get("DEFAULT_EMBED_DIM") or "").strip()
+DEFAULT_EMBED_DIM = int(_dim_raw) if _dim_raw.isdigit() else None
+
+cj = http.cookiejar.CookieJar()
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+# #2903: the provider calls validate the model through the LLM Manager, and the
+# first call to a cold engine takes minutes. They get their own, much longer
+# timeout, a bounded retry with backoff, and a transport failure no longer ends
+# the script: req() answers (0, {...}) and the caller decides.
+PROVIDER_TIMEOUT = float(os.environ.get("RZFZ_ONYX_PROVIDER_TIMEOUT") or 240)
+PROVIDER_BACKOFF = [float(w) for w in (os.environ.get("RZFZ_ONYX_PROVIDER_BACKOFF") or "5,15,30,60").split(",") if w]
+MODEL_WAIT = float(os.environ.get("RZFZ_ONYX_MODEL_WAIT") or 300)
+MISSING = []   # what this run could not set; named at the end with the command that completes it
+
+def req(method, path, data=None, params=None, timeout=30):
+    url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    body = json.dumps(data).encode() if data is not None else None
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "Cookie": "; ".join(f"{c.name}={c.value}" for c in cj)}
+    r = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with opener.open(r, timeout=timeout) as resp:
+            raw = resp.read(); return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: rb = json.loads(raw)
+        except: rb = raw.decode()[:300]
+        return e.code, rb
+    except (urllib.error.URLError, OSError) as e:
+        # timeout, refused or reset connection: status 0, never an exception
+        return 0, {"error": str(getattr(e, "reason", e))[:200]}
+
+def retry(label, call, ok=(200, 201)):
+    """call() -> (status, body). Transport failures (0) and 5xx are retried with
+    backoff; any other answer (success or a refusal) is final."""
+    s, r = call()
+    for wait in PROVIDER_BACKOFF:
+        if s in ok or not (s == 0 or s >= 500):
+            break
+        print("  %s: %s; retrying in %gs ..." % (label, "timed out" if s == 0 else "HTTP %s" % s, wait))
+        time.sleep(wait)
+        s, r = call()
+    return s, r
+
+def llm_model_ready():
+    """Wait (bounded) until the LLM Manager lists the default chat model for Onyx's
+    key; a registration before that validates against an engine that is not up."""
+    opener_np = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    deadline = time.time() + MODEL_WAIT
+    while True:
+        try:
+            rq = urllib.request.Request(LLM_BASE + "/models", headers={"Authorization": "Bearer " + ONYX_KEY})
+            with opener_np.open(rq, timeout=10) as resp:
+                ids = [m.get("id") for m in json.loads(resp.read()).get("data", [])]
+            if DEFAULT_CHAT in ids:
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(float(os.environ.get("RZFZ_ONYX_MODEL_POLL") or 5))
+
+def db_exec(sql, params=()):
+    if not psycopg2: return
+    conn = psycopg2.connect(host=POSTGRES_HOST, user=POSTGRES_USER,
+                            password=POSTGRES_PASS, dbname=POSTGRES_DB)
+    cur = conn.cursor(); cur.execute(sql, params); conn.commit()
+    result = cur.fetchall() if cur.description else []
+    conn.close(); return result
+
+# 1. Ensure admin user exists and is superuser
+login_data = urllib.parse.urlencode({"username": EMAIL, "password": PASSWORD}).encode()
+def login():
+    try:
+        opener.open(urllib.request.Request(BASE+"/auth/login", data=login_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"))
+        return True
+    except Exception:
+        return False
+
+def give_up(why):
+    # exit 3 = "Onyx not provisioned, the caller warns and carries on"
+    print("  WARNING: Onyx admin setup failed: " + why)
+    print("  Onyx is NOT provisioned (no admin, no model provider). Fix the cause, then run: rzfz post-install --refresh")
+    sys.exit(3)
+
+if not login():
+    # Register first
+    rs, rb = req("POST", "/auth/register", {"email": EMAIL, "password": PASSWORD})
+    if rs not in (200, 201):
+        give_up("register answered HTTP %s for %s: %s" % (rs, EMAIL, str(rb)[:200]))
+    # Onyx answers slowly right after its first start: the login after a fresh
+    # register can time out or return 5xx for a minute or two. Bounded retry
+    # with backoff (about two minutes in all), then the WARN path.
+    import time
+    waits = [float(w) for w in os.environ.get("RZFZ_ONYX_LOGIN_BACKOFF", "2,4,8,15,30,60").split(",") if w]
+    for wait in waits:
+        if login():
+            break
+        print("  Onyx login not ready yet; retrying in %gs ..." % wait)
+        time.sleep(wait)
+    else:
+        if not login():
+            give_up("login for %s is refused after registering (Onyx may still be starting)" % EMAIL)
+
+# #3377: since Onyx v4.9 an admin is a member of the default "Admin" group and
+# the API checks the user's effective_permissions; is_superuser is reported but
+# grants nothing. Onyx makes only the FIRST registered account an admin, so on a
+# box where someone registered before this script, its account is a basic user
+# and every admin call below answers 403. Promote through the group, then store
+# the permissions Onyx would recompute from the group grants.
+PROMOTE_ADMIN_SQL = """
+INSERT INTO user__user_group (user_group_id, user_id, is_curator, is_manager)
+SELECT g.id, u.id, false, false
+  FROM "user" u, user_group g
+ WHERE lower(u.email) = lower(%(email)s) AND g.name = 'Admin' AND g.is_default
+ON CONFLICT DO NOTHING;
+UPDATE "user" u
+   SET is_superuser = true,
+       effective_permissions = COALESCE((
+           SELECT jsonb_agg(DISTINCT pg.permission ORDER BY pg.permission)
+             FROM user__user_group uug
+             JOIN permission_grant pg ON pg.group_id = uug.user_group_id AND NOT pg.is_deleted
+            WHERE uug.user_id = u.id), '[]'::jsonb)
+ WHERE lower(u.email) = lower(%(email)s);
+"""
+
+def is_admin(me):
+    return isinstance(me, dict) and "admin" in (me.get("effective_permissions") or [])
+
+s, me = req("GET", "/me", timeout=PROVIDER_TIMEOUT)
+if not is_admin(me):
+    try:
+        db_exec(PROMOTE_ADMIN_SQL, {"email": EMAIL})
+    except Exception as e:
+        print("  WARNING: could not add %s to the Onyx Admin group: %s" % (EMAIL, str(e)[:200]))
+    opener.open(urllib.request.Request(BASE+"/auth/login", data=login_data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"))
+    s, me = req("GET", "/me", timeout=PROVIDER_TIMEOUT)
+    if is_admin(me):
+        print("  promoted to Onyx admin (Admin group)")
+    else:
+        print("  WARNING: %s is still no Onyx admin - the admin settings below will be refused (403)." % EMAIL)
+
+# 2. LLM Provider
+def find_gpustack():
+    st, existing = req("GET", "/admin/llm/provider", timeout=PROVIDER_TIMEOUT)
+    provs = existing.get("providers", []) if isinstance(existing, dict) else []
+    return next((p for p in provs if p.get("name") == "GPUStack"), None)
+
+gpustack = find_gpustack()
+provider_id = gpustack["id"] if gpustack else None
+# The always-on default (qwen3.6, multimodal) is the primary model + system
+# default. gemma4 / qwen3-coder-next are auto_start:false (0 replicas) — listed
+# as optional/selectable but never the default (selecting one while stopped
+# errors until the operator scales it up).
+model_cfgs = [
+    {"name": DEFAULT_CHAT, "is_visible": True, "max_input_tokens": None,
+     "supports_image_input": True, "display_name": "Qwen3.6 (default)"},
+    {"name": "gemma4", "is_visible": True, "max_input_tokens": None,
+     "supports_image_input": False, "display_name": "Gemma 4 (optional)"},
+    {"name": "qwen3-coder-next", "is_visible": True, "max_input_tokens": None,
+     "supports_image_input": False, "display_name": "Qwen3 Coder Next (optional)"},
+]
+
+def put_provider():
+    # Re-read every attempt: a PUT that timed out client-side may still have
+    # created the row, and the next attempt then updates it in place.
+    gp = find_gpustack()
+    if gp:
+        payload = {**gp, "api_key": ONYX_KEY, "api_key_changed": True,
+                   "api_base": LLM_BASE, "model_configurations": model_cfgs}
+        return req("PUT", "/admin/llm/provider", payload, {"is_creation": "false"}, timeout=PROVIDER_TIMEOUT)
+    return req("PUT", "/admin/llm/provider", {
+        "name": "GPUStack", "provider": "openai", "api_key": ONYX_KEY, "api_key_changed": True,
+        "api_base": LLM_BASE, "api_version": None, "custom_config": {},
+        "is_public": True, "is_auto_mode": False, "groups": [], "personas": [],
+        "deployment_name": None, "model_configurations": model_cfgs
+    }, {"is_creation": "true"}, timeout=PROVIDER_TIMEOUT)
+
+if not ONYX_KEY:
+    print("  LLM provider: SKIPPED - no LLM Manager key for Onyx (LLM_MANAGER_ONYX_KEY is empty). "
+          "Run 'rzfz post-install --refresh' once the LLM Manager is up.")
+else:
+    if not llm_model_ready():
+        print("  NOTE: the LLM Manager does not list '%s' yet (waited %gs); registering anyway, "
+              "the provider call is retried." % (DEFAULT_CHAT, MODEL_WAIT))
+    was_there = gpustack is not None
+    s, r = retry("LLM provider", put_provider)
+    after = find_gpustack()
+    if s in (200, 201):
+        provider_id = (r.get("id") if isinstance(r, dict) else None) or (after or {}).get("id") or provider_id
+        print("  LLM provider: %s id=%s%s" % (s, provider_id, " (updated in place)" if was_there else ""))
+    elif after:
+        # The call failed or timed out client-side, but the row is there.
+        provider_id = after["id"]
+        print("  LLM provider: %s - the provider row exists (id=%s); continuing with the default model" % (s or "timed out", provider_id))
+    else:
+        print("  LLM provider: FAILED (%s) and no provider row exists." % (s or "timed out"))
+        MISSING.append("the LLM provider")
+
+# 3. Default model
+if provider_id and ONYX_KEY:
+    s, r = retry("Default model", lambda: req("POST", "/admin/llm/default",
+                 {"provider_id": provider_id, "model_name": DEFAULT_CHAT}, timeout=PROVIDER_TIMEOUT), ok=(200, 201, 204))
+    print(f"  Default model: {s}")
+    if not 200 <= s < 300:
+        MISSING.append("the default model")
+elif ONYX_KEY:
+    MISSING.append("the default model")
+
+# 4. Embedding provider
+def litellm_embedding_provider():
+    st, body = req("GET", "/admin/embedding/embedding-provider")
+    for p in (body if isinstance(body, list) else []):
+        if isinstance(p, dict) and p.get("provider_type") == "litellm":
+            # Onyx masks the stored key on read; the mask is stable per key, so
+            # before/after reads from Onyx itself tell a key change apart.
+            return (p.get("api_url"), p.get("api_key"))
+    return None
+
+embedding_changed = False
+if not ONYX_KEY:
+    print("  Embedding provider: SKIPPED - no LLM Manager key for Onyx (LLM_MANAGER_ONYX_KEY is empty).")
+else:
+    before = litellm_embedding_provider()
+    # One provider row per type: this PUT updates a provider that is already
+    # there (old URL, refused key) instead of adding a second one.
+    s, r = retry("Embedding provider", lambda: req("PUT", "/admin/embedding/embedding-provider", {
+        "provider_type": "litellm", "api_key": ONYX_KEY, "api_key_changed": True,
+        "api_url": EMBED_URL, "api_version": None, "deployment_name": None
+    }, timeout=PROVIDER_TIMEOUT))
+    print(f"  Embedding provider: {s}")
+    if s != 200:
+        MISSING.append("the embedding provider")
+    after = litellm_embedding_provider()
+    embedding_changed = s == 200 and before is not None and before != after
+    if embedding_changed:
+        print("  Embedding provider changed (was %s): existing connectors are re-indexed." % (before[0],))
+
+# 5. Search settings (the fleet-standard embedding model, #1786)
+#    Model and dim come from standard-models.yaml `defaults.embedding`, not from
+#    a literal: the old `nomic-embed-text`/768 pair named a model the standard
+#    set does not deploy, at nomic's dim rather than the served one (#70).
+if DEFAULT_EMBED_DIM is None:
+    # No guessed number. Onyx keeps whatever it has, and the run says why —
+    # a dimension that disagrees with the endpoint is the #70 failure, and it
+    # fails at insert time with nothing pointing back here.
+    print("  Search settings (embedding): SKIPPED — the embedding dimension could "
+          "not be read from core/llm/standard-models.yaml. Fix the manifest and "
+          "re-run 'rzfz post-install --refresh'.")
+elif not ONYX_KEY:
+    print("  Search settings (embedding): SKIPPED - no LLM Manager key for Onyx.")
+else:
+    # #2942: set-new-search-settings is not idempotent - Onyx answers 200 and queues an
+    # identical search setting, which re-indexes every connector. Only ask for a model
+    # that neither the current nor the queued (secondary) search setting already is.
+    wanted_ss = {"model_name": "openai/" + DEFAULT_EMBED, "provider_type": "litellm",
+                 "model_dim": DEFAULT_EMBED_DIM}
+    def search_setting_in_force():
+        for ep in ("/search-settings/get-current-search-settings", "/search-settings/get-secondary-search-settings"):
+            st, body = req("GET", ep)
+            if not (st == 200 and isinstance(body, dict)):
+                continue
+            if all(str(body.get(k)) == str(v) for k, v in wanted_ss.items()) \
+                    and (not body.get("api_url") or body.get("api_url") == EMBED_URL):
+                return ep.rsplit("/", 1)[1]
+        return None
+    in_force = search_setting_in_force()
+    if in_force:
+        print("  Search settings (embedding): INFO - %s is already the %s; nothing to change, no re-index."
+              % (wanted_ss["model_name"], "current model" if "current" in in_force else "queued model"))
+    else:
+        s, r = retry("Search settings (embedding)", lambda: req("POST", "/search-settings/set-new-search-settings", {
+            "model_name": "openai/" + DEFAULT_EMBED, "normalize": True,
+            "query_prefix": "", "passage_prefix": "", "api_url": EMBED_URL,
+            "provider_type": "litellm", "api_key": ONYX_KEY, "model_dim": DEFAULT_EMBED_DIM,
+            "index_name": None, "multipass_indexing": True,
+            "embedding_precision": "float", "enable_contextual_rag": False
+        }, timeout=PROVIDER_TIMEOUT))
+        print(f"  Search settings (embedding): {s}")
+        if not 200 <= s < 300:
+            # A repeat run is refused when the wanted model is already current or
+            # queued; only a refusal while some other model is in force is missing.
+            wanted = "openai/" + DEFAULT_EMBED
+            have = set()
+            for ep in ("/search-settings/get-current-search-settings", "/search-settings/get-secondary-search-settings"):
+                st, body = req("GET", ep)
+                if isinstance(body, dict) and body.get("model_name"):
+                    have.add(body["model_name"])
+            if wanted not in have:
+                MISSING.append("the embedding model (search settings)")
+
+# 5b. The documents indexed against the old provider are missing or broken
+#     (every attempt failed with 404/401). Index every connector once more from
+#     the beginning - only when the provider really changed, so a repeated run
+#     never re-embeds a healthy index.
+if embedding_changed:
+    s, cps = req("GET", "/manage/admin/connector/status")
+    for cp in (cps if isinstance(cps, list) else []):
+        cid = (cp.get("connector") or {}).get("id")
+        crid = (cp.get("credential") or {}).get("id")
+        if cid is None or crid is None:
+            continue
+        s, r = req("POST", "/manage/admin/connector/run-once",
+                   {"connector_id": cid, "credential_ids": [crid], "from_beginning": True})
+        print(f"  Re-index connector {cid}: {s}")
+
+# 6. Web search (SearXNG)
+s, existing_ws = req("GET", "/admin/web-search/search-providers")
+if not any(p.get("provider_type") == "searxng" for p in (existing_ws if isinstance(existing_ws, list) else [])):
+    s, r = req("POST", "/admin/web-search/search-providers", {
+        "name": "SearXNG", "provider_type": "searxng",
+        "config": {"base_url": "http://searxng:8080"}, "api_key": None, "activate": True
+    })
+    print(f"  Web search (SearXNG): {s}")
+else:
+    print("  Web search (SearXNG): already configured")
+
+# 7. Voice provider (Speaches) — insert via DB to bypass SSRF check
+if psycopg2:
+    rows = db_exec("SELECT id FROM voice_provider WHERE name='Speaches'")
+    if rows:
+        db_exec("UPDATE voice_provider SET api_base=%s, is_default_stt=true, is_default_tts=true WHERE name='Speaches'",
+                ("http://speaches:8000",))
+        print("  Voice (Speaches): updated")
+    else:
+        db_exec("""INSERT INTO voice_provider
+            (name,provider_type,api_key,api_base,custom_config,stt_model,tts_model,
+             default_voice,is_default_stt,is_default_tts)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            ("Speaches","speaches",None,"http://speaches:8000","{}",
+             None,None,None,True,True))
+        print("  Voice (Speaches): inserted")
+else:
+    print("  Voice (Speaches): skipped (psycopg2 not available)")
+
+if MISSING:
+    print("  INCOMPLETE: not set: " + "; ".join(MISSING) + ".")
+    print("  Complete it with: rzfz post-install --refresh   (Onyx keeps its bundled embedding model until then)")
+    sys.exit(3)
+print("Onyx provisioning complete.")
+PYEOF
+
+    # #2746: secrets are forwarded by NAME (`-e NAME`), their values come from
+    # the docker client's environment, never from argv.
+    #
+    # Onyx talks to the LLM Manager with its OWN service key (cost centre
+    # stack/onyx): the manager refuses GPUSTACK_API_KEY. Take the one in
+    # .env when the manager accepts it, mint a fresh one when it is empty or
+    # dead, and forward it by name.
+    local LLM_MANAGER_ONYX_KEY onyx_key_missing=0
+    LLM_MANAGER_ONYX_KEY=$(read_env_value "$ENV_FILE" LLM_MANAGER_ONYX_KEY 2>/dev/null || true)
+    if [ -z "$LLM_MANAGER_ONYX_KEY" ] || [ "$(_llm_manager_key_status "$LLM_MANAGER_ONYX_KEY" 2>/dev/null)" = "dead" ]; then
+        local minted_onyx_key=""
+        if _llm_manager_running; then
+            minted_onyx_key=$(_llm_manager_mint_service_key onyx 2>/dev/null) || minted_onyx_key=""
+        fi
+        if [ -n "$minted_onyx_key" ]; then
+            LLM_MANAGER_ONYX_KEY="$minted_onyx_key"
+            update_env_value "$ENV_FILE" "LLM_MANAGER_ONYX_KEY" "$LLM_MANAGER_ONYX_KEY"
+            print_substep "Minted the stack/onyx service key."
+        else
+            LLM_MANAGER_ONYX_KEY=""
+            onyx_key_missing=1
+            print_warning "No LLM Manager key for Onyx (LLM_MANAGER_ONYX_KEY is empty and none could be minted) - Onyx's model providers are left as they are."
+        fi
+    fi
+    export LLM_MANAGER_ONYX_KEY
+    local onyx_rc=0
+    set +e
+    AUTHENTIK_BOOTSTRAP_PASSWORD="${AUTHENTIK_BOOTSTRAP_PASSWORD}" \
+    POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" docker exec \
+        -e MAIN_DOMAIN="${MAIN_DOMAIN}" \
+        -e AUTHENTIK_BOOTSTRAP_PASSWORD \
+        -e LLM_MANAGER_ONYX_KEY \
+        -e POSTGRES_HOST="postgres" \
+        -e POSTGRES_USER="${POSTGRES_USER:-docker}" \
+        -e POSTGRES_PASSWORD \
+        -e POSTGRES_DB="${ONYX_DB:-onyx_db}" \
+        -e DEFAULT_CHAT="$(_default_chat_alias)" \
+        -e DEFAULT_EMBED="$(_default_embedding_alias)" \
+        -e DEFAULT_EMBED_DIM="$(_default_embedding_dim)" \
+        onyx-api python3 /tmp/onyx_post_install.py 2>&1 | \
+        while IFS= read -r line; do print_substep "$line"; done
+    # #2858: PIPESTATUS, not the loop's status. A failed Onyx step is a
+    # WARN, never an abort: paperless, vaultwarden and matrix come after it.
+    onyx_rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$onyx_rc" -ne 0 ]; then
+        print_warning "Onyx provisioning did not finish (exit ${onyx_rc}) - the steps after it continue."
+        print_info "  What is missing is named in the lines above. Complete it with:  rzfz post-install --refresh"
+        print_info "  If the lines above name the admin address: Onyx refuses special-use domains (.local, .test, .localhost, .invalid, .onion, .arpa). Use another MAIN_DOMAIN suffix, e.g. .lan or .internal, or run: rzfz post-install --refresh once fixed."
+        record_step_status onyx WARN
+        return 0
+    fi
+
+    if [ "$onyx_key_missing" -eq 1 ]; then
+        record_step_status onyx WARN
+        print_warning "Onyx is set up without its model providers. Re-run: rzfz post-install --refresh (with the LLM Manager running)."
+        return 0
+    fi
+    record_step_status onyx OK
+    print_success "Onyx provisioning complete."
+}
+
+# Komodo hardening (#539). Komodo's Server.auto_prune defaults to TRUE, which
+# makes komodo-periphery run `docker image prune -a -f` every night at 00:00
+# UTC over the raw docker socket. That deletes every image no container
+# references — i.e. the custom-built images of DISABLED modules, which on an
+# offline or air-gapped box cannot be rebuilt or re-pulled, so the module can
+# never be enabled again. Measured on a customer box: 29 images in one burst.
+# We never chose that default; we inherited it by creating the server via
+# KOMODO_FIRST_SERVER. Disk pressure is handled deliberately elsewhere.
+# #3279: defined ONCE here, before the --refresh arm (which `rzfz upgrade`
+# runs and which exits before the --preset path), so BOTH arms reach it — a
+# factory reset brings Komodo's auto_prune default back, and `rzfz status`
+# names `rzfz post-install --refresh` as the fix for it.
+step_komodo_hardening() {
+    echo "${COMPOSE_PROFILES:-}" | grep -qw "monitor" || return 0
+    print_step "Komodo: disabling nightly image auto-prune..."
+    local komodo_out="" komodo_rc=0
+    # #2566: mint the stack's own API key while the .env admin password still
+    # logs in, and use it from then on (a password changed in the UI no
+    # longer strands this step); Komodo's store is the last resort.
+    razzfazz_komodo_ensure_api_key .env 2>&1 | while IFS= read -r line; do print_substep "$line"; done || true
+    komodo_out="$(KOMODO_API_KEY="$(read_env_value .env KOMODO_API_KEY)" \
+                  KOMODO_API_SECRET="$(read_env_value .env KOMODO_API_SECRET)" \
+                  razzfazz_komodo_disable_auto_prune 2>&1)" || komodo_rc=$?
+    [ -n "$komodo_out" ] && printf '%s\n' "$komodo_out" \
+        | while IFS= read -r line; do print_substep "$line"; done
+    if [ "$komodo_rc" -eq 0 ]; then
+        print_success "Komodo: auto_prune disabled (custom-built images of disabled modules are safe)."
+        record_step_status komodo-prune OK
+    else
+        print_error "Komodo: auto_prune could NOT be turned off — its nightly 'docker image prune -a' will delete images this stack needs. 'rzfz status' shows the live setting; turn it off in Komodo (Servers → Local → Auto Prune), or re-run 'rzfz post-install --refresh'."
+        record_step_status komodo-prune FAIL
+    fi
+}
+
+if [ "$DO_REFRESH" = true ]; then
+    if [ -n "$PRESET" ]; then
+        print_error "--refresh is mutually exclusive with --preset."
+        exit 1
+    fi
+    print_step "Refresh mode (idempotent post-upgrade re-config)"
+    if [ "$SKIP_DNS" = false ]; then
+        setup_local_dns
+    fi
+    # #1442 rev-B (review): federate BEFORE the wiring block. The wiring writes
+    # the endpoint list from llm_manager_owns_standard_set, so on the run that
+    # flips the box the list would still be written GPUStack-first and only the
+    # NEXT run would converge. Registration needs a running manager + running
+    # GPUStack, nothing from this run's deploy — and it must not hang off
+    # --skip-models (the post-deploy calls below only re-sync the model list).
+    llm_manager_federate_gpustack || true
+    # #2578: a template change (the Synapse OIDC mapping module) reaches a box
+    # that already runs Matrix only through this render.
+    matrix_refresh_config "$SCRIPT_DIR" || print_warning "matrix: the Synapse config was not refreshed (see above) - fix the cause and re-run --refresh."
+    # #2767: after a `--network-mode` switch the containers still run the old mode's
+    # settings; recreate the ones that depend on it before anything installs into them.
+    settle_network_mode_services || true
+    # #320: consumer wiring for the llm-manager line (idempotent; no-op
+    # without the profile). Runs early so a later failure in the gpustack
+    # block cannot skip it.
+    wire_llm_manager_consumers || true
+    wire_llm_manager_rag_consumers || true
+    # #240: same idempotent shape for the Mac gateway (mac-llm profile).
+    wire_mac_llm_consumers || true
+    # #813: the Dify half of the same wiring — its OWN function, because the
+    # OWUI half above early-returns on an empty master key (#690).
+    wire_mac_llm_dify_consumer || true
+    wire_observability_consumers || true
+    if curl -fsS --max-time 5 "http://127.0.0.1:${GPUSTACK_PORT:-9090}/healthz" >/dev/null 2>&1; then
+        ensure_gpustack_api_key
+    else
+        print_warning "GPUStack not reachable on http://127.0.0.1:${GPUSTACK_PORT:-9090} — skipping API-key refresh."
+        print_info "  Re-run --refresh once GPUStack is up, or set the key manually with:"
+        print_info "    rzfz setup --set-gpustack-api-key <KEY>"
+    fi
+    ensure_engine_gpu_group_gids --recreate || true   # #2393: reaches upgraded boxes
+    sync_experimental_runner_flag_to_manager || true  # #3403
+    refresh_llama_vulkan_runner
+    push_runner_images_to_registry || HUB_PUBLISH_FAILED=1
+    build_mac_agent_bundle || print_warning "Mac worker bundle not built (non-fatal) — no Mac can be installed from this master until the next --refresh (#2559)."
+    # ga.1 (Issue A): also pre-build all custom-build images on --refresh (the
+    # documented post-upgrade path) so later module-enable stays offline-safe.
+    prebuild_all_custom_images
+    prepull_agent_manager_images
+    # #2770: the handover PDFs embed MAIN_DOMAIN and the model list; a refresh
+    # after a re-domain must not leave them on the old domain. Idempotent,
+    # non-fatal (a failure warns).
+    if [ -x "${SCRIPT_DIR}/scripts/regenerate-handover-pdfs.sh" ]; then
+        print_step "Operator-facing PDFs: regenerating getting-started.pdf + quickstart.pdf..."
+        "${SCRIPT_DIR}/scripts/regenerate-handover-pdfs.sh" || print_warning "handover PDF regeneration failed (non-fatal) - re-run: ./scripts/regenerate-handover-pdfs.sh"
+    fi
+    # ga.1 (upgrade day-1-green): apply the OWUI-key / model-sync / Dify-pgvector /
+    # coding-agent wiring self-heal on --refresh too. Without this, an upgraded box
+    # keeps its init-time placeholder GPUStack key in OWUI's persisted config (0
+    # models), an un-recreated model-sync (writes 0 models) and placeholder-keyed
+    # coding agents — the exact day-1 failure cluster seen after an upgrade. Runs
+    # after ensure_gpustack_api_key above wrote the live key to .env; idempotent.
+    refresh_apply_day1_wiring_fixes
+    # ga.1 (#147 follow-up): after the wiring self-heal, make sure the standard
+    # preset's DEFAULT models are DEPLOYED — an upgraded box whose gpustack came up
+    # with 0 registered models (degraded baseline) otherwise self-heals its wiring
+    # but still lists 0 models and fails the AFTER-upgrade day-1 suite. Idempotent:
+    # deploys only MISSING defaults, SKIPS entirely when a real customer's models
+    # already persist (no re-download / reset). Profile-gated + best-effort.
+    # #187: gated on --skip-models — deploying/ensuring models here would re-trigger
+    # the untimed download-and-wait path the flag exists to avoid.
+    if [ "${SKIP_MODELS:-false}" = false ]; then
+        refresh_ensure_default_models_deployed
+    else
+        print_substep "Skipping default-model ensure (--skip-models)."
+    fi
+    # #2420: the RAG consumers' embedding model/dimension pairs, measured against
+    # the endpoint that serves them, now that the default models are up. The
+    # upgrade's --refresh never reached update_env_model_config, so an aged box
+    # kept a retired model beside a new dimension and an always-empty brain.
+    print_step "Reconciling embedding model/dimension pairs (#2420)..."
+    reconcile_embedding_dims || print_warning "embedding dim reconcile reported a problem (see above)"
+    # #2815: and their chat models - the template default is not served on a CPU box.
+    print_step "Reconciling RAG consumer chat models..."
+    reconcile_consumer_chat_models || print_warning "chat model reconcile reported a problem (see above)"
+    # cognee's per-call output cap: the old default in an upgraded .env, and the
+    # running container brought in line with .env.
+    cognee_cap_output_budget || print_warning "cognee output-cap step reported a problem (see above)"
+    # RZFZAI-1337: the --refresh path (what `rzfz upgrade` calls) previously
+    # NEVER ran Dify initialisation — only the --preset path reached Step 6
+    # (step_dify_provisioning). So an upgraded box, or one where the `dify`
+    # profile was enabled AFTER the original install, was left with an
+    # uninitialised Dify console (stuck on /install) and no GPUStack model
+    # provider / example KB. Run the SAME idempotent provisioning step here,
+    # gated on the dify profile and best-effort so it can never abort the
+    # refresh. Idempotent: dify_ensure_admin skips setup when already
+    # "finished", plugin installs skip-if-present, model config is idempotent,
+    # and seed-apps.sh is flag-guarded. Ordered AFTER refresh_apply_day1_wiring_fixes
+    # (which force-recreates dify-api for the pgvector password) and after the
+    # default models are deployed, so Dify's model-provider config sees them.
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "dify"; then
+        # #1425: RECORD the outcome here too. Before this the refresh path
+        # swallowed a failed Dify provisioning entirely — no status, so the
+        # summary rendered SKIP ("never reached") for a step that had just
+        # failed, and nothing could reach the exit contract.
+        if step_dify_provisioning; then
+            record_step_status dify OK
+        else
+            # #2195: 3 is "the models were not served yet", not "this box is
+            # broken". `dify` is a CRITICAL step, so FAIL here exits 1.
+            _dify_rc=$?
+            _dify_verdict=$(_consumer_step_verdict "$_dify_rc" "Dify")
+            record_step_status dify "$_dify_verdict"
+            if [ "$_dify_verdict" = FAIL ]; then
+                print_warning "Dify init on --refresh reported an issue — re-run 'rzfz post-install --refresh' or check the Dify console."
+            fi
+        fi
+    fi
+    # #1507: same late re-wire as the --preset arm, placed after the LAST step
+    # of this arm that enumerates the served set (Dify's provisioning; OWUI's
+    # model-sync ran even earlier, in refresh_apply_day1_wiring_fixes). Fires
+    # only when the deploy above set the marker.
+    llm_manager_reconcile_consumers_late || true
+    # ga.6: provision MCP registry on --refresh too (was --preset-only — upgraded
+    # boxes following the documented post-upgrade --refresh flow otherwise ended up
+    # with an empty COGNEE_MCP_API_KEY + a non-functional cognee-mcp sidecar).
+    # Profile-gated (no-op without cognee) + idempotent (skips if key already set).
+    provision_mcp_registry
+    ensure_mcp_manager_secret
+    ensure_gitea_mcp_oauth_app || print_warning "Gitea MCP OAuth app registration reported an issue."
+    ensure_mcp_readonly_authentik_token || print_warning "MCP read-only Authentik token provisioning reported an issue."
+    reconcile_mcp_manager_env || print_warning "mcp-manager environment reconcile reported an issue."
+    # #2672: these run BEFORE the Open WebUI block below, as on --preset. The
+    # MCP tool-server seed there emits the gateway servers that need a person
+    # only when MCP_MANAGER_AUTHENTIK_READONLY_TOKEN is set, and cognee's header
+    # only once COGNEE_MCP_API_KEY is: minted after the seed, an upgraded box
+    # would see them only on its SECOND refresh.
+    # #258: the --refresh path never touched OWUI's retrieval config. Same shape
+    # as the Dify gap above (RZFZAI-1337): the reconcile existed, but only on the
+    # --preset path, so the command an operator actually reaches for silently did
+    # nothing for RAG.
+    #
+    # That matters because the config does not merely go missing at install time,
+    # it gets DESTROYED later: OWUI's /admin/settings/web Save posts the whole
+    # retrieval config without the reranker field and the server REPLACES rather
+    # than merges, so `RAG_RERANKING_MODEL` becomes null. PersistentConfig never
+    # re-seeds from env once the DB key exists, so nothing brings it back. With
+    # hybrid search on and no reranker, web search silently stops running and the
+    # model answers from memory — no sources, no error, a plausible answer.
+    #
+    # Profile-gated, best-effort, idempotent (GET -> merge -> POST), exactly like
+    # the Dify block: a failure here must never abort a refresh.
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "chat"; then
+        if wait_for_service "Open WebUI" "http://127.0.0.1:${OPENWEBUI_PORT:-8080}/health" 60 2>/dev/null \
+           && owui_ensure_admin >/dev/null 2>&1; then
+            # #976: pair the EMBEDDING reconcile with the retrieval one. On a box
+            # whose LLM backend changed (e.g. gpustack → llm-manager on an
+            # upgrade) the embedding endpoint must be re-resolved too, else RAG
+            # embedding keeps hitting the old backend. Same #258 rationale that
+            # put owui_configure_retrieval_env on the --refresh path.
+            owui_configure_embedding \
+                || print_warning "Embedding reconcile reported an issue (non-fatal) — check Chat > Admin > Settings > Documents."
+            owui_register_pipelines_connection \
+                || print_warning "Pipelines registration reported an issue (non-fatal, #1401) — chat attribution (openlit_filter) may stay inert."
+            owui_configure_retrieval_env \
+                || print_warning "Retrieval/RAG reconcile reported an issue (non-fatal) — check Chat > Admin > Settings > Documents."
+            # #1266: the model ROWS too. --refresh is the path `rzfz upgrade`
+            # takes and is mutually exclusive with --preset, so without this an
+            # upgraded Manager box keeps an empty `model` table: no
+            # capabilities, and the embedder/reranker in the chat picker. Same
+            # idempotent reconcile the --preset path runs (a no-op when the
+            # rows already match); it reports its own reason for skipping.
+            if llm_manager_owns_standard_set; then   # #1441
+                owui_reconcile_model_rows || true
+            fi
+            # #2672: the registry's MCP tool servers — `rzfz upgrade` and a module
+            # enabled later both reach Open WebUI only through this path.
+            owui_seed_mcp_servers || true
+            # #2948: and the retired cognee pipe leaves a box the same way.
+            owui_remove_retired_pipes || true
+        else
+            print_warning "Open WebUI not reachable — retrieval/RAG reconcile skipped (#258)."
+            print_info    "  Re-run 'rzfz post-install --refresh' once chat is up."
+        fi
+        # #2535: a Settings → Auth change made since the last upgrade reaches
+        # Open WebUI here too, not only on `rzfz upgrade`.
+        # OWUI_SSO_REDERIVE-BEGIN
+        # The derive runs in $(...) (a subshell), and load_env exported the OLD
+        # .env at start: re-export the derived keys here, in the shell that runs
+        # `docker compose`, or the recreate interpolates the stale copy (#2535, #1486 class).
+        _owui_rederived=$(derive_owui_sso_env .env)
+        reexport_owui_sso_env .env
+        if [ -n "$_owui_rederived" ]; then
+            print_substep "Open WebUI login keys re-derived from the SSO switches — recreating openwebui (#2535)"
+            docker compose up -d --no-deps --force-recreate openwebui >/dev/null 2>&1 \
+                || print_warning "openwebui recreate failed — the new login keys apply at the next recreate (#2535)"
+        fi
+        # OWUI_SSO_REDERIVE-END
+        # #2507: the persisted SSO-login rows. `rzfz upgrade` ends in this
+        # --refresh, so this is the upgraded box's path (env alone never
+        # reaches the `ui.enable_login_form` row of an existing OWUI DB).
+        owui_reconcile_sso_login \
+            || print_warning "Open WebUI SSO-login reconcile reported an issue (non-fatal, #2507) — see above."
+        # #2515: same shape — the embedding batch/concurrency rows, written
+        # straight to Postgres so an upgraded box ends up at the fleet default
+        # even when Open WebUI was not reachable for owui_configure_embedding
+        # above (this branch's OWUI-down arm skips it entirely, #258).
+        owui_reconcile_embedding_defaults \
+            || print_warning "Open WebUI embedding batch/concurrency reconcile reported an issue (non-fatal, #2515) — see above."
+        # #2751: the Ollama URL list Open WebUI persisted at first boot may hold
+        # the comment text of the old .env line; the .env migration cannot reach it.
+        owui_reconcile_ollama_urls \
+            || print_warning "Open WebUI Ollama-URL reconcile reported an issue (non-fatal) — see above."
+        # #2473 D6: an upgraded box's public knowledge becomes owner-private,
+        # once (marker OWUI_KNOWLEDGE_SCOPES_MIGRATED; a failure retries here).
+        owui_privatize_public_knowledge \
+            || print_warning "Open WebUI knowledge privatisation reported an issue (non-fatal, #2473) — see above."
+        # #2473 D6: the knowledge-scope placeholder group stays empty and unshared.
+        owui_check_scope_placeholder \
+            || print_warning "Open WebUI placeholder-group check reported an issue (non-fatal, #2473) — see above."
+        # #3494: an upgraded box crossing to Open WebUI 0.12 keeps its users'
+        # own tool servers (`rzfz upgrade` ends in this --refresh).
+        owui_carry_over_direct_integrations \
+            || print_warning "Open WebUI direct tool server carry-over reported an issue (non-fatal) — see above."
+        # #2519: the chat defaults (default/pinned model, task thinking off,
+        # 3 builtin tool groups off — tasks stays on, operator decision
+        # 2026-09-28) — `rzfz upgrade` ends in this --refresh, so this is how
+        # a ga.3 box's `gemma4` default gets replaced. After the model-row
+        # reconcile above: it merges into the row that one wrote.
+        owui_reconcile_chat_defaults \
+            || print_warning "Open WebUI chat-defaults reconcile reported an issue (non-fatal, #2519) — see above."
+        # #2479: seed the "Dokumentanalyse" preset on an upgraded box (once;
+        # an existing preset is the operator's and is never rewritten).
+        owui_seed_preset_models \
+            || print_warning "Open WebUI preset seeding reported an issue (non-fatal, #2479) — see above."
+        # #2536 item 13: apply an OWUI_RAG_OPENAI_* edit in .env that the running
+        # container has not picked up (operator-edit guard; see lib-owui.sh).
+        owui_recreate_on_embedding_env_drift
+    fi
+    refresh_help_cache
+    openlit_align_admin
+    # #1075: report OpenUEM readiness on --refresh too, so a box that enables the
+    # opt-in module after install still gets the enrolment/first-login pointers.
+    openuem_report_readiness
+    ensure_hub_credentials_minted
+    reconcile_authentik_bindings
+    # #2473 D5: Dify, cognee and Synapse app roles follow the role catalogue
+    # (core/rbac/roles.yaml). Hand-granted roles and the last admin are left
+    # alone; an unusable catalogue changes nothing. Non-fatal, like its peers.
+    "${SCRIPT_DIR}/cli/provision-sso-users.sh" --reconcile-roles --app all \
+        || print_warning "Role reconcile reported a problem (non-fatal, #2473) — see above; retry: rzfz provision-sso-users --reconcile-roles --app all"
+    # #2476: OpenBao's people identity follows the role catalogue (after the
+    # role reconcile above). Non-fatal, like its peers; then, on a terminal,
+    # the recovery key is shown once if it never was.
+    if echo ",${COMPOSE_PROFILES:-}," | tr -d ' ' | grep -q ",openbao,"; then
+        openbao_reconcile_identity \
+            || print_warning "OpenBao identity reconcile reported a problem (non-fatal) - see above; retry: rzfz post-install --refresh"
+        openbao_show_recovery_key_once || true
+    fi
+    # #2864: Onyx's key, provider addresses and re-index reach an UPGRADED box
+    # only through here (rzfz upgrade runs --refresh and exits below, before the
+    # --preset path). The same function, the same soft fail (#2858): a failing
+    # Onyx step is a WARN and the rest of the refresh continues.
+    step_onyx_provisioning || print_warning "Onyx provisioning reported a problem (non-fatal) - retry: rzfz post-install --refresh"
+    # #2903: Paperless-ngx (idempotent superuser promotion + brand colour) was --preset only.
+    step_paperless_provisioning || print_warning "Paperless-ngx provisioning reported a problem (non-fatal) - retry: rzfz post-install --refresh"
+    # #3279: the Komodo auto-prune hardening was --preset only, so a factory reset
+    # (Komodo's auto_prune comes back true) was never repaired by the very command
+    # `rzfz status` tells the operator to run. Same function as the --preset arm,
+    # same monitor gate; the step itself reports a failure and komodo-prune is not
+    # a critical step, so a failure warns and does not fail the refresh.
+    step_komodo_hardening || print_warning "Komodo auto-prune hardening reported a problem (non-fatal) - see above; retry: rzfz post-install --refresh"
+    # #3072: the Speaches models were --preset only, like Dify and Onyx before
+    # them, so a volume that came up empty stayed empty through every upgrade
+    # (rzfz upgrade ends in this --refresh) and only --verify noticed. Same step
+    # as --preset; a no-op when the models are there or stts is off.
+    if [ "${SKIP_MODELS:-false}" = false ]; then
+        run_speaches_step
+    else
+        print_substep "Skipping the Speaches models (--skip-models)."
+    fi
+    provision_wazuh_agent     || print_warning "Wazuh agent auto-enrol reported an issue - see verify report / docs/enterprise/how-to/wazuh.md."
+    provision_openuem_admin   || print_warning "OpenUEM admin seed reported an issue - see 'docker logs postgres' / #1907."
+    provision_openuem_smtp    || print_warning "OpenUEM SMTP seed reported an issue - see 'docker logs postgres' / #1992."
+    # §16 handover: refresh the as-built day-1 security-posture assessment too, so
+    # an upgraded box carries a current report (matches the --preset path).
+    run_security_selfcheck
+    print_success "Refresh complete."
+    # This arm prints no step summary, and the Speaches step's error has
+    # scrolled away by now: the last thing on screen names the failed step.
+    [ "${STEP_STATUS[speaches]:-}" != FAIL ] \
+        || print_error "[FAIL] Speaches: ${SPEACHES_STEP_PROBLEM:-its STT/TTS models are not installed.}"
+    if [ "$DO_VERIFY" = false ]; then
+        # #1250a rev-B: this early exit is the path `rzfz upgrade` takes and
+        # the one the enrol failure message recommends retrying with. Without
+        # this call a failed enrolment printed "Refresh complete." and exited
+        # 0 — the same silent success the fix is about.
+        _exit_on_failed_provisioning
+        exit 0
+    fi
+fi
+
+if [ -n "$PRESET" ] && [ "$DO_FORCE" != true ]; then
+    if detect_existing_state; then
+        echo ""
+        print_error "Refusing to run --preset on a previously-initialised stack without --force."
+        print_info "  Safe alternatives:"
+        print_info "    --refresh    Idempotent re-wiring after an upgrade (hosts, keys, model wiring, Onyx, Paperless); it does not repeat the other --preset provisioning"
+        print_info "    --verify     Read-only verification suite"
+        print_info "  If the LLM Manager did not answer, start the stack and retry."
+        print_info "  If you know this box holds no models you care about, or you really want to"
+        print_info "  overwrite operator state with the preset defaults, re-run with --force."
+        exit 1
+    fi
+fi
+
+if [ -n "$PRESET" ]; then
+    # #1802: the OIDC CA superset belongs on BOTH paths, and it runs FIRST here
+    # for the same reason it runs first in refresh_apply_day1_wiring_fixes — every
+    # container recreated below bind-mounts certs/caddy-ca.pem, and Docker
+    # materialises a missing source as a root-owned DIRECTORY (#1080). Once that
+    # has happened, SSL_CERT_FILE and REQUESTS_CA_BUNDLE inside Open WebUI point
+    # at a directory and the app verifies NO TLS at all — measured on 0.79
+    # (2026-09-08): `CERTIFICATE_VERIFY_FAILED — unable to get local issuer
+    # certificate` against its own auth.<domain>.
+    #
+    # Until now this step lived only in the --refresh path, so a box provisioned
+    # with `--preset` never rebuilt the bundle and never repaired that directory,
+    # while `rzfz status` and the day1 probe both told the operator to run
+    # `--refresh` — the SMALLER command. Idempotent, self-diagnosing, cheap.
+    # The generalised repair FIRST (#1595), then the bundle it protects. This is
+    # the order cli/init.sh uses, and the reason is the same: post-install
+    # recreates containers, which is exactly the moment a missing bind source
+    # materialises as a directory. `repair_empty_dir_bind_sources` is called
+    # today by init.sh and upgrade.sh only — post-install called neither.
+    repair_empty_dir_bind_sources || true
+    ensure_oidc_ca_superset || STEP_STATUS[ca-bundle]=FAIL
+    # #3375: the host docker daemon pulls this box's runner images from the hub;
+    # on TLS_MODE=internal it must trust Caddy's root for that host too.
+    rzfz_trust_box_hub_ca "$ENV_FILE" \
+        || print_warning "Docker does not trust the hub's certificate yet - the LLM engines cannot move to a new runner until it does (rzfz post-install --refresh, then rzfz relaunch-engines)."
+
+    # Step 1: DNS
+    if [ "$SKIP_DNS" = false ]; then
+        setup_local_dns
+    fi
+
+    # #1442 rev-C (review N2): NO pre-wiring federation on the --preset path.
+    # A fresh box has no models in GPUStack yet (deploy_all_models runs much
+    # later), so the call could only print "nothing to federate — re-run
+    # --refresh" at a point where the very same run federates in Step 3b. The
+    # refresh path DOES pre-federate, because there the models already exist.
+    # #320/#976: consumer wiring for the llm-manager line runs FIRST — a
+    # gpustack-disabled box has no gpustack to wait for, and the wiring must
+    # never be skipped by a failure in the gpustack block below (matches the
+    # --refresh path, which already wires before gating gpustack). Idempotent;
+    # no-op without the profile.
+    wire_llm_manager_consumers || true
+    wire_llm_manager_rag_consumers || true
+    # #240: same idempotent shape for the Mac gateway (mac-llm profile).
+    wire_mac_llm_consumers || true
+    # #813: the Dify half of the same wiring — its OWN function, because the
+    # OWUI half above early-returns on an empty master key (#690).
+    wire_mac_llm_dify_consumer || true
+    wire_observability_consumers || true
+    # #2500 fix round 1: moved here (was Step 4b, right before the OWUI/Dify
+    # steps that talk to the manager) — a review found the recreate
+    # (hub-credentials.sh's `docker compose up -d llm-manager` when it mints
+    # or repairs) had no settle/health wait before those steps queried it.
+    # wire_observability_consumers just above is the existing precedent for a
+    # mid-preset manager recreate at this exact point: it also
+    # `docker compose up -d`s llm-manager/llm-manager-router (OTEL wiring)
+    # with no explicit wait, relying on the several steps between here and
+    # the first consumer that actually calls the manager (GPUStack's up-to-
+    # 120s wait in Step 2, then model deploy in Step 3) to cover the
+    # container's restart time. Same reasoning applies to a hub-credential
+    # recreate.
+    ensure_hub_credentials_minted || print_warning "Hub credential provisioning reported an issue — see verify report below."
+
+    # Step 2: GPUStack API key — only when a GPUStack profile is actually
+    # active. On an llm-manager-only box (gpustack disabled) there is nothing
+    # to wait for; hard-waiting here aborted the ENTIRE --preset provision with
+    # "GPUStack did not become ready within 120s" (#976), so the RAG-config and
+    # wiring steps never ran. The LLM Manager is the backend in that case.
+    if _gpustack_profile_active; then
+        wait_for_service "GPUStack" "http://127.0.0.1:${GPUSTACK_PORT:-9090}/healthz" 120
+        ensure_gpustack_api_key
+    else
+        print_substep "No GPUStack profile active — skipping GPUStack API key (the LLM Manager is the LLM backend). (#976)"
+    fi
+
+
+    ensure_engine_gpu_group_gids   # #2393: AMD engines run as nobody
+    build_mac_agent_bundle || print_warning "Mac worker bundle not built (non-fatal) — no Mac can be installed from this master until the next --refresh (#2559)."
+
+    # #1373: build the llama-* runner images BEFORE the first deploy. Until now
+    # only `--refresh` built them; a box init'd without Step 7b (the 2026.09
+    # manager profile set) failed its first --preset deploy on a missing
+    # `llama-runner:b12110-vulkan`. Self-gated: offline / consumer profile /
+    # hardware / already present.
+    if [ "$SKIP_MODELS" = false ]; then
+        refresh_llama_vulkan_runner
+        push_runner_images_to_registry || HUB_PUBLISH_FAILED=1
+    fi
+
+    # Step 3: Deploy Models — the GPUStack model set. Only on a box that
+    # actually runs GPUStack; on an llm-manager-only box the models are served
+    # by the manager's own workers (deployed via the LLM Manager console /
+    # deploy API, not this gpustack path), so skip cleanly instead of failing
+    # against a gpustack that isn't running. (#976)
+    # #1441/#1442: the arm is chosen by llm_manager_deploys_standard_set (manager
+    # profile on, no GPUStack profile) — GPUStack deploys its own set and, once
+    # federated, the manager fronts it (llm_manager_owns_standard_set).
+    if [ "$SKIP_MODELS" = false ] && llm_manager_deploys_standard_set; then
+        # #1250b: "the manager's workers serve the models" was only ever half
+        # true — nothing deployed them. #976 removed the GPUStack deploy and put
+        # NOTHING in its place, so a clean Manager install ended with .env
+        # pointing every consumer at qwen3.6/qwen3-embedding while
+        # /api/deployments was []. Deploy the same manifest set through the
+        # manager instead (idempotent; the GPUStack branch below is untouched).
+        if _llm_manager_running; then
+            # The summary row must name the backend this box actually used.
+            LLM_BACKEND_SUMMARY_LABEL="LLM Manager — models deployed on the box's workers"
+            if [ "$SKIP_WAIT" = true ]; then _llmm_do_wait=false; else _llmm_do_wait=true; fi
+            if llm_manager_deploy_standard_set "$PRESET" "$_llmm_do_wait"; then
+                # #2051: the LLM MANAGER succeeded — record it under its OWN
+                # key. This branch used to write `gpustack`, so the exit
+                # contract named a module the box may not even run.
+                record_step_status llm-manager OK
+                # #2195: a deploy that never waited succeeded at DEPLOYING and
+                # at nothing else — every step below that enumerates the served
+                # set is about to read an incomplete one.
+                _llmm_mark_incomplete_if_auto_skip_wait "$_llmm_do_wait"
+            else
+                _llmm_std_rc=$?
+                # #2051: the LLM MANAGER failed. Recorded under its own key so
+                # `_exit_on_failed_provisioning` names the thing that actually
+                # failed — measured on 0.175: the summary row already said
+                # "[FAIL] LLM Manager — models deployed on the box's workers"
+                # while the exit line two lines later said "gpustack, dify".
+                # #2512: rc 3 = a fleet master with no GPU worker joined yet —
+                # the box is installed right and waits for its workers; the
+                # deploy said so above. A WARN, not a failed provisioning.
+                if [ "$_llmm_std_rc" -eq 3 ]; then
+                    record_step_status llm-manager WARN
+                else
+                    record_step_status llm-manager FAIL
+                fi
+                # #1507: the deploy did not reach "all ready". Everything that
+                # ENUMERATES the served set afterwards (Dify's provider + its
+                # defaults, OWUI's model-sync) would then persist an incomplete
+                # list — and nothing re-reads it when the pull finishes minutes
+                # later. Measured on 0.175 (Round 7, CPU box): `3/4 ready after
+                # 540s — waiting on: qwen3.6(pulling)`, and twenty minutes later
+                # /api/deployments showed all four active while OWUI knew
+                # ['granite-docling','qwen3-embedding','qwen3-reranker'] and Dify
+                # had NO default model at all. Remembered here, acted on after
+                # the consumer steps.
+                _LLMM_DEPLOY_INCOMPLETE=1
+            fi
+            # #1263: same report/apply as the --refresh arm.
+            llm_manager_manifest_drift_report "$PRESET" || true
+            if [ "${DO_RECONCILE_MODELS:-false}" = true ]; then
+                llm_manager_reconcile_standard_set "$PRESET" \
+                    || print_warning "LLM Manager reconcile reported an issue (non-fatal) — see above."
+            fi
+        else
+            # rev-B (8): without the label this FAIL rendered as
+            # "[FAIL] GPUStack — API key + models deployed" on a box that has no
+            # GPUStack at all. rev-B (1): the deploy lives in the --preset arm,
+            # and --preset is mutually exclusive with --refresh, so the hint has
+            # to name the command that actually deploys.
+            LLM_BACKEND_SUMMARY_LABEL="LLM Manager — models deployed on the box's workers"
+            print_warning "llm-manager profile active but the container is not running — no models deployed. Start the stack and re-run 'rzfz post-install --preset standard'. (#1250b)"
+            # #2051: same key split — this is the manager's failure, not GPUStack's.
+            record_step_status llm-manager FAIL
+        fi
+    elif [ "$SKIP_MODELS" = false ] && ! _gpustack_profile_active; then
+        print_substep "No LLM backend profile active — skipping model deploy. (#976)"
+    elif [ "$SKIP_MODELS" = false ]; then
+        deploy_all_models "$PRESET"
+
+        if [ "$SKIP_WAIT" = false ]; then
+            # Never let a model-wait failure abort the rest of provisioning.
+            # wait_for_all_models already loudly reports critical vs optional
+            # failures; downstream service config (OWUI / Dify / Speaches) and
+            # the verify suite must still run so the operator gets a fully
+            # configured box + an accurate report instead of a half-provisioned
+            # one. (Under `set -e` a bare call here aborted everything when a
+            # single optional model — e.g. the reranker — failed to start.)
+            # #178(c): the `if` (not a bare `||`) is what lets us capture the
+            # REAL exit status for the end-of-run summary without changing the
+            # non-abort behaviour above — a critical model that never came up
+            # is a genuine FAIL, not a silent ✓.
+            if wait_for_all_models "$PRESET"; then
+                record_step_status gpustack OK
+            else
+                # #178 review (LOW): rc=2 means "optional model(s) failed,
+                # critical models are fine" — record WARN, not FAIL, so the
+                # summary line doesn't over-report a degraded-but-usable box
+                # as broken.
+                _gpustack_rc=$?
+                if [ "$_gpustack_rc" -eq 2 ]; then
+                    record_step_status gpustack WARN
+                else
+                    record_step_status gpustack FAIL
+                fi
+                # #1507 review finding 3: after C1/C2 this is the FEDERATED
+                # shape — GPUStack serves, the manager fronts — and a slow
+                # model leaves the same stale enumeration behind. The late
+                # reconcile asks the manager; when the manager's deployment
+                # list carries none of the preset's models (a plain GPUStack
+                # box), it says so and returns instead of waiting.
+                _LLMM_DEPLOY_INCOMPLETE=1
+            fi
+            # #429: background-prefetch the on-demand spares so the box is
+            # genuinely complete (and offline-switchable) without blocking.
+            prefetch_spare_ggufs "$PRESET" || true
+        else
+            print_info "Skipping model wait (--skip-wait). Models downloading in background."
+            # Key + deploy both succeeded to get here; the wait was skipped
+            # deliberately, not because anything failed.
+            record_step_status gpustack OK
+        fi
+    fi
+    
+    # Step 3b (#1442, cutover C2): a box that just deployed its models in
+    # GPUStack registers GPUStack as the manager's external backend — from here
+    # on llm_manager_owns_standard_set is true and every consumer below wires
+    # to the manager, which fronts GPUStack.
+    llm_manager_federate_gpustack || true
+
+    # Step 4: Update .env with model names
+    update_env_model_config "$PRESET"
+
+    # Step 4b (M031 S3): reconcile every gpustack-consuming service to the
+    # YAML — Open WebUI per-model num_ctx, Dify provider rows, Cognee env,
+    # moltis [models.<id>].context_window, hermes config set
+    # model.context_length. sync.py is idempotent, so it's safe to re-run
+    # on subsequent post-install invocations and after operator-side YAML
+    # edits.
+    #
+    # ga.1 (project_postinstall_set_e_abort_pattern): these four reconcile steps
+    # run under `set -eo pipefail`. Each ends on an `if [ … ]` / pipeline whose
+    # exit status can be non-zero even on a fully-successful run (e.g.
+    # ensure_mcp_manager_secret's trailing `if [ -z "$(read_env_value …)" ]`
+    # returns 1 when the last secret is ALREADY set) — which would abort
+    # post-install RIGHT HERE, before Step 8 recreates model-sync with the live
+    # GPUStack key + rewrites OWUI's persisted placeholder key. That is exactly
+    # the "OWUI shows 0 models" class. Guard every one with `|| print_warning` so
+    # a non-zero return can NEVER short-circuit the run before Step 8. Each
+    # function already logs its own real progress/warnings.
+    sync_consumers            || print_warning "consumer reconciliation reported an issue — see verify report below."
+    provision_mcp_registry    || print_warning "MCP registry provisioning reported an issue — see verify report below."
+    ensure_mcp_manager_secret || print_warning "MCP-manager secret provisioning reported an issue — see verify report below."
+    ensure_gitea_mcp_oauth_app || print_warning "Gitea MCP OAuth app registration reported an issue."
+    ensure_mcp_readonly_authentik_token || print_warning "MCP read-only Authentik token provisioning reported an issue."
+    reconcile_mcp_manager_env || print_warning "mcp-manager environment reconcile reported an issue."
+    reconcile_authentik_bindings || print_warning "Authentik binding reconcile reported an issue — see verify report below."
+    provision_wazuh_agent     || print_warning "Wazuh agent auto-enrol reported an issue — see verify report / docs/enterprise/how-to/wazuh.md."
+    provision_openuem_admin   || print_warning "OpenUEM admin seed reported an issue — see 'docker logs postgres' / #1907."
+    provision_openuem_smtp    || print_warning "OpenUEM SMTP seed reported an issue — see 'docker logs postgres' / #1992."
+
+    # Steps 5-7 are best-effort: a failure inside any single service-provisioning
+    # step (a flaky marketplace plugin, an unreachable model download, a service
+    # still warming up) must NOT abort the remaining steps or the final verify
+    # suite under `set -e`. Each step already logs its own progress/warnings; the
+    # verify suite at the end reports whatever didn't come up so the operator gets
+    # an accurate, complete picture instead of a half-provisioned box.
+
+    # Step 5: Open WebUI provisioning
+    # #178(c): `if/else` (not a bare `||`) so the real exit status feeds the
+    # end-of-run summary — behaviour is unchanged, a failure here still only
+    # warns and never aborts the remaining steps.
+    if step_openwebui_provisioning; then
+        record_step_status openwebui OK
+    else
+        _owui_verdict=$(_consumer_step_verdict "$?" "Open WebUI")
+        record_step_status openwebui "$_owui_verdict"
+        [ "$_owui_verdict" != FAIL ] || print_warning "Open WebUI provisioning reported an issue — see verify report below."
+    fi
+
+    # Step 6: Dify provisioning
+    if step_dify_provisioning; then
+        record_step_status dify OK
+    else
+        # #2195: same split as the --refresh arm above. Mirrors the speaches
+        # rc=2 dispatch two blocks down.
+        _dify_rc=$?
+        _dify_verdict=$(_consumer_step_verdict "$_dify_rc" "Dify")
+        record_step_status dify "$_dify_verdict"
+        if [ "$_dify_verdict" = FAIL ]; then
+            print_warning "Dify provisioning reported an issue — see verify report below."
+        fi
+    fi
+
+    # Step 7: Speaches + auxiliary
+    run_speaches_step
+    
+    # Step 7: Gitea Configuration
+    step_gitea_provisioning() {
+        if echo "${COMPOSE_PROFILES:-}" | grep -q "gitea"; then
+            print_step "Gitea: Provisioning..."
+            
+            local gitea_url="http://127.0.0.1:${GITEA_HTTP_PORT:-3000}"
+            print_substep "Waiting for Gitea to be ready (${gitea_url}/api/healthz)..."
+            
+            local g_waited=0
+            while [ $g_waited -lt 60 ]; do
+                if curl -sf --max-time 5 "${gitea_url}/api/healthz" > /dev/null 2>&1; then
+                    break
+                fi
+                sleep 5
+                g_waited=$((g_waited + 5))
+            done
+            
+            if [ $g_waited -ge 60 ]; then
+                print_error "Gitea did not become ready."
+            else
+                print_success "Gitea is ready."
+                print_substep "Configuring Gitea admin user..."
+                
+                local gitea_admin="${GITEA_ADMIN_USER:-admin}"
+                local gitea_pass="${AUTHENTIK_BOOTSTRAP_PASSWORD}"
+                local gitea_email="razzfazz-ai-admin@${MAIN_DOMAIN}"
+                
+                # #2746: the gitea CLI takes a password only as `--password <value>`,
+                # readable by every user of the host. A missing admin is created
+                # with a random password (printed to /dev/null); the real one is
+                # set through the admin API below, the body on stdin.
+                if docker exec gitea su-exec git gitea admin user list 2>/dev/null | grep -iq "${gitea_admin}"; then
+                    # Update email in DB
+                    docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${GITEA_DB:-gitea_db}" -c \
+                        "UPDATE \"user\" SET email='${gitea_email}' WHERE lower_name=lower('${gitea_admin}');" > /dev/null 2>&1 || true
+                else
+                    docker exec -u root gitea su-exec git gitea admin user create \
+                        --admin \
+                        --username "${gitea_admin}" \
+                        --random-password \
+                        --email "${gitea_email}" \
+                        --must-change-password=false > /dev/null 2>&1 || true
+                    print_success "Gitea admin user created."
+                fi
+                if printf '%s' "${gitea_pass}" | rzfz_gitea_set_password_api "${gitea_url}" "${gitea_admin}" \
+                        "${GITEA_DB:-gitea_db}" "${POSTGRES_USER:-docker}"; then
+                    print_info "Gitea admin user updated (email & password)."
+                else
+                    print_warning "Gitea admin password could not be set through the admin API. Set it with: rzfz set-admin-password --app gitea"
+                fi
+
+                # Always re-assert: admin password is the stack admin password,
+                # period — no first-login prompt. The `change-password` CLI
+                # path above doesn't touch this flag, and an admin originally
+                # created via the gitea web installer (legacy installs) carries
+                # `must_change_password=true` indefinitely. The
+                # `gitea admin user must-change-password` CLI only supports
+                # `--all` (the docs imply a positional username works, but
+                # gitea silently ignores it and reports "Updated 0 users") —
+                # so we toggle the flag directly via SQL, scoped to this user.
+                docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${GITEA_DB:-gitea_db}" -c \
+                    "UPDATE \"user\" SET must_change_password=false WHERE lower_name=lower('${gitea_admin}');" \
+                    > /dev/null 2>&1 || true
+                print_success "Gitea provisioning complete."
+            fi
+        fi
+    }
+    step_gitea_provisioning
+
+    step_onyx_provisioning
+
+    # Step 8b0 (ga.1, Issue A): pre-build ALL custom-build module images so a later
+    # Config-portal module-enable never hits a live `docker compose build` → 403 on
+    # egress-restricted boxes. Runs regardless of active profiles; idempotent.
+    prebuild_all_custom_images
+
+    # Step 8b1 (#36): pre-build the agent-manager experimental-agent
+    # image (paperclip) so users can provision it
+    # from the My Agents drawer without hitting the "not available on this box
+    # yet" dead-end. Gated on the `agents` profile; idempotent.
+    prepull_agent_manager_images
+
+    # Step 8b2: OpenLit admin alignment (rc6.7 #44)
+    openlit_align_admin
+
+    # Step 8b3: OpenUEM readiness report (#1075). Profile-gated + non-fatal.
+    openuem_report_readiness
+
+    step_paperless_provisioning
+
+    # Komodo hardening (#539): the step is defined once, above, before the
+    # --refresh arm, so both arms reach it (#3279).
+    step_komodo_hardening
+
+    # Step 8: Restart services that read .env
+    print_step "Restarting services to apply new configuration..."
+    # Issue B (ga.1) PRIMARY fix: rewrite OWUI's persisted (placeholder) GPUStack
+    # key in openwebui_db to the live key BEFORE recreating openwebui, so the
+    # recreate reloads a working OpenAI connection and models finally appear.
+    _owui_fix_persisted_gpustack_key
+    # Best-effort: a recreate that returns non-zero (transient docker error, a
+    # dependency still settling) must not abort post-install before the verify
+    # suite runs — the verify report reflects each service's real state.
+    #
+    # --no-deps is MANDATORY (ga.1 iter3): a plain `--force-recreate openwebui`
+    # ALSO recreates its depends_on chain — postgres (+ its health-wait) and the
+    # one-shot openwebui-migrate-reconcile — and that whole dance returned
+    # non-zero during ga.1 testing, so openwebui was NEVER recreated and its
+    # container env `OPENAI_API_KEYS` kept the placeholder (`docker exec openwebui
+    # printenv OPENAI_API_KEYS` = gpustack_CHANGEME…). With --no-deps only
+    # openwebui is recreated (postgres is already up), so it reliably reloads the
+    # live GPUStack key from .env AND the persisted config the key-fix above just
+    # corrected — mirrors the model-sync recreate below.
+    docker compose up -d --no-deps --force-recreate openwebui > /dev/null 2>&1 || print_warning "openwebui recreate returned non-zero — see verify report below."
+    # Issue B (ga.1) fix #1: recreate the ACTIVE model-sync variant (--no-deps) so
+    # it stops using the placeholder key and starts writing the real model list
+    # into openwebui_db.
+    recreate_active_model_sync
+    # #1507: if the deploy above never reached "all ready", the two steps that
+    # enumerate the served set ran against an incomplete one. Give the slow
+    # model a bounded second chance and, when it arrives, re-run exactly those
+    # two (both idempotent) so the consumers end up with what the box serves.
+    llm_manager_reconcile_consumers_late || true
+    echo "${COMPOSE_PROFILES:-}" | grep -qw chat && owui_recreate_on_embedding_env_drift   # #2536 item 13: operator-edit guard
+    # ga.1 iter3 (Dify KB indexing): recreate the pgvector-consuming Dify services
+    # so the corrected PGVECTOR_PASSWORD (= POSTGRES_PASSWORD, matching the docker
+    # PGVECTOR_USER) lands. Without this an existing box keeps the stale env that
+    # 401'd every dataset-indexing embedding write ("password authentication
+    # failed for user docker"). Fresh installs get it from `rzfz init` already;
+    # this heals re-runs. --no-deps so we don't drag postgres/valkey.
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "dify"; then
+        docker compose up -d --no-deps --force-recreate dify-api dify-worker dify-worker-dataset dify-worker-beat > /dev/null 2>&1 \
+            || print_warning "Dify pgvector-service recreate returned non-zero — see verify report below."
+    fi
+    # ga.1 iter3 (coding-agent local-model wire): re-key provisioned coding agents
+    # to the live GPUStack key. See rekey_coding_agents() for the why.
+    rekey_coding_agents
+    # Only restart lightrag/cognee if they're in COMPOSE_PROFILES
+    if echo "${COMPOSE_PROFILES:-}" | grep -q "lightrag"; then
+        docker compose up -d --force-recreate lightrag > /dev/null 2>&1 || print_warning "lightrag recreate returned non-zero — see verify report below."
+    fi
+    if echo "${COMPOSE_PROFILES:-}" | grep -q "cognee"; then
+        docker compose up -d --force-recreate cognee > /dev/null 2>&1 || print_warning "cognee recreate returned non-zero — see verify report below."
+        # That recreate took the values load_env exported at the start, not the
+        # LLM_ARGS (output cap) and model names written to .env since: compare
+        # the container with the file and recreate from the file on a difference.
+        reconcile_service_env cognee || print_warning "cognee environment reconcile reported an issue."
+    fi
+    print_success "Services restarted."
+    
+    # Wait for services to stabilize after restart
+    print_substep "Waiting 15s for services to stabilize..."
+    sleep 15
+    
+    # Step 9: Help Cache Warming
+    # Must happen AFTER restart so the container is running and not immediately killed
+    print_step "Help Center: Pre-warming cache..."
+    print_substep "Triggering /api/refresh-all..."
+    # The help container has no mapped ports to the host (accessed only via Caddy).
+    # We trigger the cache refresh internally using wget.
+    docker exec -d razzfazz-help wget -qO- --post-data="" --header="X-Authentik-Groups: razzfazz.ai Super Admins" "http://127.0.0.1:5000/api/refresh-all" > /dev/null 2>&1
+    print_success "Cache refresh triggered."
+
+    # Step 10 (release-cycle Phase 7b on the customer side): regenerate the
+    # operator-facing PDFs. They embed live data (MAIN_DOMAIN, current
+    # GPUStack model list) so they MUST be regenerated per-install — they
+    # are gitignored for that reason. Both scripts depend on the gotenberg
+    # container, so this must happen after the stack is up + Step 8's
+    # restart-and-stabilize wait completed.
+    print_step "Operator-facing PDFs: regenerating getting-started.pdf + quickstart.pdf..."
+    if docker ps --format '{{.Names}}' | grep -q '^gotenberg$'; then
+        if [ -x "${SCRIPT_DIR}/scripts/generate-getting-started-pdf.sh" ]; then
+            "${SCRIPT_DIR}/scripts/generate-getting-started-pdf.sh" 2>&1 | tail -2 || \
+                print_warning "getting-started.pdf generation failed — re-run later: ./scripts/generate-getting-started-pdf.sh"
+        fi
+        if [ -x "${SCRIPT_DIR}/scripts/generate-quickstart-pdf.sh" ]; then
+            "${SCRIPT_DIR}/scripts/generate-quickstart-pdf.sh" 2>&1 | tail -2 || \
+                print_warning "quickstart.pdf generation failed — re-run later: ./scripts/generate-quickstart-pdf.sh"
+        fi
+        print_success "Day-1 PDFs regenerated against current install state."
+    else
+        print_warning "gotenberg container not running — skipping PDF regeneration."
+        print_info "Re-run later when gotenberg is up: ./scripts/generate-getting-started-pdf.sh && ./scripts/generate-quickstart-pdf.sh"
+    fi
+
+    # Step 11 (§16 handover): leave an as-built day-1 security-posture assessment.
+    run_security_selfcheck
+
+    echo ""
+    echo -e "${GREEN}======================================================================${NC}"
+    echo -e "${GREEN}     Post-Install Provisioning Complete${NC}"
+    echo -e "${GREEN}======================================================================${NC}"
+    echo ""
+    echo "  Preset:       $PRESET"
+    echo "  Domain:       ${MAIN_DOMAIN}"
+    echo "  Admin email:  razzfazz-ai-admin@${MAIN_DOMAIN}"
+    echo ""
+    # #178(c): real per-step OK/WARN/FAIL, not a static checklist — see
+    # record_step_status / print_services_summary near the top of this file.
+    print_services_summary
+    echo ""
+    if [ "$SKIP_MODELS" = false ] && { [ "$SKIP_WAIT" = true ] || [ -n "${_LLMM_DEPLOY_REFUSED:-}" ]; }; then
+        # #2727: a refused row is not "downloading in background"
+        if declare -F llm_manager_closing_note >/dev/null 2>&1; then
+            llm_manager_closing_note "$SKIP_WAIT" | while IFS= read -r _note_line; do
+                case "$_note_line" in
+                    Note:*) echo -e "  ${YELLOW}${_note_line}${NC}" ;;
+                    *)      echo "  ${_note_line}" ;;
+                esac
+            done
+        else
+            echo -e "  ${YELLOW}Note: Models are still downloading in background.${NC}"
+        fi
+        echo "  Check progress: https://${GPUSTACK_DOMAIN:-gpustack.${MAIN_DOMAIN}}"   # #1444: GPUStack moved off llm.<domain>
+        echo ""
+    fi
+    echo "  Next steps:"
+    echo "    • Verify: rzfz post-install --verify"
+    echo "    • Open:   https://chat.${MAIN_DOMAIN}"
+    echo ""
+    # M007 manual setup reminders.
+    # 2026-05-09 fix: this code is at the script's top level (not inside a
+    # function), so `local` errors with "Kann nur innerhalb einer Funktion
+    # benutzt werden" / "can only be used in a function" and bash exits 2.
+    # Plain assignment is fine — top-level vars are global anyway.
+    m007_notes=false
+    # (#191) step_paperless_provisioning (Step 8c, above) only runs inline in
+    # THIS --preset invocation, right after `docker compose up` — it never
+    # fires for paperless-ngx toggled on later via the Config Portal, which
+    # does not call post-install at all. paperless_m007_report re-attempts
+    # the SAME idempotent promotion here as a repair pass, so a later
+    # `rzfz post-install --preset ...` re-run (the standard recipe elsewhere
+    # in this file for fixing a half-provisioned module) actually closes the
+    # gap instead of just re-printing a manual instruction nobody runs.
+    paperless_m007_report() {
+        if ! echo "${COMPOSE_PROFILES:-}" | grep -qw "paperless-ngx"; then
+            return 0
+        fi
+        local promote_rc=0
+        paperless_promote_superusers >/dev/null 2>&1 || promote_rc=$?
+        if [ "$promote_rc" -eq 0 ]; then
+            echo "  ✓ Paperless-ngx: superuser auto-promoted (${RAZZFAZZ_ADMIN_USERNAME:-akadmin} / razzfazz-ai-admin)."
+            return 0
+        fi
+        if [ "$m007_notes" = false ]; then
+            echo "  M007 manual setup required:"
+            m007_notes=true
+        fi
+        echo "    • Paperless-ngx superuser (auto-promotion failed — repair manually):"
+        echo "      docker exec -it paperless-ngx python manage.py createsuperuser"
+    }
+    paperless_m007_report
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "infisical"; then
+        if [ "$m007_notes" = false ]; then
+            echo "  M007 manual setup required:"
+            m007_notes=true
+        fi
+        echo "    • Infisical admin signup: https://infisical.${MAIN_DOMAIN}/admin/signup"
+    fi
+    if echo "${COMPOSE_PROFILES:-}" | grep -qw "onyx"; then
+        if [ "$m007_notes" = false ]; then
+            echo "  M007 manual setup required:"
+            m007_notes=true
+        fi
+        echo "    • Onyx connectors: https://onyx.${MAIN_DOMAIN}"
+        echo "      - GitHub connector: URL=http://gitea:3000/api/v1, token=<Gitea API token>"
+        echo "      - File connector: path=/mnt/paperless-media"
+        echo "      Create the API token in Gitea and enter it in the Onyx GitHub connector"
+    fi
+    if [ "$m007_notes" = true ]; then echo ""; fi
+fi
+
+# Verification (S07)
+if [ "$DO_VERIFY" = true ]; then
+    run_verification_suite
+fi
+
+# #1250a: a box whose embedded worker never registered cannot place a single
+# model — the LLM Manager has nothing to schedule on and every deploy 409s.
+# That is a FAILED provisioning run, so say so in the exit code instead of
+# printing a green summary over it. (`rzfz upgrade` runs
+# `post-install --refresh` best-effort and only warns on a non-zero exit, so
+# this never fails an upgrade.)
+_exit_on_failed_provisioning
+
+# #2952: a hub that does not serve this release's agent for every architecture
+# is a failed publish, even though the rest of the refresh ran to the end.
+if [ "${HUB_PUBLISH_FAILED:-0}" = 1 ]; then
+    print_error "The worker agent image was NOT published for every architecture (see above). Fix it and re-run 'rzfz post-install --refresh', or verify with scripts/verify-hub-images.sh latest."
+    exit 1
+fi
+
+# A completed --preset is operator state from now on: record it (atomic, 0600),
+# and retire the fresh-init marker so a stale one can never vouch for this box.
+if [ -n "${PRESET:-}" ]; then
+    _state_dir="${SCRIPT_DIR}/backups/state"
+    if (umask 077; mkdir -p "$_state_dir" \
+        && printf '%s preset=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PRESET" > "${_state_dir}/.preset-done.$$" \
+        && mv -f "${_state_dir}/.preset-done.$$" "${_state_dir}/post-install-preset.done"); then
+        rm -f "${_state_dir}/fresh-init"
+    else
+        rm -f "${_state_dir}/.preset-done.$$"
+        print_warning "Could not record the completed preset in ${_state_dir}."
+    fi
+fi

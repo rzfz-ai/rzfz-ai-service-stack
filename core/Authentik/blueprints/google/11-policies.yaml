@@ -1,0 +1,101 @@
+version: 1
+metadata:
+  name: "Google - Policies"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "Is Corporate Domain"
+    attrs:
+      execution_logging: true
+      expression: |
+        # Allowed Google Workspace domains: GOOGLE_OAUTH_DOMAIN in .env, one
+        # domain or a comma/space separated list. An empty list admits nobody
+        # (fail closed: Google accounts are open to the whole world).
+        allowed = [
+            d.strip().lstrip("@").lower()
+            for d in "${GOOGLE_OAUTH_DOMAIN}".replace(" ", ",").split(",")
+            if d.strip().lstrip("@")
+        ]
+        email = (context.get("oauth_userinfo", {}).get("email", "") or "").lower()
+        domain = email.rsplit("@", 1)[-1] if email.count("@") == 1 else ""
+        if domain and domain in allowed:
+            return True
+        if allowed:
+            ak_message(
+                "This Google account is not allowed to sign in here. "
+                "Sign in with an account from: " + ", ".join(allowed) + "."
+            )
+        else:
+            ak_message(
+                "Google sign-in is not available: no allowed email domain is "
+                "configured (GOOGLE_OAUTH_DOMAIN). Ask your administrator."
+            )
+        ak_logger.warning(f"Google domain policy: rejected a sign-in from domain {domain!r}")
+        return False
+
+  # A first Google sign-in whose e-mail matches an existing account is LINKED to
+  # it (13-source.yaml, user_matching_mode email_link) and signs in as that
+  # account with all its groups, administrators included. "Is Corporate Domain"
+  # above runs only when a new user is created, never on a link. So this policy,
+  # bound on the source authentication flow (12-flows.yaml, policy engine mode
+  # `all`), lets a link happen only when Google vouches for the address: the
+  # profile says the e-mail is verified (`verified_email`, or `email_verified`),
+  # the account belongs to the Google Workspace of the address's domain (`hd`
+  # equals the domain), and that domain is on this box's allowed list
+  # (GOOGLE_OAUTH_DOMAIN). Everything else is refused with a message; nothing is
+  # linked, nobody is signed in. A returning user, a first sign-in that creates a
+  # new user and a link the user makes while signed in are not affected. Other
+  # sources pass through. Never raises: an error refuses the link.
+  - model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: "razzfazz.ai - Link by e-mail (Google)"
+    attrs:
+      execution_logging: true
+      expression: |
+        SLUG = "google"
+        CONNECTION = "goauthentik.io/sources/connection"
+        REFUSED = ("This Google account matches an existing account here, but Google did not "
+                   "confirm it as an account of your organisation's domain, so it was not "
+                   "connected. Sign in the usual way and connect Google under your account "
+                   "settings, or ask your administrator.")
+        try:
+            ctx = request.context
+            if getattr(ctx.get("source"), "slug", None) != SLUG:
+                return True
+            connection = ctx.get(CONNECTION)
+            if connection is not None and getattr(connection, "pk", None) is not None:
+                return True
+            allowed = [
+                d.strip().lstrip("@").lower()
+                for d in "${GOOGLE_OAUTH_DOMAIN}".replace(" ", ",").split(",")
+                if d.strip().lstrip("@")
+            ]
+            user = ctx.get("pending_user")
+            email = (getattr(user, "email", "") or "").strip().lower()
+            domain = email.rsplit("@", 1)[1] if email.count("@") == 1 else ""
+            info = ctx.get("oauth_userinfo")
+            info = info if isinstance(info, dict) else {}
+            verified = any(info.get(k) is True or (isinstance(info.get(k), str) and info.get(k).strip().lower() == "true")
+                           for k in ("verified_email", "email_verified"))
+            hd = info.get("hd").strip().lower() if isinstance(info.get("hd"), str) else ""
+            seen = info.get("email").strip().lower() if isinstance(info.get("email"), str) else ""
+            if connection is None:
+                reason = "no source connection in the flow"
+            elif not domain or domain not in allowed:
+                reason = "e-mail domain not on the allowed list (GOOGLE_OAUTH_DOMAIN)"
+            elif not verified:
+                reason = "Google did not verify the e-mail"
+            elif hd != domain:
+                reason = "not an account of the domain's Google Workspace (hd)"
+            elif seen != email:
+                reason = "the verified e-mail is not the matched account's e-mail"
+            else:
+                ak_logger.info("rzfz-source-link: linked by a verified e-mail domain", source=SLUG, domain=domain)
+                return True
+        except Exception as exc:
+            domain, reason = "", "check failed: " + type(exc).__name__
+        ak_logger.warning("rzfz-source-link: link by e-mail refused", source=SLUG, domain=domain, reason=reason)
+        ak_message(REFUSED)
+        return False

@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+"""Node → manager registration client (#254 Phase-2 P2-B1).
+
+After the node launches its engines, it POSTs what it is now serving to the
+manager's ``/api/workers`` so the fleet self-registers. This module builds the
+payload from the node identity + the agent's loaded-instance table and does the
+authenticated POST. The HTTP call is injected (``http_post``) so it unit-tests
+with no network; the periodic reporter loop that drives it on the running node
+is runtime wiring (deferred with the docker-socket mount, like the supervisor
+tick).
+
+Import-safe: stdlib only; no httpx at import (the real client is passed in).
+"""
+from __future__ import annotations
+
+
+def weights_gb(models_mount, files) -> float | None:
+    """#2393: decimal GB of the weight files of one instance, from their size on
+    the models volume — the one footprint fact the NODE always has, even on a box
+    whose deployments were created offline without an estimate. ``None`` when no
+    file is readable (never a guess, never 0)."""
+    import os
+
+    if not models_mount or not files:
+        return None
+    total = 0
+    for f in files:
+        try:
+            total += os.path.getsize(os.path.join(models_mount, f))
+        except (OSError, TypeError):
+            continue
+    return round(total / 1e9, 3) if total > 0 else None
+
+
+def build_registration(worker: dict, loaded: dict, models_mount: str | None = None) -> dict:
+    """Serialize {node identity + loaded instances} into the manager's
+    WorkerRegistration shape. ``worker`` = {name, address, hardware, engine};
+    ``loaded`` = the agent's instance_id -> {model, endpoint, ...} table."""
+    models = []
+    for _instance_id, rec in (loaded or {}).items():
+        models.append(
+            {
+                "model_name": rec.get("model"),
+                "endpoint": rec.get("endpoint"),
+                # #286: default to loading — a launched engine is NOT ready until
+                # the supervisor's health probe says so (_sync_instance_status).
+                "status": rec.get("status", "loading"),
+                # #287: phase detail — "pulling 42%" during a weight fetch, or the
+                # failure reason. #2254: the supervisor's own reason (#708) lives
+                # in `last_error`; without this fallback it never left the node.
+                "detail": rec.get("detail") or rec.get("last_error"),
+                "api_key": rec.get("api_key"),
+                # Q2 keying: the engine instance so replicas + same-model-per-worker
+                # register as distinct instances instead of collapsing into one.
+                "instance_id": _instance_id,
+            }
+        )
+        # #2393: the weights' size on disk, so the manager can record the
+        # footprint of a deployment that was created without one. Omitted (not
+        # null) when unknown, so the wire for a node without files is unchanged.
+        # #2868: the serve mode read from the engine itself (re-adopted engines),
+        # for a master that has to adopt it. A separate key from `task`, which
+        # the manager lets overwrite a deployment. Omitted when unknown.
+        if rec.get("observed_task"):
+            models[-1]["observed_task"] = rec["observed_task"]
+        # #3106: the weight files this engine was started with (leaf names on
+        # the models volume), so a master that ADOPTS the engine can start it
+        # again — a runner upgrade restarts every engine, and a load without a
+        # file is refused. Omitted when unknown, like the two above.
+        if rec.get("files"):
+            models[-1]["files"] = [str(f) for f in rec["files"]]
+        # The build this engine runs (runtime.record_engine_builds), which can
+        # differ from the node's default runner. Omitted until it is known.
+        if rec.get("engine_version"):
+            models[-1]["engine_version"] = rec["engine_version"]
+        # #3106: the image this engine's container runs. Omitted when unknown.
+        if rec.get("runner_image"):
+            models[-1]["runner_image"] = str(rec["runner_image"])
+        # #3505: the node chose that runner by the weight's architecture.
+        if rec.get("runner_by_architecture"):
+            models[-1]["runner_by_architecture"] = True
+        _w = weights_gb(models_mount, rec.get("files"))
+        if _w is not None:
+            models[-1]["weights_gb"] = _w
+    payload = {
+        "name": worker["name"],
+        "address": worker.get("address", ""),
+        "hardware": worker.get("hardware"),
+        "engine": worker.get("engine"),
+        # Slice A: node's razzfazz.ai stack version + engine (llama.cpp) build,
+        # surfaced in the console's Fleet detail. Optional — None if unknown.
+        "stack_version": worker.get("stack_version"),
+        # #1932: WHERE that version came from — a mounted repo, the .env, or
+        # the image itself. On a thin node the last one is the only possible
+        # answer, and a reader has to be able to tell which they got.
+        "stack_version_source": worker.get("stack_version_source"),
+        "engine_version": worker.get("engine_version"),
+        # #1932: WHY the version is missing, when it is. An empty cell used to
+        # mean five different things (not applicable / no image / image absent
+        # / probe failed / upstream changed its output), and each asks for a
+        # different action.
+        "engine_version_why": worker.get("engine_version_why"),
+        # #2530: the hub digest of the agent image this node runs, derived by
+        # the agent from its own container (runtime.own_image_digest). None =
+        # unknown, which the console keeps apart from "outdated".
+        "agent_image_digest": worker.get("agent_image_digest"),
+        # ... and EVERY hub digest of that image, sorted: one image id can carry
+        # several, and "current" means the hub's digest is among them.
+        "agent_image_digests": list(worker.get("agent_image_digests") or []),
+        # #262 host-routable addressing: the worker's own reachable base, so a
+        # remote master can dial this worker's engines. None on a same-box node.
+        "advertise_addr": worker.get("advertise_addr"),
+        # #1535: this node routes a relayed request to the engine serving the
+        # model the request NAMES, so it can hold several models at once
+        # (#262's "the worker picks a local engine"). Declared, not assumed:
+        # a master that allows a second model on a worker whose agent still
+        # forwards to its first ready engine would get the #929 failure —
+        # right model name, wrong weights, no error. An older agent omits the
+        # field, and the master keeps refusing the second placement for it.
+        "relay_model_routing": True,
+        # #2521: this node serves `/relay/{worker}/e/{engine}/v1` from exactly
+        # the named engine (runtime.relay_engine_base_for), so the master may
+        # give each replica on this box its own relay URL and a chat pinned to
+        # one replica stays on it. Declared, because the master can meet an
+        # older agent mid-upgrade — that one keeps the per-worker URL.
+        "relay_engine_routing": True,
+        # #3403: this agent resolves `runner_channel` on a load. An older agent
+        # ignores the key and starts its stable runner, so the master sends an
+        # experimental-channel deployment only to a node that declares this.
+        "runner_channels": ["stable", "experimental"],
+        # #295 fits-check budget: host RAM + best-effort VRAM. Optional.
+        "mem_total_gb": worker.get("mem_total_gb"),
+        "vram_total_gb": worker.get("vram_total_gb"),
+        # live utilization for the console dashboard load graph. Optional —
+        # absent off-box / in tests. See runtime._live_metrics.
+        "vram_used_gb": worker.get("vram_used_gb"),
+        "load": worker.get("load"),
+        "gpu_util": worker.get("gpu_util"),
+        "mem_used_gb": worker.get("mem_used_gb"),
+        "ncpu": worker.get("ncpu"),
+        "models": models,
+    }
+    # #2512: a `fleet` master's own worker asks to be held out of placement
+    # (the master hosts NO models). Sent only when true, so every other node's
+    # payload is byte-for-byte what it was.
+    if worker.get("draining"):
+        payload["draining"] = True
+    if worker.get("liveness_beat"):
+        payload["liveness_beat"] = True
+    return payload
+
+
+def build_external_backend_registration(
+    name: str,
+    address: str,
+    endpoint: str,
+    model_names: list[str],
+    *,
+    hardware: str = "apple-silicon",
+    engine: str = "ollama",
+    api_key: str | None = None,
+) -> dict:
+    """Registration for a PRE-EXISTING external OpenAI-compatible endpoint —
+    e.g. a Mac running Ollama (#254 P2-C1, absorbing the standalone mac-gateway).
+
+    One endpoint serves many models (Ollama routes by model name), so every
+    model points at the same ``endpoint``. No engine container is launched
+    (the Mac runs Ollama itself); the worker-agent / an operator helper just
+    PUBLISHES the endpoint so the manager folds the Mac into the fleet router
+    (with the Mac's own upstream key via P2-B3). GPUStack is untouched."""
+    return {
+        "name": name,
+        "address": address,
+        "hardware": hardware,
+        "engine": engine,
+        "models": [
+            {"model_name": mn, "endpoint": endpoint, "status": "ready", "api_key": api_key}
+            for mn in model_names
+        ],
+    }
+
+
+def register_with_manager(manager_url: str, node_key: str, payload: dict, *, http_post):
+    """POST the registration to the manager with the node Bearer key. Returns
+    whatever ``http_post`` returns (a response object). ``http_post`` has the
+    httpx signature ``(url, *, json, headers)``."""
+    url = manager_url.rstrip("/") + "/api/workers"
+    return http_post(
+        url,
+        json=payload,
+        headers={"authorization": f"Bearer {node_key}"},
+    )
