@@ -1,0 +1,71 @@
+<!-- Authentik's own events (#2526), on the authentik-server container log
+     (label rzfz.container, see rzfz_00_stack_rules.xml; 100401 is its failed
+     login). The server writes every Event it saves as one structlog JSON line
+     inside the docker "log" string: "event": "Created Event" and the Event's
+     kind in "action" (authentik EventAction: model_created, password_set,
+     impersonation_started, ...). Keyed on the unescaped `"action": "..."`
+     pair: a user-chosen string inside the line carries its quotes escaped, so
+     it cannot forge one. IDs 100711-100718 (100710 unused); each rule is a
+     direct child of 100400, mutually exclusive with 100401. -->
+<group name="rzfz,stack,rzfz_authentik,">
+  <!-- model_created / model_updated / model_deleted on the objects an admin edits.
+       context.model.model_name: user, group, application (6); *provider, flow,
+       *policy, *source (8: they decide who gets in and how). -->
+  <rule id="100711" level="6">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"model_(created|updated|deleted)".*"model": ?\{[^{}]*"model_name": ?"(user|group|application)"</field>
+    <description>Authentik: user, group or application changed</description>
+    <group>rzfz_authentik_admin,admin_action,</group>
+  </rule>
+  <rule id="100712" level="8">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"model_(created|updated|deleted)".*"model": ?\{[^{}]*"model_name": ?"([a-z0-9]*provider|flow|[a-z0-9]*policy|[a-z0-9]*source)"</field>
+    <description>Authentik: provider, flow, policy or source changed</description>
+    <group>rzfz_authentik_admin,admin_action,</group>
+  </rule>
+  <!-- password_set where the acting (authenticated_as) account is a signed-in,
+       different account than the one whose password changed: an admin set it. A
+       user changing their own password and the anonymous reset flow do not match. -->
+  <rule id="100713" level="8">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"password_set".*"authenticated_as": ?\{[^{}]*"is_anonymous": ?false[^{}]*"username": ?"([^"]+)"[^{}]*\}, ?"email": ?"[^"]*", ?"pk": ?[^,]+, ?"username": ?"(?!\1")</field>
+    <description>Authentik: a password was set by an admin for another user</description>
+    <group>rzfz_authentik_admin,admin_action,</group>
+  </rule>
+  <rule id="100714" level="12">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"impersonation_started"</field>
+    <description>Authentik: impersonation started</description>
+    <group>rzfz_authentik_admin,privilege_escalation,</group>
+  </rule>
+  <rule id="100715" level="10">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"suspicious_request"</field>
+    <description>Authentik: suspicious request</description>
+    <group>attack,</group>
+  </rule>
+  <rule id="100716" level="5">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"configuration_error"</field>
+    <description>Authentik: configuration error</description>
+  </rule>
+  <rule id="100717" level="7">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"policy_exception"</field>
+    <description>Authentik: a policy raised an exception</description>
+  </rule>
+  <rule id="100718" level="8">
+    <if_sid>100400</if_sid>
+    <field name="rzfz.container" type="pcre2">^authentik-server$</field>
+    <field name="log" type="pcre2">"action": ?"secret_(view|rotate)"</field>
+    <description>Authentik: a secret was viewed or rotated</description>
+    <group>rzfz_authentik_admin,</group>
+  </rule>
+</group>

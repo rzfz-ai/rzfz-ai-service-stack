@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block page_title %}Knowledge access{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Knowledge access</h1>
+    <p class="lede">Who can read each knowledge scope, and why</p>
+</div>
+<p class="hint" style="margin-bottom:1rem">
+    A knowledge scope is an Authentik group named "KB: &lt;scope&gt;" with the attribute
+    <code>rzfz_kb_scope: true</code>. Its members read it; so does the owner of each dataset in it.
+    A Dify dataset joins a scope through a knowledge tag with the group's name; a cognee dataset through
+    the group's attribute <code>rzfz_kb_targets.cognee_datasets</code>. In Open WebUI the knowledge owner
+    shares a knowledge base with the scope's group. The role reconcile applies this on every refresh;
+    a dataset taken out of every scope goes back to owner-only.
+</p>
+<div class="flash flash-warning" style="margin-bottom:1rem">
+    Dify limits: the dataset permission is enforced in the Dify console only. The workspace owner sees
+    every dataset, and a Dify app that uses a dataset retrieves from it for everyone who may run the app,
+    whatever the scope. Share an app built on a scoped dataset only with that scope's members.
+</div>
+{% if error %}
+<div class="flash flash-error" style="margin-bottom:1rem">{{ error }}</div>
+{% elif not report %}
+<div class="card">No reconcile has written a report yet. Run <code>rzfz provision-sso-users --reconcile-roles --app all</code>.</div>
+{% else %}
+<p class="hint">Last reconcile: {{ report.generated }}</p>
+{% if report.unreadable %}
+<div class="flash flash-warning" style="margin-bottom:1rem">Not read in the last reconcile (nothing changed there, not listed below): {{ report.unreadable|join(', ') }}</div>
+{% endif %}
+{% if not scopes %}
+<div class="card">No knowledge scope is defined.</div>
+{% endif %}
+{% for name, s in scopes %}
+<div class="card" style="margin-bottom:1rem">
+    <h2>{{ name }}</h2>
+    <table class="table">
+        <tr><th>Members (read every dataset of the scope)</th>
+            <td>{% for m in s.members %}{{ m }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</td></tr>
+        {% if s.dify is defined %}<tr><th>Dify datasets (and their owner)</th>
+            <td>{% for d in s.dify %}{{ d.name }} <code>{{ d.id }}</code> ({{ d.owner }}){% if not loop.last %}<br>{% endif %}{% else %}none{% endfor %}</td></tr>{% endif %}
+        {% if s.cognee is defined %}<tr><th>cognee datasets (and their owner)</th>
+            <td>{% for d in s.cognee %}{{ d.name }} <code>{{ d.id }}</code> ({{ d.owner }}){% if not loop.last %}<br>{% endif %}{% else %}none{% endfor %}
+            {% if s.cognee_ambiguous %}<br><span class="flash-warning">Not linked, the name belongs to several datasets: {{ s.cognee_ambiguous|join(', ') }}</span>{% endif %}</td></tr>{% endif %}
+        <tr><th>Open WebUI</th><td>Group-managed: shared by the knowledge owner with the group "{{ name }}"</td></tr>
+    </table>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

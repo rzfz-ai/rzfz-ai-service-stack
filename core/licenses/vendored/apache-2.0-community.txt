@@ -1,0 +1,13 @@
+razzfazz.ai Service Stack — COMMUNITY
+Apache License 2.0 — OPEN SOURCE
+Copyright (c) 2024-2026 razzfazz.ai GmbH - Member of SEQIS Group
+============================================================
+
+Our first-party compose wiring, configuration templates,
+documentation, base model wiring and the build recipes of the
+build-only containers are Open Source under the Apache License
+2.0 — free for any use, including production.
+
+Full text: LICENSE-APACHE in the repository root.
+
+Licensing inquiries: licensing@razzfazz.ai

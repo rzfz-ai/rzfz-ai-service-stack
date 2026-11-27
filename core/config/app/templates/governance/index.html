@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block page_title %}Governance & Audit{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Governance & Audit</h1>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+<!-- Tabs -->
+<div class="btn-row" style="margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--border)">
+    <a href="{{ url_for('governance.index', tab='checksums') }}" class="btn sm {% if tab == 'checksums' %}primary{% else %}ghost{% endif %}">Checksums</a>
+    <a href="{{ url_for('governance.index', tab='audit') }}" class="btn sm {% if tab == 'audit' %}primary{% else %}ghost{% endif %}">Audit Log</a>
+</div>
+
+{% if tab == 'checksums' %}
+<!-- Drift banner -->
+{% if drift is not none %}
+<div class="card" style="margin-bottom:1rem;border-left:4px solid {% if drift %}var(--warn){% else %}var(--success){% endif %}">
+    <div class="card-body" style="font-size:0.8125rem;display:flex;align-items:center;gap:0.5rem">
+        {% if drift %}
+        <span class="badge warn">Drift</span>
+        <span><strong>Configuration drift detected.</strong> Files have changed since the last checksum snapshot.
+        Current: <code>{{ current_overall[:16] }}...</code></span>
+        {% else %}
+        <span class="badge ok">No drift</span>
+        <span><strong>No drift.</strong> Current config matches the last snapshot.
+        Overall: <code>{{ current_overall[:16] }}...</code></span>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Take snapshot -->
+<h2 class="section">Take Checksum Snapshot</h2>
+<div class="card">
+    <div class="card-body">
+    <form method="POST" action="{{ url_for('governance.take_checksum') }}" style="display:flex;gap:0.5rem;align-items:flex-end">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="field" style="margin-bottom:0;flex:1">
+            <input type="text" name="comment" placeholder="Snapshot comment (e.g. 'Before upgrade')" required>
+        </div>
+        <button type="submit" class="btn primary">Take Snapshot</button>
+    </form>
+    </div>
+</div>
+
+<!-- History -->
+<h2 class="section">Snapshot History ({{ history | length }})</h2>
+{% if history %}
+<div class="table-wrap">
+    <table class="rz">
+        <thead><tr><th>ID</th><th>Timestamp</th><th>Comment</th><th>Source</th><th>Overall SHA256</th><th>Files</th><th>Actions</th></tr></thead>
+        <tbody>
+            {% for h in history %}
+            <tr>
+                <td>{{ h.id }}</td>
+                <td style="font-size:0.75rem;white-space:nowrap">{{ h.timestamp }}</td>
+                <td>{{ h.comment }}</td>
+                <td><span class="badge muted">{{ h.source }}</span></td>
+                <td style="font-size:0.75rem"><code>{{ h.overall_sha256[:16] }}...</code></td>
+                <td>{{ h.file_count }}</td>
+                <td>
+                    <a href="{{ url_for('governance.detail', set_id=h.id) }}" class="btn ghost sm">View</a>
+                    {% if not loop.last %}
+                    <a href="{{ url_for('governance.diff', a=history[loop.index].id, b=h.id) }}" class="btn ghost sm">Diff</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p style="padding:1rem;color:var(--text-muted)">No checksum snapshots taken yet.</p>
+{% endif %}
+
+{% elif tab == 'audit' %}
+<!-- Audit log -->
+<div class="filter-bar" style="margin-bottom:1rem">
+    <form method="GET" class="filter-form">
+        <input type="hidden" name="tab" value="audit">
+        <select name="event" class="filter-select" onchange="this.form.submit()">
+            <option value="">All events</option>
+            {% for e in all_events %}<option value="{{ e }}" {% if e == event_filter %}selected{% endif %}>{{ e }}</option>{% endfor %}
+        </select>
+        <select name="user" class="filter-select" onchange="this.form.submit()">
+            <option value="">All users</option>
+            {% for u in all_users %}<option value="{{ u }}" {% if u == user_filter %}selected{% endif %}>{{ u }}</option>{% endfor %}
+        </select>
+    </form>
+</div>
+
+<h2 class="section">Audit Log ({{ entries | length }} entries)</h2>
+{% if entries %}
+<div class="table-wrap">
+    <table class="rz">
+        <thead><tr><th>Timestamp</th><th>Event</th><th>User</th><th>Target</th><th>Detail</th><th>Outcome</th></tr></thead>
+        <tbody>
+            {% for e in entries %}
+            <tr>
+                <td style="font-size:0.75rem;white-space:nowrap">{{ e.timestamp[:19] if e.timestamp else '' }}</td>
+                <td><span class="badge muted">{{ e.event }}</span></td>
+                <td>{{ e.user or '' }}</td>
+                <td>{{ e.target or '' }}</td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">{{ e.detail or '' }}</td>
+                <td>
+                    {% if e.outcome == 'success' %}<span class="badge ok">success</span>
+                    {% elif e.outcome == 'failure' %}<span class="badge err">failure</span>
+                    {% else %}{{ e.outcome or '' }}{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p style="padding:1rem;color:var(--text-muted)">No audit log entries.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

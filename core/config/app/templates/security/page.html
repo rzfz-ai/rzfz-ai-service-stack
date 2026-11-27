@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block page_title %}{{ page_title }}{% endblock %}
+
+{% block page_content %}
+<div class="page">
+    <h1>{{ page_title }}</h1>
+    {% if doc_meta.get('release') %}<p class="lede">Release <code>{{ doc_meta.get('release') }}</code></p>{% endif %}
+</div>
+
+{% include "security/_overview.html" %}
+
+<div class="card markdown-body">
+<div class="card-body">
+{{ doc_html | safe }}
+</div>
+</div>
+
+{% include "security/_styles.html" %}
+{% endblock %}
+
+{% block extra_js %}
+    {{ super() }}
+{% include "security/_mermaid_js.html" %}
+{% endblock %}

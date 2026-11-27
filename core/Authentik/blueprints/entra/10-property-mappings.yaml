@@ -1,0 +1,125 @@
+version: 1
+metadata:
+  name: "Entra - Property Mappings"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Entra OAuth - Username"
+    attrs:
+      expression: |
+        # Entra returns preferred_username in UPN format (user@corp.com)
+        # Fall back to email if preferred_username is absent
+        upn = info.get("preferred_username", "")
+        email = info.get("email", "")
+        source = upn if upn else email
+        if not source:
+            return {"username": ""}
+        local = source.split("@")[0]
+        # Sanitize: replace dots/hyphens that are invalid in Authentik usernames
+        return {"username": local.replace(".", "_").replace("-", "_")}
+
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "Entra OAuth - Name"
+    attrs:
+      expression: |
+        name = info.get("name", "")
+        if not name:
+            return {"name": ""}
+        return {"name": name}
+
+  # No avatar mapping — Entra avatar requires a Graph API call (/me/photo/$value)
+  # which is outside the scope of the OIDC userinfo response.
+  # Authentik will fall back to initials-based avatars.
+
+  # #2473 D4: the user's Entra security groups (object ids), with the login token.
+  # Needs GroupMember.Read.All (admin consent once). Never raises and never writes
+  # a partial list: a refused call, a missing token, a malformed or incomplete
+  # answer or any error returns {}, so the previous ids stay (an outage must not
+  # strip roles). The bearer token is only ever sent to graph.microsoft.com.
+  # The `$` of the OData options is chr(36): init-authentik.sh runs envsubst over
+  # this file, which would turn a literal `$select` into an empty string.
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "razzfazz.ai - Upstream groups (Entra)"
+    attrs:
+      expression: |
+        GRAPH = "https://graph.microsoft.com/"
+        D = chr(36)
+        try:
+            import requests
+            tok = token.get("access_token") if isinstance(token, dict) else None
+            if not isinstance(tok, str) or not tok:
+                ak_logger.warning("rzfz-upstream-sync: no Entra access token, ids unchanged")
+                return {}
+            ids = []
+            url = GRAPH + "v1.0/me/transitiveMemberOf/microsoft.graph.group?" + D + "select=id&" + D + "top=999"
+            for _page in range(20):
+                r = requests.get(url, headers={"Authorization": "Bearer " + tok}, timeout=10)
+                if r.status_code != 200:
+                    ak_logger.warning("rzfz-upstream-sync: Graph refused, ids unchanged", status=r.status_code)
+                    return {}
+                body = r.json()
+                value = body.get("value") if isinstance(body, dict) else None
+                if not isinstance(value, list):
+                    ak_logger.warning("rzfz-upstream-sync: malformed Graph answer, ids unchanged")
+                    return {}
+                for g in value:
+                    gid = g.get("id") if isinstance(g, dict) else None
+                    if not isinstance(gid, str) or not gid.strip():
+                        ak_logger.warning("rzfz-upstream-sync: malformed Graph group, ids unchanged")
+                        return {}
+                    ids.append("entra:" + gid.strip())
+                url = body.get("@odata.nextLink")
+                if not url:
+                    return {"attributes": {"rzfz_upstream_ids": sorted(set(ids))}}
+                if not isinstance(url, str) or not url.startswith(GRAPH):
+                    ak_logger.warning("rzfz-upstream-sync: nextLink outside Graph, ids unchanged")
+                    return {}
+            ak_logger.warning("rzfz-upstream-sync: more than 20 Graph pages, ids unchanged")
+            return {}
+        except Exception as exc:
+            ak_logger.warning("rzfz-upstream-sync: Entra lookup failed, ids unchanged", error=type(exc).__name__)
+            return {}
+
+  # A first Microsoft sign-in whose e-mail equals an existing account's e-mail is
+  # linked to that account (user_matching_mode email_link). Microsoft's `email`
+  # claim is not verified: a tenant administrator can set any `mail` value, and a
+  # guest's address comes from elsewhere. Microsoft's proof that the tenant owns
+  # the address is the optional ID-token claim `xms_edov` (email domain owner
+  # verified; app registration -> Token configuration -> optional claims, ID
+  # token: `email` and `xms_edov`). This mapping hands the claim, with the e-mail
+  # it vouches for, to the link policy ("razzfazz.ai - Link by e-mail
+  # (Microsoft)", 11-policies.yaml) under the key `rzfz_link_proof`, which no
+  # stage writes to a user (the enrollment's user-write stage discards unknown
+  # keys). The ID token comes straight from the tenant's token endpoint over TLS
+  # (OpenID Connect Core 3.1.3.7), so its payload is read without a signature
+  # check. Never raises: anything unreadable is "not verified".
+  - model: authentik_sources_oauth.oauthsourcepropertymapping
+    identifiers:
+      name: "razzfazz.ai - E-mail link proof (Entra)"
+    attrs:
+      expression: |
+        proof = {"source": "entra", "email": "", "email_domain_verified": False}
+        try:
+            import base64
+            import json
+            raw = token.get("id_token") if isinstance(token, dict) else None
+            if not isinstance(raw, str) or raw.count(".") != 2:
+                return {"rzfz_link_proof": proof}
+            seg = raw.split(".")[1]
+            seg += "=" * (-len(seg) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
+            if not isinstance(claims, dict):
+                return {"rzfz_link_proof": proof}
+            email = claims.get("email")
+            edov = claims.get("xms_edov")
+            proof["email"] = email.strip().lower() if isinstance(email, str) else ""
+            proof["email_domain_verified"] = (isinstance(edov, (bool, int, str))
+                                              and str(edov).strip().lower() in ("true", "1"))
+        except Exception as exc:
+            ak_logger.warning("rzfz-source-link: Entra ID token unreadable, e-mail not verified",
+                              error=type(exc).__name__)
+        return {"rzfz_link_proof": proof}

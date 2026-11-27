@@ -1,0 +1,49 @@
+# ==============================================================================
+# PDF PROCESSING MODULE (Stirling-PDF)
+# ==============================================================================
+# Profile: stirling-pdf
+# Full-featured PDF manipulation web UI with 50+ operations.
+# User-facing at pdf.<domain> behind Authentik SSO.
+# SECURITY_ENABLELOGIN=false — Authentik handles all authentication.
+# 3.x keeps settings.yml and its embedded H2 database in /configs, as 2.x did,
+# migrates that database on the first start and writes a SQL dump of it to
+# /configs/backup/db; there is no way back to 2.x over a migrated /configs
+# other than restoring the volume. With login off no request carries an API key,
+# so direct tool calls (for example a Dify HTTP node calling /api/v1/misc/flatten)
+# count as manual use and are not metered by 3.x's monthly automation allowance.
+# ==============================================================================
+services:
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:3.3.0
+    profiles: ["stirling-pdf"]
+    container_name: stirling-pdf
+    restart: unless-stopped
+    # #36 security-review — join egress-controlled coding-agents net for sandboxed coding agents
+    networks:
+      - default
+      - coding-agents
+    ports:
+      - "127.0.0.1:${STIRLING_PDF_PORT:-8181}:8080"
+    volumes:
+      - stirling-pdf-config:/configs
+      - stirling-pdf-logs:/logs
+    environment:
+      # Authentik handles all authentication — disable built-in login
+      DOCKER_ENABLE_SECURITY: "false"
+      SECURITY_ENABLELOGIN: "false"
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8080/api/v1/info/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  stirling-pdf-config:
+  stirling-pdf-logs:
+
+# #36 security-review — shared egress-controlled net (declared in core/compose.yml).
+networks:
+  coding-agents:
+    name: coding-agents
+    driver: bridge

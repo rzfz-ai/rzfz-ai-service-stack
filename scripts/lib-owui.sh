@@ -1,0 +1,1775 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# =============================================================================
+# scripts/lib-owui.sh — Open WebUI wiring shared by post-install and upgrade
+# =============================================================================
+# ONE implementation of "which LLM backend + key does Open WebUI get, and how
+# is it asserted in OWUI's persisted config", sourced by cli/post-install.sh
+# (--preset / --refresh) and cli/upgrade.sh (post-upgrade reconcile). Before
+# this file the resolvers lived only in post-install.sh, so an upgrade could
+# not re-assert anything without spawning the whole provisioning script — and
+# when that died early, nothing reached OWUI (#908 follow-up).
+#
+# #1185 — the persisted OpenAI connection is reconciled as an UPSERT per base
+# URL (scripts/owui_config_reconcile.py, JSON-aware), never appended, and the
+# .env key is VALIDATED against the manager before it is allowed to overwrite
+# anything: a dead .env key never clobbers a working in-app key.
+#
+# Sourced library: NO top-level `set` line (options would leak into every
+# sourcing shell, #382). Requires scripts/lib.sh (print_*, read_env_value,
+# update_env_value) to be sourced first. Callers running with `set -u` are
+# supported; every external read is `|| true`-guarded for `set -e`.
+#
+# Env contract (post-install exports .env; upgrade calls owui_lib_env_from_file):
+#   ENV_FILE, COMPOSE_PROFILES, MAIN_DOMAIN, AUTHENTIK_BOOTSTRAP_PASSWORD,
+#   OPENWEBUI_PORT, LLM_MANAGER_PORT, POSTGRES_USER, OPENWEBUI_DB,
+#   GPUSTACK_API_KEY, LLM_MANAGER_GPUSTACK_FEDERATED (#1442: the ownership
+#   predicate reads it, so upgrade.sh has to see it too)
+# =============================================================================
+
+# Repo root for the python helper — SCRIPT_DIR when the caller set it (both
+# CLIs do), else derived from this file's location.
+_OWUI_REPO_ROOT="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# Fill the env contract from $ENV_FILE for callers that do NOT export .env
+# (cli/upgrade.sh). Never sources .env (metachars, #949): one read_env_value
+# per key, and an already-set variable always wins.
+owui_lib_env_from_file() {
+    local _f="${ENV_FILE:-.env}" _v _val
+    for _v in COMPOSE_PROFILES MAIN_DOMAIN AUTHENTIK_BOOTSTRAP_PASSWORD \
+              OPENWEBUI_PORT LLM_MANAGER_PORT POSTGRES_USER OPENWEBUI_DB \
+              GPUSTACK_API_KEY LLM_MANAGER_GPUSTACK_FEDERATED \
+              RAZZFAZZ_ADMIN_USERNAME; do
+        if [ -z "${!_v:-}" ]; then
+            _val=$(read_env_value "$_f" "$_v" 2>/dev/null) || _val=""
+            [ -n "$_val" ] && printf -v "$_v" '%s' "$_val"
+        fi
+    done
+    return 0
+}
+
+# ── LLM backend source-of-truth (#976) ───────────────────────────────────────
+# On an llm-manager box the manager fronts every worker and METERS usage, so
+# stack consumers (OWUI chat + RAG embedding / completion / reranker, …) must
+# talk to IT — not the bundled GPUStack, which on a manager-only box may not be
+# enabled at all. These resolvers are the SINGLE place that decides which
+# backend URL + key a consumer gets, so the gpustack default lives in exactly
+# one spot and a gpustack-disabled box wires cleanly to the manager instead of
+# to a dead endpoint.
+
+_gpustack_profile_active() {
+    # True when a profile that actually RUNS GPUStack is enabled. Exact
+    # comma-delimited token match — `grep -w llm` would false-match
+    # `llm-manager` / `llm-registry` (the `-` is a word boundary).
+    case ",${COMPOSE_PROFILES:-}," in
+        *,llm-legacy,*) return 0 ;;   # #1447: `llm` removed, `llm-cpu` folded in
+    esac
+    return 1
+}
+
+# WHICH backend this box is wired to. The PROFILE is the authority — exact
+# comma-delimited token match, mirroring _gpustack_profile_active above. It
+# deliberately does NOT require the container to be running: a transient
+# outage must delay an authoritative write, never change the ANSWER (#976).
+_llm_manager_profile_active() {
+    case ",${COMPOSE_PROFILES:-}," in
+        *,llm-manager,*) return 0 ;;
+    esac
+    return 1
+}
+
+# #1265: the name of the backend this box serves through — for OPERATOR-FACING
+# TEXT ONLY (verify labels, hints, warnings). It decides nothing: every wiring
+# path reads the profile helpers directly. Anchored on the PROFILE, not on
+# liveness, because a momentarily stopped manager does not turn a Manager box
+# into a GPUStack box — and reading "GPUStack" on a box that has none sends the
+# operator looking in the wrong place (Phase-3 round 3: the verify report said
+# "Open WebUI: GPUStack connection configured" while the connection was
+# http://llm-manager:8080/v1).
+_llm_backend_display_name() {
+    # #1445 (C5c / E1): every consumer address is http://llm:8080/v1, which is
+    # the manager — so on a box that runs the manager the label says so, even
+    # when GPUStack holds the models behind it (the manager fronts them, #1442).
+    # The rule this file already stated stays the rule: the label must name what
+    # the URL points at. Following OWNERSHIP here printed "GPUStack" next to a
+    # manager URL on a dual, not-yet-federated box — the exact defect #1265
+    # fixed, in the other direction.
+    if _llm_manager_profile_active; then
+        printf '%s' 'LLM Manager'
+    else
+        printf '%s' 'GPUStack'
+    fi
+}
+
+# Is the manager reachable right now? Liveness decides whether to SKIP an
+# authoritative write — never which backend a consumer is pointed at.
+_llm_manager_running() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx llm-manager
+}
+
+# "profile on AND up" — for call sites that need a live manager (a mint).
+_llm_manager_active() {
+    _llm_manager_profile_active && _llm_manager_running
+}
+
+# #1441 (cutover C1): THE one question every consumer, both deploy arms and the
+# verify gate ask — does the LLM Manager own this box's models? Today: the
+# manager profile is on and no GPUStack profile is. Until #1442 fronts GPUStack
+# through the manager, a box that RUNS GPUStack has its models there, so every
+# consumer follows GPUStack and the manager idles; the moment #1442 lands this
+# predicate is the single line that flips the whole box to manager-first.
+# Lives here (not in lib-llm-manager-deploy.sh) because cli/upgrade.sh sources
+# only this file and the resolvers below have to answer the same question.
+# #1442: WHO DEPLOYS the standard set is a different question from who fronts
+# it. A box with a GPUStack profile deploys its models in GPUStack (the manager
+# cannot deploy into an external backend; #330 reserves the GPU for it) and,
+# once federated, the manager fronts them. Both deploy arms ask THIS.
+llm_manager_deploys_standard_set() {
+    _llm_manager_profile_active || return 1
+    if _gpustack_profile_active; then return 1; fi
+    return 0
+}
+
+llm_manager_owns_standard_set() {
+    _llm_manager_profile_active || return 1
+    if _gpustack_profile_active; then
+        # #1442 (cutover C2): once post-install has registered GPUStack as the
+        # manager's external backend (llm_manager_federate_gpustack writes the
+        # marker into .env; load_env exports it), the manager fronts GPUStack
+        # and owns the box's models — every consumer wires to it.
+        [ "${LLM_MANAGER_GPUSTACK_FEDERATED:-}" = "true" ] && return 0
+        return 1
+    fi
+    return 0
+}
+
+_llm_manager_mint_service_key() {
+    # $1 = service (openwebui|dify) → plaintext key on stdout, rc 1 on failure.
+    # docker exec = operator privilege; deliberately NO new network endpoint
+    # (the #612 agent-key mint is peer-anchored to agent-manager and stays so).
+    # -i is load-bearing: without it docker exec does not forward stdin, the
+    # heredoc never reaches python3 - and the mint "succeeds" empty (#666
+    # live-verify on 0.91).
+    docker exec -i llm-manager python3 - "$1" <<'MINTEOF'
+import sys
+sys.path.insert(0, "/app")
+from app.auth import generate_api_key
+from app.config import get_settings
+from app.db import session_scope
+from app.models import ApiKey, CostCenter
+
+service = sys.argv[1].strip()
+cc_name = f"stack/{service}"
+plaintext, key_hash, display = generate_api_key(get_settings().key_prefix)
+with session_scope() as s:
+    cc = s.query(CostCenter).filter(CostCenter.name == cc_name).first()
+    if cc is None:
+        cc = CostCenter(name=cc_name, team="stack")
+        s.add(cc)
+        s.flush()
+    s.add(ApiKey(key_hash=key_hash, key_prefix=display, cost_center_id=cc.id))
+print(plaintext)
+MINTEOF
+}
+
+# ── #1185: key validation ────────────────────────────────────────────────────
+# Is $1 accepted by the manager's metered /v1 surface? Prints exactly one of
+#   ok      — 200 from GET /v1/models
+#   dead    — 401/403 (the key is not in the manager's store)
+#   unknown — anything else (manager down, 5xx, no answer): NOT a verdict.
+# Loopback published port, the same probe wire_llm_manager_consumers uses for
+# the Dify key. An empty key is dead by definition.
+_llm_manager_key_status() {
+    local key="$1" code
+    [ -n "$key" ] || { printf 'dead'; return 0; }
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        -K <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
+        "http://127.0.0.1:${LLM_MANAGER_PORT:-8091}/v1/models" 2>/dev/null) || code=""
+    case "$code" in
+        200)     printf 'ok' ;;
+        401|403) printf 'dead' ;;
+        *)       printf 'unknown' ;;
+    esac
+}
+
+# ── #3278: every stack service key is VALIDATED, not only OWUI's ────────────
+# A factory reset recreates the manager's key store, but .env keeps the old
+# service keys; minting only when the .env value was EMPTY left the Dify,
+# Config Portal and RAG-consumer keys dead (401) for good. Same rules as
+# _owui_resolve_manager_key (#1185):
+#   ok      -> keep the .env key
+#   unknown -> keep it too (manager down / no answer: never replaced on a guess)
+#   dead or empty -> mint a fresh stack/$2 key and write it to .env
+# Called directly, NOT inside $(...): the result is in two variables, so the
+# key never travels through stdout or argv —
+#   _LLM_SVC_KEY      the key to use ("" when there is none)
+#   _LLM_SVC_KEY_NEW  1 when a key was minted and written to .env just now
+# Returns 1 when there is no usable key (empty or dead, and the mint failed);
+# a dead key is then NOT handed out, and .env keeps the old value so a later
+# --refresh can still repair it.
+llm_manager_resolve_service_key() {
+    local var="$1" svc="$2" cur k
+    _LLM_SVC_KEY=""; _LLM_SVC_KEY_NEW=0
+    cur=$(read_env_value "$ENV_FILE" "$var" 2>/dev/null) || cur=""
+    if [ -n "$cur" ]; then
+        case "$(_llm_manager_key_status "$cur")" in
+            ok|unknown) _LLM_SVC_KEY="$cur"; return 0 ;;
+        esac
+        print_warning "$var in .env is rejected by the LLM Manager (its key store is new, for example after a factory reset) — minting a new stack/$svc service key."
+    fi
+    k=$(_llm_manager_mint_service_key "$svc" 2>/dev/null) || k=""
+    if [ -z "$k" ]; then
+        if [ -n "$cur" ]; then
+            print_warning "Could not mint a new stack/$svc service key — $var stays rejected until 'rzfz post-install --refresh' runs with the LLM Manager up."
+        fi
+        return 1
+    fi
+    update_env_value "$ENV_FILE" "$var" "$k"
+    _LLM_SVC_KEY="$k"; _LLM_SVC_KEY_NEW=1
+    return 0
+}
+
+# The keys OWUI currently HOLDS for base URL $1 (connection entries + the RAG
+# key rows), one per line — read from openwebui_db by the python helper. Empty
+# when postgres is not up or the schema is not the per-key one.
+_owui_app_key_candidates() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres || return 0
+    python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" candidates \
+        --url "$1" --db "${OPENWEBUI_DB:-openwebui_db}" \
+        --pg-user "${POSTGRES_USER:-docker}" 2>/dev/null || true
+}
+
+# THE stack/openwebui service key, VALIDATED (#1185). Prints the key to use:
+#   1. LLM_MANAGER_OWUI_KEY from .env when the manager accepts it — or when
+#      the manager cannot be asked (unknown): an unverifiable key is left
+#      alone, never replaced on a guess.
+#   2. else a key OWUI already holds that the manager DOES accept: the app
+#      config wins, .env is corrected to it (WARN — this is the 0.91 drift,
+#      an in-app fix that .env never learned about; the seed must not punish
+#      it).
+#   3. else a freshly minted key (.env updated); on a failed mint the .env
+#      value stays, whatever it is, and a WARN says so.
+# Runs inside $(...) — every message goes to stderr so it cannot leak into
+# the key the caller captures.
+_owui_resolve_manager_key() {
+    local env_key st cand k url
+    env_key=$(read_env_value "$ENV_FILE" LLM_MANAGER_OWUI_KEY 2>/dev/null) || env_key=""
+    if [ -n "$env_key" ]; then
+        st=$(_llm_manager_key_status "$env_key")
+        case "$st" in
+            ok|unknown) printf '%s' "$env_key"; return 0 ;;
+        esac
+    fi
+    # #1441 rev-D (review N1): the key this function resolves is the MANAGER's,
+    # so the candidate lookup asks for the MANAGER's URL — not the
+    # ownership-following resolver, which on a dual box answers GPUStack's
+    # address. With that address the #1185 adoption step ("a key OWUI already
+    # holds and the manager accepts wins and is written back") looked in the
+    # wrong place and minted a fresh key on every run.
+    url="http://llm-manager:8080/v1"
+    while IFS= read -r cand; do
+        [ -n "$cand" ] || continue
+        [ "$cand" = "$env_key" ] && continue
+        if [ "$(_llm_manager_key_status "$cand")" = "ok" ]; then
+            # rzfz review #1218 F2: `${env_key:+…}${env_key:-…}` on the SAME variable
+            # printed the dead key itself on the DEAD branch. Two sentences, no value.
+            if [ -n "$env_key" ]; then
+                print_warning "LLM_MANAGER_OWUI_KEY in .env is DEAD (the manager rejects it) but Open WebUI already holds a key the manager accepts — keeping the app's key and writing it back to .env (#1185)." >&2
+            else
+                print_warning "LLM_MANAGER_OWUI_KEY in .env is empty but Open WebUI already holds a key the manager accepts — keeping the app's key and writing it back to .env (#1185)." >&2
+            fi
+            update_env_value "$ENV_FILE" "LLM_MANAGER_OWUI_KEY" "$cand"
+            printf '%s' "$cand"; return 0
+        fi
+    done <<< "$(_owui_app_key_candidates "$url")"
+    if [ -n "$env_key" ]; then
+        print_warning "LLM_MANAGER_OWUI_KEY in .env is DEAD (the manager rejects it) and Open WebUI holds no valid key either — minting a fresh stack/openwebui service key (#1185)." >&2
+    fi
+    k=$(_llm_manager_mint_service_key openwebui 2>/dev/null) || k=""
+    if [ -n "$k" ]; then
+        update_env_value "$ENV_FILE" "LLM_MANAGER_OWUI_KEY" "$k"
+        printf '%s' "$k"; return 0
+    fi
+    if [ -n "$env_key" ]; then
+        print_warning "Could not mint a stack/openwebui service key — the dead LLM_MANAGER_OWUI_KEY stays in .env; OWUI will keep failing with 401 until 'rzfz post-install --refresh' runs with llm-manager up (#1185)." >&2
+    fi
+    printf '%s' "$env_key"
+}
+
+# The OpenAI-compatible base URL OWUI (and other OpenAI-client consumers) use
+# for chat + embeddings.
+_owui_llm_base_url() {
+    # #1445 (cutover C5c / Operator-Entscheidung E1): EINE kanonische,
+    # backend-unabhängige Adresse. `llm` ist ein Netz-Alias des immer laufenden
+    # Managers (#1443); der Manager bedient eigene Worker oder frontet GPUStack
+    # als registriertes externes Backend (#1442). Ein Konsument nennt damit nie
+    # wieder ein Backend, und beim Backend-Wechsel ist nichts umzuschreiben.
+    printf 'http://llm:8080/v1'
+}
+
+# The matching key. #1445 (C5c / E1): the address is the manager's, so the key
+# is too — the VALIDATED stack/openwebui SERVICE key (#1185: .env, app-held, or
+# minted — see _owui_resolve_manager_key), so metering attributes OWUI traffic
+# to its cost-centre. GPUSTACK_API_KEY is no longer a consumer's business: the
+# manager holds it as the credential of its external backend (#1442).
+_owui_llm_key() {
+    _owui_resolve_manager_key
+}
+
+# OWUI's external reranker wants the FULL endpoint (it POSTs the body AS-IS, no
+# "/rerank" append — see project_openwebui_external_reranker_url). #1445 (C5c /
+# E1): the same canonical address as every other consumer path; the manager
+# gateway proxies /v1/rerank (#976).
+_owui_rerank_url() {
+    printf 'http://llm:8080/v1/rerank'
+}
+
+# ── #1185: .env + app config as a PAIR ───────────────────────────────────────
+# $1=bases $2=keys (both ;-joined, aligned by position) $3=url $4=key →
+# prints the keys list with the entry paired to $3 set to $4. Pure: the
+# counterpart of _owui_append_endpoint (post-install) for the "URL already
+# present, key stale" case that append cannot see.
+_owui_set_endpoint_key() {
+    local -a _bs _ks
+    IFS=';' read -r -a _bs <<< "$1"
+    IFS=';' read -r -a _ks <<< "$2"
+    # rzfz review #1218 F1: join POSITIONALLY. `${out:+$out;}` suppressed the
+    # separator while `out` was still "" — i.e. after a LEADING empty key — so
+    # bases `a;b` + keys `;K2` collapsed to one element and every key shifted
+    # onto the wrong base (the misalignment class this file exists to close).
+    local i out=""
+    for i in "${!_bs[@]}"; do
+        [ "${_bs[$i]}" = "$3" ] && _ks[i]="$4"
+        [ "$i" -gt 0 ] && out="$out;"
+        out="$out${_ks[$i]:-}"
+    done
+    printf '%s' "$out"
+}
+
+# The key .env currently pairs with base URL $3 ($1=bases, $2=keys, both
+# ;-joined and aligned by position). Prints the empty string when the URL is
+# not listed at all — the caller cannot tell those two apart from
+# `_owui_set_endpoint_key`'s output. Pure; used by the env-vs-DB verify (#1252).
+_owui_env_endpoint_key() {
+    local -a _bs _ks
+    IFS=';' read -r -a _bs <<< "$1"
+    IFS=';' read -r -a _ks <<< "$2"
+    local i
+    for i in "${!_bs[@]}"; do
+        if [ "${_bs[$i]}" = "$3" ]; then
+            printf '%s' "${_ks[$i]:-}"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# $1=bases $2=keys $3=url $4=key → TWO lines (bases / keys) in which $3 appears
+# exactly once carrying $4: its key pinned when the URL is already listed,
+# appended positionally when it is not. Pure.
+#
+# This is the PAIR-level primitive. The two halves already in the tree each
+# cover only one case — `_owui_set_endpoint_key` (above) fixes a stale key but
+# cannot add a missing URL, `_owui_append_endpoint` (cli/post-install.sh) adds a
+# URL but cannot fix a stale key — and .env needs both in one call. It is
+# deliberately NOT a call to post-install's helper: this library is sourced by
+# cli/upgrade.sh too, which does not define it, and depending on a function the
+# caller happens to have is the coupling #908 moved these resolvers here to end.
+_owui_upsert_endpoint_pair() {
+    local bases="$1" keys="$2" url="$3" key="$4"
+    case ";${bases};" in
+        *";${url};"*)
+            printf '%s\n%s\n' "$bases" "$(_owui_set_endpoint_key "$bases" "$keys" "$url" "$key")"
+            return 0 ;;
+    esac
+    # An EMPTY list must yield the url ALONE — not ";url", whose leading empty
+    # entry OWUI would try to query as a zero-length base URL (#976).
+    if [ -z "$bases" ]; then
+        printf '%s\n%s\n' "$url" "$key"
+        return 0
+    fi
+    printf '%s;%s\n%s;%s\n' "$bases" "$url" "$keys" "$key"
+}
+
+# Keep the .env pair (OWUI_OPENAI_BASE_URLS / OWUI_OPENAI_KEYS — what
+# modules/chat/compose.yml feeds to the container as OPENAI_API_BASE_URLS /
+# OPENAI_API_KEYS) in agreement with the connection just asserted in the app
+# for base URL $1 with key $2. Sets _OWUI_ENV_PAIR_CHANGED=true when .env was
+# written.
+#
+# #1252: this used to REALIGN only — `[ -n "$bases" ] || return 0` plus a
+# key-only rewrite, on the theory that "the wiring functions own the append".
+# They do, but they run ONCE, at the very top of post-install, and on a clean
+# Manager box the manager is frequently not answering yet: the OWUI arm of
+# wire_llm_manager_consumers is then skipped for want of a service key, and
+# nothing writes the pair again. The authoritative reconcile that runs later
+# (owui_configure_connection, with a key it minted itself) fixed the DB rows and
+# returned here — where the early `return 0` on an empty list dropped the .env
+# half on the floor. Result: the DB held the manager connection while the
+# container env still carried compose's gpustack default and the
+# `gpustack_CHANGEME_AFTER_FIRST_START` placeholder — two truths, and the one an
+# upgrade re-seeds from is the WRONG one (#1185's class). The pair is now
+# UPSERTed, so env and DB can no longer disagree.
+_owui_realign_env_pair() {
+    local url="$1" key="$2"
+    _OWUI_ENV_PAIR_CHANGED=false
+    [ -n "$url" ] && [ -n "$key" ] || return 0
+    local bases keys out new_bases new_keys
+    bases=$(read_env_value "$ENV_FILE" OWUI_OPENAI_BASE_URLS 2>/dev/null) || bases=""
+    keys=$(read_env_value "$ENV_FILE" OWUI_OPENAI_KEYS 2>/dev/null) || keys=""
+    out=$(_owui_upsert_endpoint_pair "$bases" "$keys" "$url" "$key")
+    new_bases=$(printf '%s' "$out" | sed -n 1p)
+    new_keys=$(printf '%s' "$out" | sed -n 2p)
+    if [ "$new_bases" != "$bases" ]; then
+        update_env_value "$ENV_FILE" "OWUI_OPENAI_BASE_URLS" "$new_bases"
+        _OWUI_ENV_PAIR_CHANGED=true
+    fi
+    if [ "$new_keys" != "$keys" ]; then
+        update_env_value "$ENV_FILE" "OWUI_OPENAI_KEYS" "$new_keys"
+        _OWUI_ENV_PAIR_CHANGED=true
+    fi
+    return 0
+}
+
+# Assert OWUI's PERSISTED OpenAI connection + RAG key family for base URL $1
+# with key $2 (reranker endpoint $3): one entry per base URL (upsert, never a
+# duplicate), `rag.openai.api_key` + `rag.external_reranker_api_key` set to
+# the same key, the legacy `openai` blob mirrored when present. On a box
+# wired to the manager the persisted gpustack endpoints (first-boot env seed)
+# are moved to the manager in the same pass — the #976 transition, now
+# JSON-aware instead of a text replace. Recreates openwebui ONLY when a row
+# actually changed. Best-effort: never returns non-zero.
+owui_reconcile_openai_keys() {
+    local url="$1" key="$2" rerank_url="$3"
+    [ -n "$url" ] || return 0
+    if [ -z "$key" ]; then
+        print_warning "OWUI key reconcile: no key available for ${url} — persisted connection left as-is."
+        return 0
+    fi
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres; then
+        print_warning "OWUI key reconcile: postgres is not running — skipped."
+        return 0
+    fi
+    local -a repl=()
+    if [ "$url" != "http://gpustack:9090/v1-openai" ]; then
+        repl=(--replace "http://gpustack:9090/v1-openai=${url}"
+              --replace-rerank "http://gpustack:9090/v1/rerank=${rerank_url}")
+    fi
+    local out rc=0
+    out=$(RZFZ_OWUI_API_KEY="$key" python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" apply \
+        --url "$url" --rerank-url "$rerank_url" "${repl[@]}" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    case "$rc" in
+        0) ;;
+        3) print_substep "OWUI persisted config is still the pre-0.11 single-row schema — key reconcile skipped (OWUI migrates it on its next start)."
+           return 0 ;;
+        *) print_warning "OWUI key reconcile FAILED (rc=${rc}): $(printf '%s\n' "$out" | head -n1)"
+           return 0 ;;
+    esac
+    local changed
+    changed=$(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p' | head -n1)
+    changed="${changed:-0}"
+    _owui_realign_env_pair "$url" "$key"
+    # rzfz review #1218 F4: `_OWUI_ENV_PAIR_CHANGED` was a dead flag — an .env-only
+    # realignment reported "already consistent" and skipped the recreate. It now
+    # counts as a change (openwebui reads OWUI_OPENAI_KEYS at start).
+    if [ "${_OWUI_ENV_PAIR_CHANGED:-false}" = true ] && ! [ "$changed" -gt 0 ] 2>/dev/null; then
+        changed=1
+        print_substep "OWUI .env pair (OWUI_OPENAI_BASE_URLS/OWUI_OPENAI_KEYS) aligned with the DB for ${url} — recreating openwebui so it is read (#1185/#1252)."
+    fi
+    if [ "$changed" -gt 0 ] 2>/dev/null; then
+        # OWUI reads the per-key rows live, but its model list is cached —
+        # recreate so the new key is used everywhere at once (#427: report
+        # what actually happened).
+        if docker compose up -d --no-deps --force-recreate openwebui >/dev/null 2>&1; then
+            print_substep "OWUI OpenAI connection + RAG keys reconciled for ${url} (${changed} row(s) rewritten; openwebui recreated)."
+        else
+            print_warning "OWUI OpenAI connection + RAG keys rewritten in the DB (${changed} row(s)), but the openwebui recreate FAILED — OWUI keeps its cached model list until it is restarted."
+        fi
+    else
+        print_substep "OWUI OpenAI connection + RAG keys already consistent for ${url}."
+    fi
+    return 0
+}
+
+# ── #1266: OWUI's `model` rows on a box whose backend is the LLM Manager ─────
+# A GPUStack box gets its rows from the `model-sync` container (one INSERT per
+# backend model) and post-install then patches `meta` on them. A Manager box
+# runs no model-sync: NOTHING wrote the rows, so `openwebui_db.model` stayed
+# EMPTY after a clean install — the embedder, the reranker and granite-docling
+# appeared in the user's chat picker (a row is what carries `meta.hidden` /
+# `is_active`), the chat models carried no capabilities, and `core/llm/sync.py`
+# had no row to put `params` on and said so as
+# "ADD <name> (row missing — sync after OWUI auto-discovery)". Auto-discovery
+# is a GPUStack-era event that never comes here.
+#
+# The SET comes from the manager, so a console-deployed model gets a row too;
+# scripts/owui_model_rows.py owns the row shape, the classification and the
+# idempotency (see its module docstring).
+
+# The model ids the manager's metered /v1 surface serves ($1 = service key),
+# one per line. Loopback published port, the same probe the #1250b verify uses.
+_owui_manager_served_models() {
+    local key="$1"
+    [ -n "$key" ] || return 1
+    curl -sf --max-time 15 -K <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
+        "http://127.0.0.1:${LLM_MANAGER_PORT:-8091}/v1/models" 2>/dev/null | \
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for row in (data.get("data") or []) if isinstance(data, dict) else []:
+    mid = (row or {}).get("id") if isinstance(row, dict) else None
+    if mid:
+        print(mid)
+'
+}
+
+# #1442 rev-D (journey C on 0.79): the name of the reranker the manager SERVES
+# for key $1, on stdout — empty when it serves none. rc 2 when the manager could
+# not be asked (no key, no answer, nothing served at all): a caller keeps its
+# current wiring on rc 2 and changes it only on a measured answer. Task from the
+# admin surface where available, else the same name rule the federation and
+# `_infer_task` use.
+_owui_served_reranker() {
+    local key="$1" served tasks
+    served=$(_owui_manager_served_models "$key" 2>/dev/null) || return 2
+    [ -n "$served" ] || return 2
+    tasks=$(_owui_manager_model_tasks 2>/dev/null) || tasks=""
+    SERVED="$served" TASKS="$tasks" python3 -c '
+import os
+served = [l.strip() for l in os.environ["SERVED"].splitlines() if l.strip()]
+tasks = {}
+for l in os.environ["TASKS"].splitlines():
+    if "\t" in l:
+        n, t = l.split("\t", 1)
+        tasks[n.strip()] = t.strip().lower()
+for n in served:
+    if tasks.get(n) == "rerank" or (n not in tasks and "rerank" in n.lower()):
+        print(n)
+        break
+'
+    return 0
+}
+
+# "<model_name>\t<task>" per deployment the manager holds.
+#
+# The task lives ONLY on the admin surface (`GET /api/deployments`), which is
+# ingress-anchored — `_llmm_admin_api` (cli/lib-llm-manager-deploy.sh) is the
+# one implementation of that `docker exec caddy wget` call style, and
+# cli/post-install.sh sources it. A caller that does not (cli/upgrade.sh) gets
+# NO tasks and the manifest classifies alone, which is the normal case for the
+# standard set anyway — so this degrades instead of failing.
+_owui_manager_model_tasks() {
+    declare -F _llmm_admin_api >/dev/null 2>&1 || return 0
+    _llmm_admin_api GET /api/deployments 2>/dev/null | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict):
+        continue
+    name = row.get("model_name")
+    if name:
+        print("%s\t%s" % (name, row.get("task") or ""))
+'
+}
+
+# `--model ID=TASK` arguments for scripts/owui_model_rows.py, one per line, for
+# every model the manager serves. Empty output = the manager served nothing (or
+# could not be asked), which the callers treat as "not my turn".
+#
+# $1 = the service key to probe with. Optional: without it the key is RESOLVED
+# (`_owui_llm_key`), which is what a provisioning run wants — but that resolver
+# may mint and write .env, so a READ-ONLY caller (the --verify suite) passes the
+# .env key explicitly instead of mutating the box from a verify.
+_owui_manager_model_args() {
+    local key ids tasks
+    key="${1:-}"
+    [ -n "$key" ] || key=$(_owui_llm_key) || key=""
+    ids=$(_owui_manager_served_models "$key") || ids=""
+    [ -n "$ids" ] || return 0
+    tasks=$(_owui_manager_model_tasks) || tasks=""
+    IDS="$ids" TASKS="$tasks" python3 -c '
+import os
+tasks = {}
+for line in (os.environ.get("TASKS") or "").splitlines():
+    name, _, task = line.partition("\t")
+    if name.strip():
+        tasks[name.strip()] = task.strip()
+for mid in (os.environ.get("IDS") or "").splitlines():
+    mid = mid.strip()
+    if mid:
+        print("%s=%s" % (mid, tasks.get(mid, "")))
+'
+}
+
+# Write/reconcile the rows. Returns 0 when it OWNED the job (rows are now
+# right), 1 when it could not — the caller then falls back to the GPUStack-era
+# path rather than leaving the models unconfigured.
+owui_reconcile_model_rows() {
+    llm_manager_owns_standard_set || return 1   # #1441: rows belong to the backend that owns the models
+    if ! _llm_manager_running; then
+        print_warning "llm-manager profile is enabled but the container is not running — OWUI model rows not written (#1266). Re-run 'rzfz post-install --refresh' once it is up."
+        return 1
+    fi
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx postgres; then
+        print_warning "postgres is not running — OWUI model rows not written (#1266)."
+        return 1
+    fi
+    local args
+    args=$(_owui_manager_model_args) || args=""
+    if [ -z "$args" ]; then
+        print_warning "The LLM Manager serves no model yet — OWUI model rows not written (#1266). Deploy the standard set ('rzfz post-install --preset standard') or from the LLM Manager console, then re-run 'rzfz post-install --refresh'."
+        return 1
+    fi
+    local -a model_args=()
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] && model_args+=(--model "$line")
+    done <<< "$args"
+    # #2954: the models the manager still has a deployment for, served or not.
+    # A row whose model is deployed but not served right now (a stale worker)
+    # is hidden, not deleted; without this list the writer only hides.
+    local deployed
+    deployed=$(_owui_manager_model_tasks 2>/dev/null | cut -f1) || deployed=""
+    while IFS= read -r line; do
+        [ -n "$line" ] && model_args+=(--deployed "$line")
+    done <<< "$deployed"
+    local out rc=0
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_model_rows.py" apply \
+        "${model_args[@]}" \
+        --manifest "${_OWUI_REPO_ROOT}/core/llm/standard-models.yaml" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    case "$rc" in
+        0) ;;
+        3) print_warning "OWUI model rows skipped: $(printf '%s\n' "$out" | head -n1) (#1266). Re-run 'rzfz post-install --refresh' once Open WebUI has been seeded."
+           return 1 ;;
+        *) print_warning "OWUI model rows FAILED (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#1266)."
+           return 1 ;;
+    esac
+    local changed
+    changed=$(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p' | head -n1)
+    changed="${changed:-0}"
+    if [ "$changed" -gt 0 ] 2>/dev/null; then
+        printf '%s\n' "$out" | sed -n 's/^ROW /  model: /p'
+        print_success "Open WebUI model rows written from the LLM Manager's model list (${changed} row(s); embedding/reranker/doc-conversion models hidden from the chat picker)."
+    else
+        print_substep "Open WebUI model rows already consistent with the LLM Manager's model list."
+    fi
+    return 0
+}
+
+# #908: THE retrieval defaults, in ONE place.
+#
+# They used to be written down twice — once as `env_vars_needed` (the .env seed)
+# and once as the python merge dict (the authoritative API push) — in two
+# different vocabularies, because OWUI spells the env var `RAG_TOP_K` and the
+# config field `TOP_K`. Two hand-maintained lists is one list that has not
+# drifted yet, and this one already had: `ENABLE_RETRIEVAL_QUERY_GENERATION`
+# was in the env seed and NOT in the API push. The env seed is a FIRST-BOOT-ONLY
+# write (that is what PersistentConfig means), so on every box past its first
+# start the LLM retrieval-query rewrite stayed ON while post-install reported
+# success — and that rewrite is the one that mistranslates domain terms
+# ("Tagsätze" -> bank "Tagesgeldsatz"), which is the retrieval failure #908 was
+# filed against.
+#
+# Columns: <env-var name>|<retrieval-config field>|<value>|<json type>
+#
+# Only the STATIC defaults live here. The endpoint/key rows next to them
+# (RAG_OPENAI_API_BASE_URL, RAG_EXTERNAL_RERANKER_URL, …) are resolved per box
+# at run time (#976) and stay where they are — folding them in would mean
+# either recomputing them here or making this table impure, and neither buys
+# anything: they are not what silently reverts to an OWUI factory value.
+# #1380 — column 5 is the OWUI endpoint that CARRIES the key. On OWUI 0.11
+# `ENABLE_RETRIEVAL_QUERY_GENERATION` lives in the TASK config
+# (`task.query.retrieval.enable`, GET/POST /api/v1/tasks/config[/update]); the
+# retrieval endpoint ignores it on POST and never reports it, so pushing and
+# reading it there warned "did NOT take" on EVERY run while the LLM query
+# rewrite stayed ON (0.79, round 5). ENVKEY|APIKEY|VALUE|TYPE|ENDPOINT — the
+# env seed reads columns 1+3, the push and the read-back route by column 5.
+_owui_retrieval_defaults() {
+    # #2479: TOP_K_RERANKER = chunks kept AFTER reranking (OWUI default 3); equal to RAG_TOP_K so reranking reorders, not truncates.
+    cat <<'RAGDEFAULTS'
+ENABLE_RAG_HYBRID_SEARCH|ENABLE_RAG_HYBRID_SEARCH|true|bool|retrieval
+HYBRID_BM25_WEIGHT|HYBRID_BM25_WEIGHT|0.5|float|retrieval
+RAG_RERANKING_MODEL|RAG_RERANKING_MODEL|qwen3-reranker|str|retrieval
+RAG_RERANKING_ENGINE|RAG_RERANKING_ENGINE|external|str|retrieval
+ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER|ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER|false|bool|retrieval
+CHUNK_SIZE|CHUNK_SIZE|5000|int|retrieval
+CHUNK_OVERLAP|CHUNK_OVERLAP|500|int|retrieval
+ENABLE_RETRIEVAL_QUERY_GENERATION|ENABLE_RETRIEVAL_QUERY_GENERATION|false|bool|tasks
+RAG_TOP_K|TOP_K|10|int|retrieval
+RAG_TOP_K_RERANKER|TOP_K_RERANKER|10|int|retrieval
+RAGDEFAULTS
+}
+
+# #908: read the retrieval config back and name every default that did NOT take.
+#
+# #258 added a read-back, but it judged ONE field (`RAG_RERANKING_MODEL`). The
+# box in #908 was measured at OWUI's FACTORY values — top_k=3, chunk_size=1000,
+# markdown splitter ON, no hybrid — which that verdict cannot see. "Never
+# written" and "written and later replaced by an admin Save" are the same defect
+# to a customer, so an absent field counts as a mismatch too.
+#
+# Never raises, never aborts: an unreachable OWUI must produce a diagnosis, not
+# a dead `post-install --preset` (the #755/#793 shape, and the review find on
+# #258 — under `set -eo pipefail` a bare `x=$(...)` inherits the substitution's
+# exit status).
+_owui_retrieval_mismatches() {
+    local cfg tcfg
+    cfg=$(owui_api GET "/api/v1/retrieval/config" 2>/dev/null) || cfg=""
+    # #1380: the `tasks` rows are judged against the task config — the endpoint
+    # that actually carries them (OWUI 0.11).
+    tcfg=$(owui_api GET "/api/v1/tasks/config" 2>/dev/null) || tcfg=""
+    # No shell-level "is it empty" branch: empty stdin and a 502 HTML page both
+    # fail json.load, and the python below answers both with the same
+    # "unreadable" string. A second guard for the same condition is a branch
+    # nothing can drive, which is how untested code gets in.
+    printf '%s' "$cfg" | RZFZ_TASKS_CFG="$tcfg" RZFZ_RAG_DEFAULTS="$(_owui_retrieval_defaults)" python3 -c '
+import json, os, sys
+
+def want(value, typ):
+    if typ == "bool":
+        return value == "true"
+    if typ == "int":
+        return int(value)
+    if typ == "float":
+        return float(value)
+    return value
+
+try:
+    cfg = json.load(sys.stdin)
+    assert isinstance(cfg, dict)
+except Exception:
+    sys.stdout.write("retrieval config unreadable")
+    sys.exit(0)
+try:
+    tcfg = json.loads(os.environ.get("RZFZ_TASKS_CFG", ""))
+    assert isinstance(tcfg, dict)
+except Exception:
+    tcfg = None
+
+bad = []
+for row in os.environ.get("RZFZ_RAG_DEFAULTS", "").splitlines():
+    if not row.strip():
+        continue
+    parts = row.split("|")
+    _env_key, api_key, value, typ = parts[:4]
+    endpoint = parts[4] if len(parts) > 4 else "retrieval"
+    expected = want(value, typ)
+    if endpoint == "tasks":
+        if tcfg is None:
+            bad.append("%s=<task config unreadable> (expected %r)" % (api_key, expected))
+            continue
+        src = tcfg
+    else:
+        src = cfg
+    if api_key not in src:
+        bad.append("%s=<absent> (expected %r)" % (api_key, expected))
+        continue
+    got = src[api_key]
+    # OWUI returns ints for float fields and vice versa; compare numerically
+    # so 0.5 vs 0.50 is not reported as drift, but keep bool strict (True == 1
+    # in python, and an ENABLE_* of 1 is not the same statement as true).
+    if typ in ("int", "float") and not isinstance(got, bool):
+        try:
+            if float(got) == float(expected):
+                continue
+        except (TypeError, ValueError):
+            pass
+        bad.append("%s=%r (expected %r)" % (api_key, got, expected))
+    elif got != expected:
+        bad.append("%s=%r (expected %r)" % (api_key, got, expected))
+sys.stdout.write("; ".join(bad))
+' 2>/dev/null || printf 'retrieval config unreadable'
+}
+
+# ── #908: the authoritative retrieval push, ONE implementation ─────────────
+# $1 = RAG completion/embedding base URL, $2 = its key, $3 = the FULL reranker
+# endpoint (resolved per box by _owui_llm_base_url/_owui_llm_key/
+# _owui_rerank_url). Pure API push (GET -> merge -> POST) of the declared
+# defaults table + the resolved reranker, then a read-back that JUDGES the
+# whole set (#258/#908). Needs an admin session (owui_ensure_admin). Never
+# returns non-zero: an unreachable OWUI is a diagnosis, not a dead run.
+# Which fields a push changed: "NAME: old -> new" per changed field (the web
+# block flattened as web.NAME). A name that looks like a credential is listed as
+# changed without its values. $1 = JSON before, $2 = JSON after, $3 = label.
+_owui_log_changed_fields() {
+    local lines line
+    lines=$(RZFZ_OLD="$1" RZFZ_NEW="$2" python3 -c '
+import json, os, re
+def flat(d, p=""):
+    out = {}
+    for k, v in (d or {}).items():
+        if isinstance(v, dict):
+            out.update(flat(v, p + k + "."))
+        else:
+            out[p + k] = v
+    return out
+try:
+    old = flat(json.loads(os.environ["RZFZ_OLD"] or "{}")); new = flat(json.loads(os.environ["RZFZ_NEW"]))
+except Exception:
+    raise SystemExit(0)
+secret = re.compile(r"KEY|SECRET|TOKEN|PASSWORD", re.I)
+for k in sorted(new):
+    if k == "status" or old.get(k, "<absent>") == new[k]:
+        continue
+    if secret.search(k):
+        print(k + ": changed")
+    else:
+        print("%s: %s -> %s" % (k, json.dumps(old.get(k, "<absent>")), json.dumps(new[k])))
+' 2>/dev/null) || lines=""
+    if [ -z "$lines" ]; then
+        print_substep "  ${3}: no field changed."
+        return 0
+    fi
+    print_info "  ${3}: this push changed (an admin edit of these is reset on every refresh; set RAZZFAZZ_OWUI_RETRIEVAL_MANAGED=false to keep your own):"
+    while IFS= read -r line; do
+        print_info "    ${line}"
+    done <<< "$lines"
+}
+
+owui_push_retrieval_defaults() {
+    local _rag_url="$1" _rag_key="$2" _rerank_url="$3"
+    # RAZZFAZZ_OWUI_RETRIEVAL_MANAGED=false: the operator owns the retrieval
+    # settings in the Admin Panel; the stack does not push them.
+    local _managed="${RAZZFAZZ_OWUI_RETRIEVAL_MANAGED:-}"
+    if [ -z "$_managed" ] && type read_env_value >/dev/null 2>&1; then
+        _managed=$(read_env_value "${ENV_FILE:-.env}" RAZZFAZZ_OWUI_RETRIEVAL_MANAGED 2>/dev/null) || _managed=""
+    fi
+    case "$(printf '%s' "$_managed" | tr '[:upper:]' '[:lower:]')" in
+        false|0|no|off)
+            print_info "Open WebUI retrieval defaults NOT pushed: RAZZFAZZ_OWUI_RETRIEVAL_MANAGED=false (the retrieval settings stay as set in the Admin Panel)."
+            return 0 ;;
+    esac
+    # #1442 rev-D: wired ≠ served. On 0.79 the upgrade pointed OWUI at
+    # http://llm:8080/v1/rerank while the manager served no reranker (GPUStack's
+    # was in error and never federated) — every rerank call 404'd. Ask the
+    # manager, with this consumer's key, which reranker it serves: none → no
+    # reranker URL and no reranking model, said out loud; cannot ask (rc 2) →
+    # the wiring stays as resolved.
+    local _served_rerank _srr=0
+    _served_rerank=$(_owui_served_reranker "$_rag_key") || _srr=$?
+    if [ "$_srr" -eq 0 ] && [ -z "$_served_rerank" ] && [ -n "$_rerank_url" ]; then
+        print_warning "  The LLM Manager serves NO reranker — retrieval is configured WITHOUT reranking (no dead ${_rerank_url}). Deploy one (e.g. qwen3-reranker) and re-run 'rzfz post-install --refresh' (#1442)."
+        _rerank_url=""
+    fi
+    # AUTHORITATIVE: env vars are only read by OWUI's PersistentConfig on the FIRST
+    # start, so on a re-run / already-booted stack they are silently ignored and the
+    # document/web-search settings end up missing. Push the same settings via the
+    # retrieval config API (GET -> merge -> POST) so they land in the DB regardless.
+    print_substep "Applying retrieval (RAG) + web search via OWUI API (persists in DB; completion ${_rag_url}, reranker ${_rerank_url})..."
+    local cfg merged
+    cfg=$(owui_api GET "/api/v1/retrieval/config")
+    # #976: this API push is AUTHORITATIVE (it overrides the env seed above), so
+    # it must carry the resolved reranker endpoint + key too — else a re-run
+    # would stamp the dead gpustack reranker straight back into OWUI's DB on a
+    # manager-only box.
+    merged=$(printf '%s' "$cfg" | RZFZ_RERANK_URL="$_rerank_url" RZFZ_RERANK_KEY="$_rag_key" \
+        RZFZ_RAG_DEFAULTS="$(_owui_retrieval_defaults)" python3 -c "
+import sys, json, os
+rerank_url = os.environ.get('RZFZ_RERANK_URL', '')
+key = os.environ.get('RZFZ_RERANK_KEY', '')
+try:
+    d = json.load(sys.stdin)
+    assert isinstance(d, dict)
+except Exception:
+    sys.exit(1)
+d.pop('status', None)
+# #908: the static defaults come from the SAME table the .env seed used and the
+# read-back verifies. They were a second hand-maintained copy here, in OWUI's
+# other vocabulary (TOP_K vs RAG_TOP_K), and it had already drifted:
+# ENABLE_RETRIEVAL_QUERY_GENERATION was seeded into .env and never pushed, so on
+# every already-booted box the query rewrite stayed on.
+_cast = {'bool': lambda v: v == 'true', 'int': int, 'float': float, 'str': str}
+for _row in os.environ.get('RZFZ_RAG_DEFAULTS', '').splitlines():
+    if not _row.strip():
+        continue
+    _p = _row.split('|')
+    if len(_p) > 4 and _p[4] != 'retrieval':
+        continue    # #1380: task-config rows go to their own endpoint
+    _env_key, _api_key, _value, _typ = _p[:4]
+    d[_api_key] = _cast[_typ](_value)
+d.update({
+    'RAG_EXTERNAL_RERANKER_URL': rerank_url,
+    'RAG_EXTERNAL_RERANKER_API_KEY': key,
+})
+if not rerank_url:
+    # #1442 rev-D: no reranker served — the static default (qwen3-reranker,
+    # engine external) would make OWUI call a dead endpoint on every query.
+    d['RAG_RERANKING_MODEL'] = ''
+    d['RAG_RERANKING_ENGINE'] = ''
+w = d.setdefault('web', {})
+w.update({
+    'ENABLE_WEB_SEARCH': True,
+    'WEB_SEARCH_ENGINE': 'searxng',
+    'SEARXNG_QUERY_URL': 'http://searxng:8080/search?q=<query>',
+    'WEB_SEARCH_RESULT_COUNT': 5,
+})
+print(json.dumps(d))
+" 2>/dev/null)
+    if [ -z "$merged" ]; then
+        print_warning "  Could not read OWUI retrieval config — left env-var seed only."
+    else
+        # #1380: ENABLE_RETRIEVAL_QUERY_GENERATION lives in OWUI 0.11's TASK
+        # config (task.query.retrieval.enable). Same GET -> merge -> POST, against
+        # the endpoint that carries the key; the retrieval POST below no longer
+        # carries it (it was ignored there and read back as <absent> every run).
+        local tcfg tmerged
+        tcfg=$(owui_api GET "/api/v1/tasks/config" 2>/dev/null) || tcfg=""
+        tmerged=$(printf '%s' "$tcfg" | RZFZ_RAG_DEFAULTS="$(_owui_retrieval_defaults)" python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+    assert isinstance(d, dict)
+except Exception:
+    sys.exit(1)
+_cast = {"bool": lambda v: v == "true", "int": int, "float": float, "str": str}
+n = 0
+for _row in os.environ.get("RZFZ_RAG_DEFAULTS", "").splitlines():
+    _p = _row.split("|")
+    if len(_p) < 5 or _p[4] != "tasks":
+        continue
+    d[_p[1]] = _cast[_p[3]](_p[2])
+    n += 1
+if n:
+    print(json.dumps(d))
+' 2>/dev/null) || tmerged=""
+        if [ -n "$tmerged" ]; then
+            owui_api POST "/api/v1/tasks/config/update" "$tmerged" >/dev/null 2>&1
+        else
+            print_warning "  Could not read OWUI task config — the query-generation default was not applied (#1380)."
+        fi
+        _owui_log_changed_fields "$cfg" "$merged" "Retrieval config"
+        [ -z "$tmerged" ] || _owui_log_changed_fields "$tcfg" "$tmerged" "Task config"
+        owui_api POST "/api/v1/retrieval/config/update" "$merged" >/dev/null 2>&1
+        # #258: READ BACK and JUDGE, do not just print. The old form emitted the
+        # values into a success line, so a POST that did not take looked exactly
+        # like one that did — and the whole defect this reconcile answers is a
+        # config that is silently absent. `RAG_RERANKING_MODEL` is the one field
+        # that matters here: with hybrid search on and no reranker, web-search
+        # retrieval cannot complete and OWUI falls back to answering directly,
+        # with no sources and no error anywhere.
+        #
+        # #908: judge the whole DECLARED SET, not just that one field. The box
+        # this issue was filed from sat at OWUI's FACTORY values — top_k=3,
+        # chunk_size=1000, markdown splitter ON, no hybrid — with nothing
+        # reporting it, because a healthy reranker was enough for the verdict
+        # above to print success. Chunking is THE lever measured there (price
+        # list rank #18/55 → #3 into top-k), so a silently-reverted CHUNK_SIZE
+        # is not a cosmetic drift.
+        local rerank web drifted
+        rerank=$(owui_api GET "/api/v1/retrieval/config" | python3 -c \
+            "import sys,json;d=json.load(sys.stdin);v=d.get('RAG_RERANKING_MODEL');print(v if v else '')" 2>/dev/null) || true
+        web=$(owui_api GET "/api/v1/retrieval/config" | python3 -c \
+            "import sys,json;d=json.load(sys.stdin);print(d.get('web',{}).get('ENABLE_WEB_SEARCH'))" 2>/dev/null) || true
+        drifted=$(_owui_retrieval_mismatches) || drifted=""
+        if [ -z "$rerank" ]; then
+            print_warning "  RAG_RERANKING_MODEL is EMPTY after the update — web search will answer without sources."
+            print_info    "  OWUI's /admin/settings/web Save does not round-trip this field and REPLACES the"
+            print_info    "  retrieval config, so an admin save nulls it (#258). Re-run:"
+            print_info    "    rzfz post-install --refresh"
+        elif [ -n "$drifted" ]; then
+            print_warning "  Retrieval defaults did NOT take: ${drifted}"
+            print_info    "  RAG will still answer, with worse retrieval and no error anywhere: at OWUI's"
+            print_info    "  factory chunking the facts are split away from the entity and never reach"
+            print_info    "  top-k (#908). Same cause as above — an admin Save REPLACES the retrieval"
+            print_info    "  config instead of merging it (#258). Re-run:"
+            print_info    "    rzfz post-install --refresh"
+        else
+            print_success "Retrieval + web search applied via API (rerank=${rerank}, web=${web})."
+        fi
+    fi
+    print_info "  Web search: SearXNG, Hybrid search: enabled, Reranker: qwen3-reranker"
+    return 0
+}
+
+# Poll OWUI's /health for up to $1 seconds (5 s interval). Quiet: the callers
+# print the verdict.
+# #1401: register the Pipelines server as an Open WebUI connection.
+#
+# OWUI runs pipeline FILTERS (openlit_filter — the #245 chat attribution) only
+# through a registered Pipelines server: `http://pipelines:9099` + its API key
+# as an additional OpenAI-compatible connection. Nothing in the stack ever
+# registered it — the compose seed and owui_configure_connection carry the
+# inference backend only — so `GET /api/v1/pipelines/list` was `[]` on every
+# box and the filter never ran (0.91, 2026-09-05: 0 spans; with the
+# connection registered by hand: span with user.id/user.name in 10 s).
+#
+# Idempotent: reads /openai/config, appends the pair only when absent, POSTs
+# the merged config back (the same authoritative POST owui_configure_connection
+# uses), and reads /api/v1/pipelines/list back to judge. Never fatal.
+owui_register_pipelines_connection() {
+    local pkey cur merged listed
+    pkey=$(read_env_value "${ENV_FILE:-.env}" PIPELINES_API_KEY 2>/dev/null) || pkey=""
+    if [ -z "$pkey" ]; then
+        print_warning "  PIPELINES_API_KEY is empty — Pipelines server NOT registered in Open WebUI (pipeline filters such as openlit_filter stay inert, #1401)."
+        return 0
+    fi
+    cur=$(owui_api GET "/openai/config" 2>/dev/null) || cur=""
+    merged=$(printf '%s' "$cur" | PIPELINES_KEY="$pkey" python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin); assert isinstance(d, dict)
+except Exception:
+    sys.exit(1)
+urls = list(d.get("OPENAI_API_BASE_URLS") or []); keys = list(d.get("OPENAI_API_KEYS") or [])
+url = "http://pipelines:9099"
+if url in urls:
+    i = urls.index(url)
+    while len(keys) < len(urls): keys.append("")
+    if keys[i] == os.environ["PIPELINES_KEY"]:
+        print("__present__"); sys.exit(0)
+    keys[i] = os.environ["PIPELINES_KEY"]
+else:
+    while len(keys) < len(urls): keys.append("")
+    urls.append(url); keys.append(os.environ["PIPELINES_KEY"])
+print(json.dumps({"ENABLE_OPENAI_API": True, "OPENAI_API_BASE_URLS": urls, "OPENAI_API_KEYS": keys, "OPENAI_API_CONFIGS": d.get("OPENAI_API_CONFIGS") or {}}))
+' 2>/dev/null) || merged=""
+    if [ -z "$merged" ]; then
+        print_warning "  Could not read Open WebUI connections (/openai/config) — Pipelines server not registered (#1401)."
+        return 0
+    fi
+    if [ "$merged" = "__present__" ]; then
+        print_substep "Pipelines server already registered in Open WebUI (http://pipelines:9099) — pipeline filters active."
+        return 0
+    fi
+    owui_api POST "/openai/config/update" "$merged" >/dev/null 2>&1 || true
+    listed=$(owui_api GET "/api/v1/pipelines/list" 2>/dev/null) || listed=""
+    if printf '%s' "$listed" | grep -q 'pipelines:9099'; then
+        print_success "Pipelines server registered in Open WebUI (http://pipelines:9099) — pipeline filters (openlit_filter) active."
+    else
+        print_warning "  Pipelines registration did NOT take: /api/v1/pipelines/list has no http://pipelines:9099 (#1401)."
+    fi
+}
+
+_owui_wait_ready() {
+    local max_wait="${1:-60}" waited=0
+    while [ "$waited" -lt "$max_wait" ]; do
+        if curl -sf --max-time 5 "http://127.0.0.1:${OPENWEBUI_PORT:-8080}/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    return 1
+}
+
+# #908 follow-up — re-assert the OWUI retrieval defaults on a box that is
+# ALREADY provisioned (the post-upgrade step in cli/upgrade.sh). Every box
+# whose last full post-install predates the defaults push kept the LLM
+# query rewrite ON: `rzfz upgrade` only reached the push through `post-install
+# --refresh`, a whole provisioning run that can die or skip before it gets to
+# OWUI. This is the push alone: chat-profile gated, the same manager-down
+# guard the authoritative writers use (#976), admin login, then
+# owui_push_retrieval_defaults with the per-box resolved endpoints. No model
+# deploy, no env seed. Returns 1 only when it could NOT run (so the caller
+# can say so loudly); a drifted-but-unrepairable config is reported by the
+# push's own verdict.
+owui_reconcile_retrieval_defaults() {
+    owui_lib_env_from_file
+    case ",${COMPOSE_PROFILES:-}," in
+        *,chat,*) ;;
+        *) print_substep "chat profile not active — OWUI retrieval-defaults reconcile skipped."; return 0 ;;
+    esac
+    # #1445 (C5c / E1): the address this writes is http://llm:8080/v1 on
+    # EVERY box, so the precondition follows the address, not ownership.
+    # Measured on a dual, not-yet-federated box: owns_standard_set was
+    # false, the guard did not fire, and a stopped manager got
+    # {"url": "http://llm:8080/v1", "key": ""} stamped into OWUI's
+    # persisted RAG config. Ownership decides which backend holds the
+    # MODELS; it stopped deciding which address a consumer is given.
+    if _llm_manager_profile_active && ! _llm_manager_running; then
+        print_warning "llm-manager profile is enabled but the container is not running — SKIPPING the OWUI retrieval-defaults reconcile so RAG is not repointed at a backend this box does not run (#976). Re-run 'rzfz post-install --refresh' once llm-manager is up."
+        return 1
+    fi
+    if ! _owui_wait_ready 60; then
+        print_warning "Open WebUI is not reachable on 127.0.0.1:${OPENWEBUI_PORT:-8080} — retrieval-defaults reconcile skipped (#908). Re-run 'rzfz post-install --refresh' once chat is up."
+        return 1
+    fi
+    if ! owui_ensure_admin >/dev/null 2>&1; then
+        print_warning "Open WebUI admin login failed — retrieval-defaults reconcile skipped (#908). Re-run 'rzfz post-install --refresh'."
+        return 1
+    fi
+    local _rag_url _rag_key _rerank_url
+    _rag_url=$(_owui_llm_base_url)
+    _rag_key=$(_owui_llm_key)
+    _rerank_url=$(_owui_rerank_url)
+    owui_push_retrieval_defaults "$_rag_url" "$_rag_key" "$_rerank_url"
+    return 0
+}
+
+# #2507 — can Open WebUI actually LOG IN through its Authentik OIDC provider?
+# Asked FROM THE openwebui CONTAINER, with its own OPENID_PROVIDER_URL,
+# OAUTH_CLIENT_ID/SECRET, CA bundle and network alias — the fetches OWUI makes
+# when a user clicks the login button. Two steps:
+#   1. the discovery document answers (404 = blueprint not applied yet — it
+#      applies asynchronously, #2507 point 7; TLS failure = CA problem);
+#   2. the CLIENT is accepted: a token request with grant_type=
+#      authorization_code, HTTP Basic client_id:secret, and NO code and NO
+#      redirect_uri. Authentik 2026.5.7 (the pinned AUTHENTIK_VERSION;
+#      authentik/providers/oauth2/views/token.py at tag version/2026.5.7)
+#      checks, in this order: the client id (TokenView.post, L616-620) and
+#      the secret (TokenParams.__post_init__, L181-188) -> invalid_client;
+#      then an EMPTY code -> invalid_grant "Missing authorization code"
+#      (__post_init_code, L215-217) — BEFORE __check_redirect_uri (L219),
+#      which on a mismatch writes an EventAction.CONFIGURATION_ERROR event
+#      and ALSO answers invalid_client (L255-291). So `invalid_grant` proves
+#      the credentials match and writes no event; sending a code with any
+#      redirect_uri other than the provider's one strict URI would answer
+#      invalid_client even with the right secret (fix round 2).
+#      `invalid_client` / 401 = the provider holds a different secret (a
+#      re-apply pending or failed): every SSO login would fail at the callback.
+# Exit 0 = effective, 2 = client rejected (secret mismatch), 1 = anything else.
+# The python is a variable so the test can run it against a local fake provider.
+_OWUI_OIDC_PROBE_PY='
+import base64, json, os, sys, urllib.error, urllib.parse, urllib.request
+url = os.environ.get("OPENID_PROVIDER_URL", "")
+cid = os.environ.get("OAUTH_CLIENT_ID", "")
+secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
+if not (url and cid and secret):
+    sys.exit(1)
+try:
+    doc = json.load(urllib.request.urlopen(url, timeout=10))
+except Exception:
+    sys.exit(1)
+token_url = doc.get("token_endpoint")
+if not (doc.get("issuer") and doc.get("authorization_endpoint") and token_url):
+    sys.exit(1)
+body = urllib.parse.urlencode({"grant_type": "authorization_code"}).encode()
+basic = urllib.parse.quote(cid, safe="") + ":" + urllib.parse.quote(secret, safe="")
+req = urllib.request.Request(token_url, data=body, method="POST", headers={
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Authorization": "Basic " + base64.b64encode(basic.encode()).decode()})
+try:
+    resp = urllib.request.urlopen(req, timeout=10)
+    status, raw = resp.status, resp.read()
+except urllib.error.HTTPError as e:
+    status, raw = e.code, e.read()
+except Exception:
+    sys.exit(1)
+try:
+    err = json.loads(raw or b"{}").get("error", "")
+except Exception:
+    err = ""
+if err == "invalid_client" or status == 401:
+    sys.exit(2)
+sys.exit(0 if err == "invalid_grant" else 1)
+'
+_owui_oidc_provider_answers() {
+    if [ -n "${RZFZ_OWUI_OIDC_PROBE_CMD:-}" ]; then
+        sh -c "$RZFZ_OWUI_OIDC_PROBE_CMD" >/dev/null 2>&1
+        return
+    fi
+    docker exec openwebui python3 -c "$_OWUI_OIDC_PROBE_PY" >/dev/null 2>&1
+}
+
+# #2536 item 11: one psql `\set name 'value'` line for stdin (bash twin of
+# _psql_set_lines in scripts/owui_config_reconcile.py — same escaping).
+_owui_psql_set_line() {
+    local v="$2" bs='\' q="'"
+    v=${v//"$bs"/"$bs$bs"}
+    v=${v//"$q"/"$q$q"}
+    v=${v//$'\n'/${bs}n}
+    v=${v//$'\r'/${bs}r}
+    v=${v//$'\t'/${bs}t}
+    printf '\\set %s '"'"'%s'"'"'\n' "$1" "$v"
+}
+
+# #2507 — the PERSISTED half of Open WebUI's native-OIDC login (the env half —
+# OWUI_GOOGLE_CLIENT_ID/SECRET, OWUI_OAUTH_AUTO_REDIRECT — is derived by
+# scripts/lib.sh derive_owui_sso_env). OWUI 0.11.3 keeps `ui.enable_login_form`
+# as a DB row seeded once from env, so on an existing box only a row write
+# changes it; prod was fixed by hand on 2026-09-26 (rows: login form off,
+# oauth.client_id/secret — they held ""). The login page auto-redirects to
+# Authentik only with ONE provider and this row false.
+#
+# The form is hidden ONLY when native OIDC is effective: switch on, client id +
+# secret set, AND the provider answers AND accepts OWUI's client from inside OWUI —
+# polled (RZFZ_OWUI_OIDC_PROBE_TRIES x RZFZ_OWUI_OIDC_PROBE_GAP s, default 18 x
+# 5 s) because Authentik applies the provider blueprint asynchronously. In
+# every other case the form is (re)enabled: no box is left without a way in.
+# The client secret reaches the python helper by env (not its command line)
+# and psql as a -v variable, the #1185 transport. Never printed.
+# OWUI reads the row per request — no restart. Best-effort: returns 1 only when
+# the rows could not be written, and says so.
+owui_reconcile_sso_login() {
+    local env_file="${ENV_FILE:-.env}" oidc cid csec effective=false out rc=0 i tries gap probe_rc=1 mismatch_left
+    oidc=$(read_env_value "$env_file" ENABLE_OPENWEBUI_OIDC 2>/dev/null) || oidc=""
+    cid=$(read_env_value "$env_file" OPENWEBUI_OIDC_CLIENT_ID 2>/dev/null) || cid=""
+    csec=$(read_env_value "$env_file" OPENWEBUI_OIDC_CLIENT_SECRET 2>/dev/null) || csec=""
+    if [ "$oidc" = "true" ] && [ -n "$cid" ] && [ -n "$csec" ]; then
+        tries="${RZFZ_OWUI_OIDC_PROBE_TRIES:-18}"
+        gap="${RZFZ_OWUI_OIDC_PROBE_GAP:-5}"
+        mismatch_left="${RZFZ_OWUI_OIDC_MISMATCH_TRIES:-3}"
+        for i in $(seq 1 "$tries"); do
+            probe_rc=0
+            _owui_oidc_provider_answers || probe_rc=$?
+            if [ "$probe_rc" -eq 0 ]; then
+                effective=true
+                break
+            fi
+            # Round 2: the long budget is for a provider that is not there YET
+            # (async apply). One that answers but rejects the client gets a few
+            # more tries (a re-apply in flight), not the whole 90 s.
+            if [ "$probe_rc" -eq 2 ]; then
+                mismatch_left=$((mismatch_left - 1))
+                [ "$mismatch_left" -le 0 ] && break
+            fi
+            [ "$i" -lt "$tries" ] && sleep "$gap"
+        done
+        if [ "$effective" != true ] && [ "$probe_rc" -eq 2 ]; then
+            print_warning "Open WebUI: the Authentik provider REJECTS Open WebUI's client (invalid_client — OPENWEBUI_OIDC_CLIENT_SECRET in .env differs from the openwebui-oidc provider's secret; its blueprint re-apply is pending or failed) — KEEPING the local login form so SSO users are not locked out (#2507). Check 'docker logs authentik-init' for ERROR(#2507), then re-run 'rzfz post-install --refresh'."
+        elif [ "$effective" != true ]; then
+            print_warning "Open WebUI: ENABLE_OPENWEBUI_OIDC=true but its Authentik provider does not answer (openwebui-oidc discovery, ${tries} tries) — KEEPING the local login form so the box stays reachable (#2507). Check 'docker logs authentik-init' for ERROR(#2507), then re-run 'rzfz post-install --refresh'."
+        fi
+    elif [ "$oidc" = "true" ]; then
+        print_warning "Open WebUI: ENABLE_OPENWEBUI_OIDC=true but OPENWEBUI_OIDC_CLIENT_ID/SECRET is empty — native SSO is off; keeping the local login form (#2507). 'rzfz upgrade' generates the secret."
+    fi
+    out=$(RZFZ_OWUI_OIDC_CLIENT_ID="$cid" RZFZ_OWUI_OIDC_CLIENT_SECRET="$csec" \
+        python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" sso \
+        --oidc-effective "$effective" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI SSO login rows NOT written (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#2507)"
+        return 1
+    fi
+    if [ "$effective" = true ]; then
+        print_success "Open WebUI: SSO-only login (Authentik provider answers; login form off, $(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p') row(s) changed). Local form: /auth?form=1"
+    else
+        print_substep "Open WebUI: local login form enabled ($(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p') row(s) changed)."
+    fi
+    return 0
+}
+
+# #2515 — the fleet-default embedding batch size (16) + concurrent requests
+# as PersistentConfig DB rows (`rag.embedding_batch_size`,
+# `rag.embedding_concurrent_requests`). Same #2507 trap as the SSO rows above:
+# Open WebUI 0.11.3 seeds these from env ONLY at first boot, so an env change
+# never reaches an existing box — prod measured 1/1 on 2026-09-26.
+#
+# owui_configure_embedding (cli/post-install.sh) already writes both rows
+# through OWUI's own admin API (POST /api/v1/retrieval/embedding/update, which
+# ends in `await config.save()`) on the --preset AND --refresh paths, and also
+# rebuilds the live embedding function so the new batch/concurrency take
+# effect without a restart. This psql write (scripts/owui_config_reconcile.py
+# `embedding`) is the one that still lands the rows when that call could not
+# run — OWUI not reachable yet, admin auth failing — during a --refresh,
+# exactly the reason owui_reconcile_sso_login does not rely on the API alone.
+# OWUI reads both rows per request — no restart needed once they land.
+# Best-effort: returns 1 only when the rows could not be written, and says so.
+#
+# #2515 fix round 1: concurrent-requests is no longer a flat 4 — a
+# single-replica box only offers qwen3-embedding's --parallel=2 slots, and
+# OWUI 0.11.3 hands each concurrent RAG call its OWN
+# Semaphore(concurrent_requests) (retrieval/utils.py ~1153-1163), so 4 on one
+# replica oversubscribes the embedder against chat retrieval. When
+# cli/lib-llm-manager-deploy.sh is sourced (post-install.sh always sources it;
+# this file degrades like _owui_manager_model_tasks above when it is not),
+# _llmm_embedding_concurrent_requests computes replicas x parallel from the
+# manifest + the manager's live deployment, clamped to [1,4]. An explicit
+# operator override always wins.
+owui_reconcile_embedding_defaults() {
+    # #2536 item 14: the admin-API writer's numbers — one source. Without
+    # cli/lib-llm-manager-deploy.sh this file degrades to the override or 16/4.
+    local batch="${RZFZ_OWUI_EMBEDDING_BATCH_SIZE:-16}" conc="${RZFZ_OWUI_EMBEDDING_CONCURRENT_REQUESTS:-4}" _set
+    if declare -F _llmm_owui_embedding_settings >/dev/null 2>&1; then
+        _set=$(_llmm_owui_embedding_settings "${PRESET:-standard}")
+        batch="${_set%% *}"; conc="${_set##* }"
+    fi
+    local out rc=0
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" embedding \
+        --batch-size "$batch" --concurrent-requests "$conc" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI embedding batch/concurrency rows NOT written (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#2515)"
+        return 1
+    fi
+    print_substep "Open WebUI: embedding batch=$batch concurrent=$conc ($(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p') row(s) changed, #2515)."
+    return 0
+}
+
+# #2751: Open WebUI persists its Ollama connection list (`ollama.base_urls`)
+# at first boot. A box installed while `.env` read
+# `OLLAMA_BASE_URL= # Blank for OpenAI compatible API usage via GPUStack` (compose
+# took the comment as the value) holds that sentence as its Ollama "URL"; the
+# .env migration never reaches the row. scripts/owui_config_reconcile.py
+# `ollama-urls` removes such elements (any element starting with '#') and
+# renumbers ollama.api_configs; a real connection is left alone. Open WebUI
+# loads its config at boot, so a change is followed by a restart of openwebui
+# when it runs. Idempotent, best-effort: returns 1 only when the rows could not
+# be written, and says so.
+owui_reconcile_ollama_urls() {
+    local out rc=0 changed
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" ollama-urls \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        return 0   # legacy single-row schema: nothing to reconcile until it migrates
+    fi
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI Ollama connection rows NOT checked (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#2751)"
+        return 1
+    fi
+    changed=$(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p')
+    if [ "${changed:-0}" -gt 0 ]; then
+        print_substep "Open WebUI: a stray .env comment removed from its persisted Ollama URL list (${changed} row(s), #2751)."
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx openwebui; then
+            docker restart openwebui >/dev/null 2>&1 \
+                || print_warning "openwebui restart failed - Admin > Settings keeps showing the old list until it restarts (#2751)"
+        fi
+    fi
+    return 0
+}
+
+# #2473 D6: a knowledge base nobody restricted is PUBLIC in Open WebUI (0.11.3:
+# a wildcard grant in access_grant). Once per box, every existing public
+# knowledge base becomes owner-private; afterwards its owner may share it with a
+# knowledge-scope group, and one a user makes public later stays public.
+# Marker: OWUI_KNOWLEDGE_SCOPES_MIGRATED (the UTC date it ran). A failed run
+# writes no marker and is retried on the next refresh. Returns 1 on failure.
+owui_privatize_public_knowledge() {
+    local env_file="${ENV_FILE:-.env}" marker out rc=0
+    marker=$(read_env_value "$env_file" OWUI_KNOWLEDGE_SCOPES_MIGRATED 2>/dev/null || true)
+    [ -z "$marker" ] || return 0
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" privatize-knowledge \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI: public knowledge bases NOT made owner-private (rc=${rc}): $(printf '%s\n' "$out" | head -n1) — retried on the next refresh (#2473)"
+        return 1
+    fi
+    if ! update_env_value "$env_file" OWUI_KNOWLEDGE_SCOPES_MIGRATED "$(date -u +%Y-%m-%d)"; then
+        print_warning "Open WebUI: knowledge privatised, but OWUI_KNOWLEDGE_SCOPES_MIGRATED could not be written to ${env_file} (#2473)"
+        return 1
+    fi
+    print_substep "Open WebUI: public knowledge bases made owner-private ($(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p')) (#2473)."
+    return 0
+}
+
+# #2473 D6: the knowledge-scope placeholder group (rzfz-no-knowledge-scope)
+# keeps every user's scope claim non-empty and is blocked in Open WebUI, so
+# nobody joins it at sign-in. It must stay empty and shared with nothing: a
+# member or a share added by hand is removed here, with a warning naming the
+# counts. Returns 1 when the check could not run.
+owui_check_scope_placeholder() {
+    local out rc=0 members grants
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" scope-placeholder \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI: the knowledge-scope placeholder group was NOT checked (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#2473)"
+        return 1
+    fi
+    members=$(printf '%s\n' "$out" | sed -n 's/^MEMBERS=\([0-9]*\) GRANTS=.*/\1/p')
+    grants=$(printf '%s\n' "$out" | sed -n 's/^MEMBERS=[0-9]* GRANTS=\([0-9]*\)$/\1/p')
+    if [ "${members:-0}" -gt 0 ] || [ "${grants:-0}" -gt 0 ]; then
+        print_warning "Open WebUI: the placeholder group rzfz-no-knowledge-scope had ${members:-0} member(s) and ${grants:-0} share(s); removed — share knowledge with a KB: group instead (#2473)"
+    else
+        print_substep "Open WebUI: the knowledge-scope placeholder group is empty and unshared (#2473)."
+    fi
+    return 0
+}
+
+# #3494: Open WebUI 0.12 puts a server-wide gate (direct.integrations.enable)
+# in front of users' own tool servers (Settings > Integrations). Before 0.12
+# the user permission alone decided, so a box crossing to 0.12 gets the gate
+# seeded OFF and its users' servers vanish from chat without a word. Once per
+# box (marker row in Open WebUI's config): when at least one user holds a stored
+# server that the permission (default or a group's) or the admin role still
+# admits, and the gate is off, it is switched on. The permission alone switches
+# nothing on, a box without such a user stays off, and a later admin change is
+# never overridden. Open WebUI reads the row per request, so no restart.
+# A switch-on is written to the stack's audit log (owui_audit_direct_integrations).
+# Returns 1 only when the check could not run.
+owui_carry_over_direct_integrations() {
+    local out rc=0 result admitted sources
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" direct-integrations \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        return 0   # legacy single-row schema: Open WebUI has not migrated yet
+    fi
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI: users' own tool servers NOT checked (rc=${rc}): $(printf '%s\n' "$out" | head -n1) — retried on the next refresh"
+        return 1
+    fi
+    result=$(printf '%s\n' "$out" | sed -n 's/^RESULT=//p')
+    admitted=$(printf '%s\n' "$out" | sed -n 's/^ADMITTED=//p')
+    sources=$(printf '%s\n' "$out" | sed -n 's/^SOURCES=//p')
+    case "$result" in
+        CARRIED)
+            print_substep "Open WebUI: Direct Integrations switched ON server-wide, carried over from the earlier Open WebUI: ${admitted:-0} user(s) with their own tool servers, admitted by ${sources:-?}. Off again: Admin Settings > Connections > Direct Integrations (stays off)."
+            owui_audit_direct_integrations "${admitted:-0}" "${sources:-?}" || true ;;
+        NOTSEEDED)
+            print_info "Open WebUI has not written its direct tool server switch yet; checked again on the next refresh." ;;
+    esac
+    return 0
+}
+
+# #3494: the lasting record of the switch-on — one config.change entry in the
+# stack's audit log (razzfazz-config's AUDIT_LOG_PATH, the file Wazuh ships),
+# written by the container's own AuditLogger. The program reaches python on
+# stdin; the two values ride in the environment (counts and permission names,
+# no secret). Returns 1 when razzfazz-config is not running or the write fails;
+# the caller's log line stays the record then.
+owui_audit_direct_integrations() {
+    local admitted="$1" sources="$2"
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx razzfazz-config; then
+        print_warning "Open WebUI: the Direct Integrations switch-on could not be written to the audit log (razzfazz-config is not running); the line above is the record."
+        return 1
+    fi
+    if ! docker exec -i -e "RZFZ_DI_ADMITTED=${admitted}" -e "RZFZ_DI_SOURCES=${sources}" \
+            razzfazz-config python - >/dev/null 2>&1 <<'PY'
+import os
+from app.services.audit_logger import AuditLogger
+AuditLogger(os.environ.get("AUDIT_LOG_PATH", "/var/log/razzfazz/config-audit.log")).log(
+    "config.change", user="rzfz post-install", category="chat",
+    action="openwebui.direct_integrations.enable", target="direct.integrations.enable",
+    detail=("Open WebUI Direct Integrations switched on once at the upgrade: "
+            f"{os.environ.get('RZFZ_DI_ADMITTED', '?')} user(s) with their own tool servers, "
+            f"admitted by {os.environ.get('RZFZ_DI_SOURCES', '?')}. These servers bypass "
+            "the MCP gateway's audit and its availability switch."),
+    risk="caution", outcome="success")
+PY
+    then
+        print_warning "Open WebUI: the Direct Integrations switch-on could not be written to the audit log; the line above is the record."
+        return 1
+    fi
+    return 0
+}
+
+# #2536 item 13 (#2506 class): Open WebUI reads these env keys at CREATE time.
+# What this guards: an edit of OWUI_RAG_OPENAI_KEY / OWUI_RAG_OPENAI_BASE_URL in
+# .env (or of the compose literals) that was never applied by a recreate, so the
+# running container disagrees with what compose renders from .env. It compares
+# the rendered value with the running value, key by key, and recreates once on
+# any difference. The RAG settings are PersistentConfig: the API write in
+# owui_configure_embedding is authoritative on an initialised box (#2622:
+# post-install no longer writes bare RAG_OPENAI_API_* rows to .env).
+# Names the keys, never the values. Values live only in shell variables, never
+# in argv or output, and xtrace is off while they are held. Any failed probe
+# (no container, docker error, render error) warns and does NOT recreate.
+# Returns 0 always.
+OWUI_EMBEDDING_ENV_KEYS="RAG_EMBEDDING_ENGINE RAG_EMBEDDING_MODEL RAG_OPENAI_API_BASE_URL RAG_OPENAI_API_KEY"
+owui_recreate_on_embedding_env_drift() {
+    local _x=$-
+    set +x
+    _owui_embedding_env_drift_run
+    case "$_x" in *x*) set -x ;; esac
+    return 0
+}
+_owui_embedding_env_drift_run() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx openwebui || return 0
+    local rendered wants k i=0 drift=""
+    local -a want_a
+    if ! docker exec openwebui true >/dev/null 2>&1; then
+        print_warning "Open WebUI: cannot exec into the running container — embedding env drift not checked (#2536)."
+        return 0
+    fi
+    rendered=$(docker compose config --format json openwebui 2>/dev/null) || {
+        print_warning "Open WebUI: could not render its compose config — embedding env drift not checked (#2536)."
+        return 0
+    }
+    # One parse for all keys, values joined by US (0x1f). `compose config`
+    # re-escapes a literal $ as $$ while the container gets a single $.
+    wants=$(printf '%s' "$rendered" | KEYS="$OWUI_EMBEDDING_ENV_KEYS" python3 -c '
+import json, os, sys
+env = ((json.load(sys.stdin).get("services") or {}).get("openwebui") or {}).get("environment") or {}
+vals = []
+for k in os.environ["KEYS"].split():
+    v = env.get(k)
+    vals.append("" if v is None else str(v).replace("$$", "$"))
+sys.stdout.write("\x1f".join(vals))' 2>/dev/null) || {
+        print_warning "Open WebUI: could not read the embedding keys from the rendered config — embedding env drift not checked (#2536)."
+        return 0
+    }
+    IFS=$'\x1f' read -r -a want_a <<<"$wants" || true
+    for k in $OWUI_EMBEDDING_ENV_KEYS; do
+        # printenv exits 1 for an unset variable, and docker exec also exits 1
+        # when the container vanished between the probe and here: the two read
+        # the same ("empty"). The worst case is one extra `compose up`.
+        local have
+        have=$(docker exec openwebui printenv "$k" 2>/dev/null) || have=""
+        [ "${want_a[i]:-}" = "$have" ] || drift="${drift:+${drift} }${k}"
+        i=$((i + 1))
+    done
+    [ -n "$drift" ] || return 0
+    print_substep "Open WebUI runs with an embedding env .env no longer holds (${drift}) — recreating it (#2506/#2536)."
+    docker compose up -d --no-deps --force-recreate openwebui >/dev/null 2>&1 \
+        || print_warning "openwebui recreate returned non-zero — the new embedding env applies at its next recreate (#2536)."
+    return 0
+}
+
+# #2519 — Open WebUI's chat defaults as PersistentConfig + model rows (operator
+# decision 2026-09-26): default AND pinned model = the box's chat default,
+# task-model params with thinking off (title task: 20.8 s / empty title →
+# 0.7 s on prod), and the chat default's builtin tools calendar / automations /
+# notifications OFF (≈2,660 prompt tokens per chat). Operator decision
+# 2026-09-28: `tasks` (518 of the original ≈3,180 tokens) stays ON everywhere
+# and is never touched by this reconcile, in either direction. NO legacy
+# function calling — the operator withdrew that; the tool-token cost is
+# #2520/#2521's.
+# Same #2507/#2515 trap: env seeds these once at first boot, so only a row
+# write reaches an existing box — hence psql (scripts/owui_config_reconcile.py
+# `chat-defaults`), independent of OWUI answering.
+#
+# The chat default is the catalogue's answer for THIS box's hardware
+# (`_default_chat_alias`, cli/post-install.sh — qwen3.6 on a GPU fleet, the CPU
+# default on a CPU box); never a literal here. A caller that does not have the
+# resolver loaded and sets no RZFZ_OWUI_CHAT_DEFAULT_MODEL gets a warning and
+# no write, never a guessed model name. Best-effort: returns 1 when nothing
+# could be written, and says so.
+#
+# Fix round 1 (controller ruling 1): APPLIED ONCE, then REPAIR ONLY. The first
+# run (no `rzfz.defaults.2519` config row — a fresh box, or a ga.3 box
+# upgrading) writes everything and records that row; after it, the admin owns
+# these values: default/pinned are only repaired (empty, or naming models the
+# box does not serve), task params and builtin tools are never touched again.
+owui_reconcile_chat_defaults() {
+    local chat="${RZFZ_OWUI_CHAT_DEFAULT_MODEL:-}"
+    if [ -z "$chat" ] && declare -F _default_chat_alias >/dev/null 2>&1; then
+        chat=$(_default_chat_alias 2>/dev/null) || chat=""
+    fi
+    if [ -z "$chat" ]; then
+        print_warning "Open WebUI chat defaults NOT written: the box's chat default could not be resolved (#2519)."
+        return 1
+    fi
+    # Fix round 1 (ruling 1): after the first apply, a default naming a SERVED
+    # model is the admin's. "Served" = the set owui_reconcile_model_rows writes
+    # rows from: the manager's metered /v1/models (_owui_manager_served_models),
+    # asked with the .env key read-only (that writer resolved/minted it earlier
+    # in this same run; a mint from here would be a side effect of a read).
+    # Not a manager-owned box, or no answer → no --served = "unknown", and the
+    # helper then repairs only an EMPTY default.
+    local -a served_args=()
+    local key="" sm
+    if llm_manager_owns_standard_set 2>/dev/null; then
+        key=$(read_env_value "${ENV_FILE:-.env}" LLM_MANAGER_OWUI_KEY 2>/dev/null) || key=""
+        while IFS= read -r sm; do
+            [ -n "$sm" ] && served_args+=(--served "$sm")
+        done <<< "$(_owui_manager_served_models "$key" 2>/dev/null || true)"
+    fi
+    local out rc=0
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" chat-defaults \
+        --chat-model "$chat" "${served_args[@]}" \
+        --manifest "${_OWUI_REPO_ROOT}/core/llm/standard-models.yaml" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI chat defaults NOT (fully) written (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#2519)"
+        return 1
+    fi
+    printf '%s\n' "$out" | sed -n 's/^NOTE=/  note: /p'
+    print_substep "Open WebUI chat defaults (#2519, chat default ${chat}): $(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p') row(s) changed."
+    return 0
+}
+
+# #2479: seed the "Dokumentanalyse" preset once, on the box's chat default (the
+# same resolution as owui_reconcile_chat_defaults: the explicit override, else
+# the catalogue's answer, never a guessed name). Never overwrites an operator's
+# edit: the helper inserts ON CONFLICT DO NOTHING and skips an existing preset.
+# Best-effort: returns 1 when nothing could be written, and says so.
+owui_seed_preset_models() {
+    local chat="${RZFZ_OWUI_CHAT_DEFAULT_MODEL:-}" out rc=0
+    if [ -z "$chat" ] && declare -F _default_chat_alias >/dev/null 2>&1; then
+        chat=$(_default_chat_alias 2>/dev/null) || chat=""
+    fi
+    if [ -z "$chat" ]; then
+        print_warning "Open WebUI presets NOT seeded: the box's chat default could not be resolved (#2479)."
+        return 1
+    fi
+    out=$(python3 "${_OWUI_REPO_ROOT}/scripts/owui_config_reconcile.py" preset-models \
+        --chat-model "$chat" \
+        --db "${OPENWEBUI_DB:-openwebui_db}" --pg-user "${POSTGRES_USER:-docker}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Open WebUI presets NOT seeded (rc=${rc}): $(printf '%s\n' "$out" | head -n1) (#2479)"
+        return 1
+    fi
+    print_substep "Open WebUI presets (#2479, on ${chat}): $(printf '%s\n' "$out" | sed -n 's/^CHANGED=//p') row(s) written."
+    return 0
+}
+
+# ── Open WebUI admin API ─────────────────────────────────────────────────────
+OWUI_TOKEN="${OWUI_TOKEN:-}"
+
+owui_api() {
+    local method="$1" path="$2" data="$3"
+    local url="http://127.0.0.1:${OPENWEBUI_PORT:-8080}${path}"
+    if [ -n "$data" ]; then
+        printf '%s' "$data" | curl -s -X "$method" "$url" \
+            -K <(printf 'header = "Authorization: Bearer %s"\n' "$OWUI_TOKEN") \
+            -H "Content-Type: application/json" \
+            --data-binary @- 2>/dev/null
+    else
+        curl -s -X "$method" "$url" \
+            -K <(printf 'header = "Authorization: Bearer %s"\n' "$OWUI_TOKEN") 2>/dev/null
+    fi
+}
+
+# #1165 — the Open WebUI admin password candidates, in priority order (the
+# #1139 pattern, same defect class): `set-admin-password.sh openwebui` writes
+# the rotated password to OPENWEBUI_ADMIN_PASSWORD and re-hashes the account,
+# so that key is what this box CLAIMS the account holds; the fleet bootstrap
+# password is only the pre-rotation fallback. Using the bootstrap password as
+# the one and only source made a rotation self-destruct: every signin failed
+# and the DB reset below quietly rewrote the account back to the FLEET
+# password. Empty values are dropped, a duplicate is emitted once.
+_owui_admin_passwords() {
+    local primary="${OPENWEBUI_ADMIN_PASSWORD:-}"
+    local fallback="${AUTHENTIK_BOOTSTRAP_PASSWORD:-}"
+    [ -n "$primary" ] && printf '%s\n' "$primary"
+    if [ -n "$fallback" ] && [ "$fallback" != "$primary" ]; then
+        printf '%s\n' "$fallback"
+    fi
+    return 0
+}
+
+# owui_signin <url> <email> <password> — sets OWUI_TOKEN on success.
+owui_signin() {
+    # #1165 (#1164 class): body built by json.dumps, password on STDIN — a
+    # rotated password with a quote or backslash no longer breaks the JSON,
+    # and it never appears in curl's argv.
+    local login_resp
+    login_resp=$(printf '%s' "$3" | OWUI_EMAIL="$2" python3 -c '
+import json, os, sys
+print(json.dumps({"email": os.environ["OWUI_EMAIL"], "password": sys.stdin.read()}))' \
+        | curl -s -X POST "$1/api/v1/auths/signin" \
+        -H "Content-Type: application/json" -d @- 2>/dev/null)
+    OWUI_TOKEN=$(echo "$login_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+    [ -n "$OWUI_TOKEN" ]
+}
+
+owui_ensure_admin() {
+    local owui_url="http://127.0.0.1:${OPENWEBUI_PORT:-8080}"
+    local admin_email="razzfazz-ai-admin@${MAIN_DOMAIN}"
+    local admin_name="razzfazz.ai Admin"
+    # #1165: candidates in priority order; [0] is the password this box CLAIMS
+    # the account has — it creates the account on a fresh box and the reset
+    # below converges the account onto it.
+    local -a admin_pw_candidates=()
+    local _owui_pw_line
+    while IFS= read -r _owui_pw_line; do
+        [ -n "$_owui_pw_line" ] && admin_pw_candidates+=("$_owui_pw_line")
+    done < <(_owui_admin_passwords)
+    local admin_pass="${admin_pw_candidates[0]:-}"
+    if [ -z "$admin_pass" ]; then
+        print_error "Neither OPENWEBUI_ADMIN_PASSWORD nor AUTHENTIK_BOOTSTRAP_PASSWORD is set in .env — cannot provision the Open WebUI admin account."
+        return 1
+    fi
+    # Try login first (user might already exist) — every candidate, in order.
+    local _cand
+    for _cand in "${admin_pw_candidates[@]}"; do
+        if owui_signin "$owui_url" "$admin_email" "$_cand"; then
+            print_success "Logged in as existing admin ($admin_email)."
+            return 0
+        fi
+    done
+    # Try signup (first user becomes admin)
+    print_substep "Creating admin user ($admin_email)..."
+    local signup_resp
+    signup_resp=$(printf '%s' "$admin_pass" | OWUI_EMAIL="$admin_email" OWUI_NAME="$admin_name" python3 -c '
+import json, os, sys
+print(json.dumps({"email": os.environ["OWUI_EMAIL"], "password": sys.stdin.read(),
+                  "name": os.environ["OWUI_NAME"]}))' \
+        | curl -s -X POST "$owui_url/api/v1/auths/signup" \
+        -H "Content-Type: application/json" -d @- 2>/dev/null)
+
+    OWUI_TOKEN=$(echo "$signup_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+
+    if [ -n "$OWUI_TOKEN" ]; then
+        print_success "Admin user created."
+        # rc6.7 #75: backfill `username` on the admin user record. OpenWebUI's
+        # /api/v1/auths/signup payload accepts {email, password, name} — there
+        # is no username field, so the column stays NULL after local-password
+        # signup. Per-user agent pipes (M020 hermes/moltis/opencode/
+        # paperclip) build their X-Authentik-Username from
+        # `__user__["username"] or __user__["id"]` — when username is NULL,
+        # they fall through to the OpenWebUI internal UUID, agent-manager
+        # derives a different user_slug, and the find returns 404 so every
+        # pipe greets the user with "You don't have a … agent yet" even
+        # right after they provisioned one. OAUTH_USERNAME_CLAIM=preferred_username
+        # IS set in env, but it only fires on OIDC login; admins seeded via
+        # this signup flow never trigger it. Backstop here with a SQL update
+        # mirroring the Authentik username (the local part of the admin
+        # email is "razzfazz-ai-admin", but Authentik knows them by the
+        # configured superuser name — so we use that explicit operator-facing
+        # slug).
+        #
+        # #1148 review: this was the literal "akadmin", justified by a comment
+        # that assumed the name is fixed — the very assumption #1148 lifts. On
+        # a new box Authentik holds `rzfz-admin`, so seeding `akadmin` here
+        # CREATES the mismatch the comment describes ("You don't have a … agent
+        # yet"), because per-user resources are keyed on the slug.
+        docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -c \
+            "UPDATE \"user\" SET username='${RAZZFAZZ_ADMIN_USERNAME:-akadmin}' WHERE email='${admin_email}' AND username IS NULL;" \
+            > /dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Signup disabled (user exists but password wrong) — reset via DB
+    print_substep "Resetting admin password via database..."
+
+    # Find existing admin email (may differ from current domain)
+    local existing_email
+    existing_email=$(docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -t -c \
+        "SELECT a.email FROM auth a JOIN \"user\" u ON a.id = u.id WHERE u.role = 'admin' LIMIT 1;" 2>/dev/null | xargs)
+
+    if [ -z "$existing_email" ]; then
+        print_error "No admin user found in database."
+        return 1
+    fi
+
+    if [ "$existing_email" != "$admin_email" ]; then
+        print_info "Found existing admin: $existing_email (updating to $admin_email)"
+        # Update email to match current domain
+        docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -c \
+            "UPDATE auth SET email='${admin_email}' WHERE email='${existing_email}';" > /dev/null 2>&1
+        docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -c \
+            "UPDATE \"user\" SET email='${admin_email}' WHERE email='${existing_email}';" > /dev/null 2>&1
+    fi
+
+    # #1165 (#1164 class): the password goes in through the environment, never
+    # into a Python literal — a rotated password with a quote broke the
+    # program (or worse). Same transport cli/set-admin-password.sh uses.
+    # #2536 item 11: not `docker exec -e OPW="$pw"` either — that puts the
+    # password in the docker client's argv (world-readable in `ps`). It goes
+    # through a 0600 --env-file, removed right after the call.
+    local hash envf
+    case "$admin_pass" in *$'\n'*)
+        print_error "Admin password contains a newline — cannot be passed via --env-file."
+        return 1 ;;
+    esac
+    envf=$(umask 077; mktemp 2>/dev/null) || { print_error "Cannot create a temp file for the admin password."; return 1; }
+    printf 'OPW=%s\n' "$admin_pass" > "$envf"
+    hash=$(docker exec --env-file "$envf" openwebui python3 -c \
+        "import bcrypt, os; print(bcrypt.hashpw(os.environ['OPW'].encode(), bcrypt.gensalt(12)).decode())" 2>/dev/null) || true
+    rm -f "$envf"
+
+    if [ -z "$hash" ]; then
+        print_error "Failed to generate password hash."
+        return 1
+    fi
+
+    # The hash reaches psql on stdin as a \set variable (the #2536 transport),
+    # never inside a -c string on argv.
+    { _owui_psql_set_line pw_hash "$hash"; _owui_psql_set_line admin_email "$admin_email"
+      printf '%s\n' "UPDATE auth SET password=:'pw_hash' WHERE email=:'admin_email';"
+    } | docker exec -i postgres psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" > /dev/null 2>&1
+    # rc6.7 #75: same username backfill on the password-reset path —
+    # see the matching block in the signup branch above (#1148: configured
+    # name, not the literal).
+    docker exec postgres psql -U "${POSTGRES_USER:-docker}" -d "${OPENWEBUI_DB:-openwebui_db}" -c \
+        "UPDATE \"user\" SET username='${RAZZFAZZ_ADMIN_USERNAME:-akadmin}' WHERE email='${admin_email}' AND username IS NULL;" \
+        > /dev/null 2>&1 || true
+
+    # Retry login — with the password the account was just converged onto.
+    if owui_signin "$owui_url" "$admin_email" "$admin_pass"; then
+        print_success "Admin password reset and logged in."
+        return 0
+    fi
+
+    print_error "Failed to authenticate with Open WebUI."
+    return 1
+}

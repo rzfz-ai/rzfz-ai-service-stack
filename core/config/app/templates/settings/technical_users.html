@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block page_title %}Technical users{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>Technical users</h1>
+    <p class="lede">Service accounts for workflows and autonomous agents, each owned by a named person and bound explicitly to what may use it</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{% if one_time %}
+<div class="card" id="one-time-secret" style="margin-bottom:1rem;border-color:var(--warning, #b7791f)">
+    <strong>{{ one_time.name }}: AppRole credentials, shown once</strong>
+    <p class="hint">{{ one_time_text }}</p>
+    <p><code>OPENBAO_ROLE_ID</code> <input type="text" readonly value="{{ one_time.role_id }}" style="width:100%"></p>
+    <p><code>OPENBAO_SECRET_ID</code> <input type="text" readonly value="{{ one_time.secret_id }}" style="width:100%"></p>
+</div>
+{% endif %}
+
+{% if minted %}
+<div class="card" id="mcp-token-once" style="margin-bottom:1rem;border-color:var(--warning, #b7791f)">
+    <strong>{{ minted.name }}: MCP gateway token for {{ minted.consumer }}, shown once</strong>
+    <p class="hint">{{ mcp_token_text }}</p>
+    <pre class="once" style="white-space:pre-wrap;word-break:break-all">{{ minted.token }}</pre>
+</div>
+{% endif %}
+
+{% if mcp_warning %}
+<div class="flash flash-warning" style="margin-bottom:1rem">{{ mcp_warning }}</div>
+{% endif %}
+
+{% if error %}
+<div class="flash flash-error" style="margin-bottom:1rem">{{ error }}</div>
+{% else %}
+<p class="hint" style="margin-bottom:1rem">
+    A technical user never receives a group, so it never gains access to a knowledge scope on its own.
+    If its owner is deactivated or deleted, the technical user is revoked automatically within minutes:
+    it is deactivated and its tokens{% if openbao_on %} and AppRole{% endif %} are removed. Its record stays,
+    so you can reassign it to a new owner, which enables it again with new credentials.
+</p>
+
+{% for u in users %}
+<div class="card" style="margin-bottom:0.75rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+        <div>
+            <strong>{{ u.username }}</strong>
+            <span class="hint">owner: {{ u.owner }}</span>
+            {% if u.error %}
+            <span class="badge muted" style="margin-left:0.5rem">unreadable</span>
+            {% elif u.is_active %}
+            <span class="badge" style="margin-left:0.5rem">active</span>
+            {% else %}
+            <span class="badge muted" style="margin-left:0.5rem">revoked{% if u.revoked_reason %}: {{ u.revoked_reason }}{% endif %}</span>
+            {% endif %}
+            {% if u.last_used %}<span class="hint">last MCP call {{ u.last_used }}</span>{% endif %}
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            {% if openbao_on and u.is_active and not u.revoke_state %}
+            <form method="post" action="{{ url_for('technical_users.rotate', name=u.username) }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn sm">Rotate now</button>
+            </form>
+            {% endif %}
+            {% if u.revoke_state == 'revoking' %}
+            <span class="flash flash-warning">revocation unfinished</span>
+            <form method="post" action="{{ url_for('technical_users.revoke', name=u.username) }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn sm danger">Retry revoke</button>
+            </form>
+            {% elif u.is_active %}
+            <form method="post" action="{{ url_for('technical_users.revoke', name=u.username) }}"
+                  onsubmit="return confirm('Revoke {{ u.username }}? Its tokens stop working at once.');">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn sm danger">Revoke</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+    {% if u.error %}<div class="flash flash-error" style="margin-top:0.5rem">{{ u.error }}. Until then it is not rotated and not listed with its bindings.</div>{% endif %}
+    <ul style="margin:0.5rem 0">
+        {% for b in u.bindings %}
+        <li>
+            <code>{{ b }}</code>
+            {% if b.startswith('dify-app:') %}{% for w in warnings.get(b[9:], []) %}<div class="flash flash-warning">{{ w }}</div>{% endfor %}{% endif %}
+            <form method="post" action="{{ url_for('technical_users.unbind', name=u.username) }}" style="display:inline">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="binding" value="{{ b }}">
+                <button type="submit" class="btn sm">Unbind</button>
+            </form>
+        </li>
+        {% else %}
+        <li class="hint">no bindings</li>
+        {% endfor %}
+    </ul>
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <form method="post" action="{{ url_for('technical_users.bind', name=u.username) }}" style="display:flex;gap:0.5rem">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="text" name="binding" placeholder="dify-app:&lt;id&gt;" style="width:auto" required>
+            <button type="submit" class="btn sm">Bind</button>
+        </form>
+        <form method="post" action="{{ url_for('technical_users.reassign', name=u.username) }}" style="display:flex;gap:0.5rem">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="text" name="owner" placeholder="new owner (username)" style="width:auto" required>
+            <button type="submit" class="btn sm">Reassign</button>
+        </form>
+    </div>
+    {% if mcp_on and u.is_active and not u.revoke_state and not u.error %}
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.75rem">
+        <form method="post" action="{{ url_for('technical_users.mcp_token', name=u.username) }}" style="display:flex;gap:0.5rem;align-items:center"
+              onsubmit="return confirm('Issue a new MCP gateway token for {{ u.username }}? The earlier token for the same consumer stops working.');">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <label>MCP gateway token for
+                <select name="consumer"><option value="dify">Dify</option><option value="agent">agent</option></select></label>
+            <button type="submit" class="btn sm">Issue token</button>
+        </form>
+        {% for b in u.bindings if b.startswith('mcp-integration:') %}
+        {% set mcp_id = b[16:] %}
+        <form method="post" action="{{ url_for('technical_users.mcp_credential', name=u.username, mcp_id=mcp_id) }}" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap" autocomplete="off">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <span>Upstream credential for <code>{{ mcp_id }}</code></span>
+            <input type="password" name="f_api_key" placeholder="access token (PAT)" style="width:auto" autocomplete="new-password">
+            <span class="hint">or</span>
+            <input type="text" name="f_client_id" placeholder="client id" style="width:auto" autocomplete="off">
+            <input type="password" name="f_client_secret" placeholder="client secret" style="width:auto" autocomplete="new-password">
+            <button type="submit" class="btn sm">Store</button>
+        </form>
+        {% endfor %}
+        {% if 'mcp-integration:cognee-company-svc' in u.bindings %}
+        <form method="post" action="{{ url_for('technical_users.company_brain', name=u.username) }}" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn sm">Provision company brain</button>
+            <span class="hint">Starts its company-memory proxy, so its Dify workflows can read the company brain (<code>cognee-company-svc</code>).</span>
+        </form>
+        {% endif %}
+        {% if gitea_on and 'mcp-integration:gitea' in u.bindings %}
+        <form method="post" action="{{ url_for('technical_users.gitea_user', name=u.username) }}" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap"
+              onsubmit="return confirm('Create or refresh the Gitea service user {{ u.username }}? Its earlier token stops working.');">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <label>Gitea token scopes
+                <select name="scopes" multiple size="3">
+                    <option value="read:repository" selected>read repositories</option>
+                    <option value="write:repository">write repositories (branches, pull requests)</option>
+                    <option value="read:issue">read issues</option>
+                    <option value="write:issue">write issues</option>
+                    <option value="read:user">read its own profile</option>
+                </select></label>
+            <button type="submit" class="btn sm">Create Gitea service user</button>
+            <span class="hint">It sees only the repositories you add it to as a collaborator. Revoking removes its token and blocks its login.</span>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% else %}
+<p class="hint">No technical users yet.</p>
+{% endfor %}
+
+<h2 class="section">Create a technical user</h2>
+<div class="card">
+    <form method="post" action="{{ url_for('technical_users.create') }}" class="field">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <label>Name <input type="text" name="name" placeholder="svc-news-research" pattern="svc-[a-z0-9-]{3,40}" required></label>
+        <label>Owner (username of an active person) <input type="text" name="owner" required></label>
+        <label>Bindings, one per line (<code>dify-app:&lt;id&gt;</code>, <code>agent-instance:&lt;id&gt;</code>,
+            <code>mcp-integration:&lt;id&gt;</code>, <code>gitea-repo:&lt;owner/repo&gt;</code>)
+            <textarea name="bindings" rows="3"></textarea></label>
+        <button type="submit" class="btn">Create</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

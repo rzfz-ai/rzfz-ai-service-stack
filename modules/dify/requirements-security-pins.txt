@@ -1,0 +1,15 @@
+# Security floor for the razzfazz-dify-api image's virtualenv (#2336). The
+# upstream image (langgenius/dify-api 1.18.0) runs /app/api/.venv (python 3.13).
+# Pin = a release at or above the first fixed one (PyPI checked 2026-10-24); the
+# Dockerfile installs it over the venv (wheels only) and fails the build if it
+# did not take. Exact pins only. Re-derive on every Dify bump: a pin the new
+# upstream lock already exceeds must be dropped, or the install would downgrade.
+#
+# setuptools 84.0.0 (CVE-2025-47273, path traversal in PackageIndex; fixed in
+#                    78.1.1; 84.0.0 is the version Dify 1.18.0's own uv.lock names)
+#
+# msgpack 1.1.2 and setuptools 70.3.0 are ALSO reported by the scan, but from the
+# base image's system pip (pip/_vendor/vendor.txt), not from this venv (which has
+# no msgpack). The Dockerfile removes the system pip instead; do not pin msgpack
+# here, that would add a package the venv does not use.
+setuptools==84.0.0

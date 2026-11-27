@@ -1,0 +1,13 @@
+[Unit]
+Description=razzfazz.ai knowledge-scope and role reconcile (Dify, cognee, Synapse)
+After=docker.service
+
+[Service]
+Type=oneshot
+User=@STACK_USER@
+ExecStart=/bin/bash @STACK_DIR@/scripts/scope-reconcile-run.sh
+# The script stops the reconcile after 15 minutes; this is the backstop.
+TimeoutStartSec=20min
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes

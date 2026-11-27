@@ -1,0 +1,110 @@
+# OAuth provider registry for personal MCP integrations (#36, P3).
+#
+# Client SECRETS are NOT stored here — only the public client_id, the
+# auth/token endpoints, requested scopes, and the .env key that carries the
+# secret server-side (client_secret_env). The redirect_uri is built at runtime
+# as https://mcp.<MAIN_DOMAIN>/oauth/callback/<provider>.
+#
+# To enable a provider on a box, the operator registers an OAuth app with the
+# provider (using the redirect URI above) and puts BOTH values in the box's
+# .env: the client id under `client_id_env`, the secret under
+# `client_secret_env` (OAUTH_<PROVIDER>_CLIENT_ID / _CLIENT_SECRET), then
+# recreates the MCP manager so it reads them. This file is not edited on a box.
+# Until both are set, the card on the MCP Integrations page reads "not set up
+# on this box" and connecting is refused.
+#
+# #3424: github and google used to take a literal `client_id:` from this file.
+# A non-empty literal `client_id` is still read when its `client_id_env` is
+# empty, for boxes that edited it; that fallback is deprecated — move the
+# value to .env.
+version: 1
+providers:
+  github:
+    auth_url: https://github.com/login/oauth/authorize
+    token_url: https://github.com/login/oauth/access_token
+    client_id_env: OAUTH_GITHUB_CLIENT_ID
+    client_secret_env: OAUTH_GITHUB_CLIENT_SECRET
+    scopes: [repo, read:user]
+
+  google:
+    auth_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    client_id_env: OAUTH_GOOGLE_CLIENT_ID
+    client_secret_env: OAUTH_GOOGLE_CLIENT_SECRET
+    # #2472: Google returns a refresh token only for access_type=offline, and
+    # on a repeat consent (a reconnect) only with prompt=consent. Without one
+    # the proxy's token cannot be renewed and the connection ends after an
+    # hour (tests/api/mcp-manager/test_2472_cloud_providers_against_fakes.py).
+    extra_auth_params: {access_type: offline, prompt: consent}
+    # #3453: read-write Drive, Calendar and Gmail (the pinned proxy's tools;
+    # the box settings GOOGLE_MCP_* restrict them there). The same list is in
+    # core/mcp/personal-mcp-catalog.yaml google.scopes; the admin adds these
+    # four to the Google Cloud OAuth consent screen.
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/gmail.modify
+
+  gitea:
+    # #2554: the browser authorizes at the PUBLIC Gitea; mcp-manager exchanges
+    # the code IN-STACK (token_url_internal, allow-listed per provider in
+    # mcp-manager app/services/oauth.py INTERNAL_TOKEN_URLS and never expanded).
+    # ${GITEA_DOMAIN} is expanded from mcp-manager's environment at load; an
+    # unset value fails closed. The client id and secret are written to .env
+    # by `rzfz post-install` (ensure_gitea_mcp_oauth_app).
+    auth_url: https://${GITEA_DOMAIN}/login/oauth/authorize
+    token_url: https://${GITEA_DOMAIN}/login/oauth/access_token
+    token_url_internal: http://gitea:3000/login/oauth/access_token
+    client_id_env: OAUTH_GITEA_CLIENT_ID
+    client_secret_env: OAUTH_GITEA_CLIENT_SECRET
+    scopes: [read:repository, write:repository, read:user, read:organization]
+
+  atlassian:
+    # #2472: Atlassian Cloud OAuth 2.0 (3LO) for people; client_credentials
+    # for service accounts (technical users, their own client id/secret from
+    # the technical-user credential form). Register the app at
+    # developer.atlassian.com with the redirect
+    # https://mcp.<domain>/oauth/callback/atlassian; its id and secret go to
+    # .env as OAUTH_ATLASSIAN_CLIENT_ID / OAUTH_ATLASSIAN_CLIENT_SECRET.
+    # client_credentials_url is the service-account token endpoint, as
+    # Atlassian documents it ("Create OAuth 2.0 credential for service
+    # accounts": POST https://auth.atlassian.com/oauth/token, form-encoded
+    # grant_type=client_credentials). The SSRF allow-list follows this field
+    # (ssrf_guard.derive_allowed_hosts). token_request: json applies to the
+    # 3LO code and refresh exchanges only.
+    auth_url: https://auth.atlassian.com/authorize
+    token_url: https://auth.atlassian.com/oauth/token
+    client_credentials_url: https://auth.atlassian.com/oauth/token
+    client_id_env: OAUTH_ATLASSIAN_CLIENT_ID
+    client_secret_env: OAUTH_ATLASSIAN_CLIENT_SECRET
+    token_request: json
+    extra_auth_params: {audience: api.atlassian.com, prompt: consent}
+    scopes: [read:jira-work, write:jira-work, read:jira-user, read:confluence-content.all,
+             write:confluence-content, search:confluence, offline_access]
+
+  m365:
+    # #2472: Microsoft 365 (Graph) as the user. The
+    # tenant is the box's own Entra tenant: ${M365_TENANT_ID} (a tenant id or
+    # tenant domain) fills only the URL path; 'common', 'organizations',
+    # 'consumers' or an unset value leave the endpoint empty (fail closed,
+    # mcp-manager app/services/oauth.py _PATH_VARS). Register the app in that
+    # tenant with the redirect https://mcp.<domain>/oauth/callback/m365 and
+    # delegated Graph permissions: scopes_read_write and scopes_send from day 1
+    # (read-write with sending is the default); `scopes` alone is enough only
+    # with M365_MCP_MODE=read-only.
+    auth_url: https://login.microsoftonline.com/${M365_TENANT_ID}/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/${M365_TENANT_ID}/oauth2/v2.0/token
+    client_id_env: OAUTH_M365_CLIENT_ID
+    client_secret_env: OAUTH_M365_CLIENT_SECRET
+    scopes: [offline_access, User.Read, Mail.Read, Calendars.Read, Files.Read.All, Sites.Read.All]
+    # #3433: with M365_MCP_MODE=read-write (the default) the gateway asks for
+    # scopes_read_write INSTEAD (ms365-mcp then runs with --allowed-scopes =
+    # the same Graph scopes, modules/mcp-manager/compose.yml), and with
+    # M365_MCP_ALLOW_SEND=true (the default) also for scopes_send. A person
+    # whose grant has fewer scopes connects again once; until then it keeps
+    # working with what it has.
+    # SharePoint list-item writes need Sites.ReadWrite.All.
+    scopes_read_write: [offline_access, User.Read, Mail.ReadWrite, Calendars.ReadWrite, Files.ReadWrite.All,
+                        Sites.ReadWrite.All]
+    scopes_send: [Mail.Send]

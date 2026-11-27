@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block page_title %}GPUStack{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>GPUStack</h1>
+    <p class="lede">API access for the optional GPUStack backend</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{# #1450 (cutover C10b / operator decision D7): from 2026.09 the LLM Manager
+   is the front of every box and GPUStack is an OPTIONAL backend it federates
+   (#1442). The mode question (standalone/master/worker) belonged to the era
+   when GPUStack itself was the fleet's control plane — a master/worker choice
+   here now competes with the manager's own worker enrolment and can only
+   confuse. What stays is what this page is still for: the backend's API key. #}
+<div class="card" style="margin-bottom:1rem;background:var(--razz-red-tint);border-left:3px solid var(--razz-red)">
+    <strong>The LLM Manager fronts this box.</strong>
+    GPUStack is an optional backend behind it; workers are enrolled in the
+    manager's own console, not here.
+    {# #1450 review: this used to point at llm.<domain>, which is GPUSTACK_DOMAIN
+       — the very backend the card says you should NOT configure here, and on a
+       manager-only box nothing answers behind it. The manager's console is
+       LLM_MANAGER_DOMAIN (llm-manager.<domain>), and that name keeps answering
+       after the #1444 vhost swap as well, so the link is right before and after
+       the cutover. #}
+    <a href="https://llm-manager.{{ main_domain }}/" class="btn sm" style="margin-left:0.5rem" target="_blank" rel="noopener">
+        Open the LLM Manager &rarr;
+    </a>
+</div>
+<form method="POST" class="settings-form">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <h2 class="section">API Key</h2>
+    <div class="card" style="margin-bottom:1rem">
+        <p class="hint" style="margin-bottom:0.5rem">
+            Status:
+            {% if config.api_key_set %}
+                <span class="badge badge-production">Configured</span>
+                <span style="font-family:monospace">{{ config.api_key_masked }}</span>
+                {# rc6.7 #11: clipboard copy of the full key. Page is Authentik-gated
+                   to admins; the on-screen value stays masked.
+                   CFG-28: the key is FETCHED on click from
+                   /settings/gpustack/api-key, not pre-loaded into the DOM.
+                   This button used to carry a data-api-key attribute holding
+                   the FULL key, so every render of this page shipped it —
+                   where an injected script, a screenshot or a screen-share
+                   picks it up without anyone ever clicking copy. Same
+                   pattern the Mac-LLM panel already uses. #}
+                <button type="button"
+                        class="btn-icon"
+                        title="Copy full API key to clipboard"
+                        style="background:none;border:none;cursor:pointer;padding:0 0.25rem;font-size:1rem;vertical-align:middle"
+                        onclick="copyApiKeyToClipboard(this)">📋</button>
+                <span id="api-key-copy-status" style="font-size:0.75rem;color:var(--text-muted);margin-left:0.25rem"></span>
+            {% else %}
+                <span class="badge badge-experimental">Not set</span>
+            {% endif %}
+        </p>
+        <div class="field">
+            <label>API Key (leave empty to keep current)</label>
+            <input type="text" name="api_key" placeholder="gpustack_xxxxxxxx...">
+        </div>
+    </div>
+    <div class="apply-actions" style="padding-top:1rem">
+        <button type="submit" class="btn primary">Save & Apply</button>
+    </div>
+</form>
+<script>
+// rc6.7 #11: clipboard copy for the GPUStack API key.
+// Async clipboard API requires a secure context (HTTPS or localhost). Falls
+// back to the legacy execCommand approach for older browsers / mixed-context.
+function copyApiKeyToClipboard(btn) {
+    // CFG-28: fetch the key on demand; it is never present in the markup.
+    const status = document.getElementById('api-key-copy-status');
+    if (status) { status.textContent = '\u2026'; }
+    fetch('/settings/gpustack/api-key', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => _copyKeyValue(d && d.api_key ? d.api_key : ''))
+        .catch(() => { if (status) { status.textContent = '\u26a0 could not read the key'; setTimeout(() => status.textContent = '', 4000); } });
+}
+
+function _copyKeyValue(key) {
+    const status = document.getElementById('api-key-copy-status');
+    if (!key) {
+        if (status) { status.textContent = 'no key set'; setTimeout(() => status.textContent = '', 2000); }
+        return;
+    }
+    const showCopied = () => {
+        if (status) { status.textContent = '✓ copied'; setTimeout(() => status.textContent = '', 2000); }
+    };
+    const showFailed = (msg) => {
+        if (status) { status.textContent = '⚠ ' + (msg || 'copy failed'); setTimeout(() => status.textContent = '', 4000); }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(key).then(showCopied).catch(e => showFailed(e.message));
+        return;
+    }
+    // Fallback: legacy execCommand via a hidden textarea.
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = key;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        ok ? showCopied() : showFailed('execCommand returned false');
+    } catch (e) {
+        showFailed(e.message);
+    }
+}
+</script>
+{% endblock %}

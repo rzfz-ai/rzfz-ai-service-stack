@@ -1,0 +1,49 @@
+# Offline-package (git archive) delivery filter — internal-only paths are
+# excluded from an offline package (Enterprise) (which uses `git archive`). NOTE: this does
+# NOT affect pull-based installs (git fetch/checkout ship the full tree); see
+# .gsd/reports/ga5-plan-2026-06-21.md (workstream B / pull-vs-package finding).
+.gsd/                       export-ignore
+tests/                      export-ignore
+.claude/                    export-ignore
+# #3253: the Agentic OS concept and its prototypes are development work only — never in a customer package.
+docs/specs/agentic-os/      export-ignore
+# #3496: internal development files never reach a customer package. The reviewed
+# list, with the reason for each entry, is INTERNAL in
+# tests/unit/consistency/test_3496_the_package_carries_no_internal_files.py;
+# change both together. Each line is also in the root .dockerignore (#3397).
+# Not here on purpose: .probe-queue/ (bind-mount source of the probe queue),
+# certs/ (TLS directory), releases/ notes and SBOMs (read by the Settings portal).
+CLAUDE.md                   export-ignore
+AGENTS.md                   export-ignore
+.gitea/                     export-ignore
+.github/                    export-ignore
+.gitlab-ci.yml              export-ignore
+.vscode/                    export-ignore
+wiki/                       export-ignore
+security-run/               export-ignore
+docs/specs/                 export-ignore
+docs/superpowers/           export-ignore
+docs/operator-notes/        export-ignore
+docs/agents/                export-ignore
+# #3510: tester one-pagers, the production SSO how-to and the internal walkthroughs
+# name internal hosts and domains. The walkthroughs that shipped text points to
+# (cli/upgrade.sh, config/.env.example, docs/enterprise/how-to/backup.md) keep shipping.
+docs/upgrade-guide-testvm-*          export-ignore
+docs/upgrade-guide-test-single-box-* export-ignore
+docs/howto-entra-sso-prod.md         export-ignore
+docs/walkthroughs/*                  export-ignore
+docs/walkthroughs/gpustack-2x-to-llm-manager.md     -export-ignore
+docs/walkthroughs/rename-the-authentik-superuser.md -export-ignore
+docs/walkthroughs/env-encryption-backup.md          -export-ignore
+# releases/<version>/ is an ALLOW-list: a box reads only the notes (Settings portal),
+# the SBOM and the security bulletins there. Everything else (checklists, test
+# results, security reviews, evidence, working notes) stays out by structure, so a
+# new kind of internal file under releases/ cannot ship by default.
+releases/*/*                export-ignore
+releases/*/RELEASE_NOTES.md -export-ignore
+releases/*/WHATS_NEW.md     -export-ignore
+releases/*/changelog.md     -export-ignore
+releases/*/sbom             -export-ignore
+releases/*/sbom.json        -export-ignore
+releases/*/security-bulletin-*.yaml -export-ignore
+.gitattributes              export-ignore

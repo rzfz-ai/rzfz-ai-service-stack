@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright © 2024–2026 razzfazz.ai GmbH – Member of SEQIS Group.
+# ==============================================================================
+# compose.egress-allowlist.yml — OPT-IN default-deny egress for agent sandboxes
+# (#959 W4 / #802, the exfil half of #256)
+# ==============================================================================
+# NOT in COMPOSE_FILE by default. A box that does not add this overlay keeps
+# today's behaviour exactly: both fence nets stay non-internal, the proxy does
+# not exist, and the manager injects nothing (AGENT_EGRESS_POLICY defaults to
+# `open`).
+#
+# Enable, in this order:
+#   1. .env:  AGENT_EGRESS_POLICY=allowlist
+#             AGENT_EGRESS_ALLOW="<space-separated hosts>"   (see .env.example)
+#   2. Append this file to COMPOSE_FILE, after modules/agents/compose.yml.
+#   3. Stop the agents, REMOVE the two fence networks, bring the stack back up:
+#        rzfz stop
+#        docker network rm coding-agents agent-assistants
+#        docker compose up -d
+#      Step 3 is not optional and not cosmetic: Docker does NOT re-create an
+#      existing network with changed options, so without the removal the
+#      overlay's `internal: true` applies to nothing and the fence silently
+#      stays open — the failure mode this comment exists to prevent.
+#
+# What it changes:
+#   * both fence nets become `internal: true` — no route off the bridge, so the
+#     HTTP_PROXY env the manager injects stops being a hint a hostile container
+#     can shrug off and becomes the only door;
+#   * `agent-egress-proxy` (separate Caddy process, own config) is dual-homed
+#     onto the fences plus a bare uplink bridge that carries nothing else.
+#
+# Dual-homed stack services on the fences (gitea, gpustack, dify-api, cognee,
+# searxng, agent-manager) keep their own default-network egress — `internal`
+# constrains the NETWORK, not its members' other interfaces. Only the
+# single-homed sandboxes lose the direct route, which is the entire point.
+#
+# NOT supported together with RAZZFAZZ_CORPORATE_PROXY=1: #281 already routes
+# every agent container through the box's mandated proxy, and the manager
+# refuses the policy (loudly, in its log) rather than emit a chained-proxy
+# config nobody has verified.
+# ==============================================================================
+
+services:
+  agent-egress-proxy:
+    # Reuses the image the stack already builds for Caddy — the one carrying
+    # the forwardproxy plugin. Deliberately NO build context: a new
+    # build-bearing service in an overlay would build at runtime on an
+    # installed box, which #184 WS2a exists to prevent (the generated
+    # compose.no-build.yml only resets services it knows about).
+    image: razzfazz-stack-caddy
+    pull_policy: never
+    container_name: agent-egress-proxy
+    profiles: ["agents"]
+    restart: unless-stopped
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # The upstream caddy binary ships cap_net_bind_service=ep as a FILE
+      # capability; execve under no-new-privileges with an empty bounding
+      # set returns EPERM before main() — the container crash-loops on
+      # 'exec /usr/bin/caddy: operation not permitted'. Granting the one
+      # cap the file already names lets the exec through; the process
+      # still holds nothing else.
+      - NET_BIND_SERVICE
+    # Skip the stack Caddy entrypoint: it derives ACME/TLS directives and
+    # cleans cert locks, none of which a plaintext in-fence proxy has or wants.
+    entrypoint: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      # `disabled.invalid` is a non-resolving sentinel, not a placeholder: an
+      # unset allowlist must close the door, and a set-but-EMPTY value would
+      # expand to a bare `allow` and crash Caddy at startup.
+      AGENT_EGRESS_ALLOW: ${AGENT_EGRESS_ALLOW:-disabled.invalid}
+    volumes:
+      # Relative to the PROJECT ROOT, not this file: COMPOSE_FILE-appended
+      # overlays resolve paths against the first compose file's directory
+      # (unlike `include:`d module files). `./egress-proxy/...` mounted a
+      # root-level auto-created DIRECTORY and the container never started.
+      - ./modules/agents/egress-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    # No `ports`. In-fence only — publishing a default-deny forward proxy on the
+    # host would hand it to anything that can reach the box.
+    networks:
+      - coding-agents
+      - agent-assistants
+      - agent-egress
+
+networks:
+  # Same name-keyed declarations as modules/agents/compose.yml + core/compose.yml
+  # — compose merges them and this file, appended LAST, wins on `internal`.
+  coding-agents:
+    name: coding-agents
+    driver: bridge
+    internal: true
+  agent-assistants:
+    name: agent-assistants
+    driver: bridge
+    internal: true
+  # The proxy's uplink. Exactly one member by design: Docker's inter-bridge
+  # isolation is what keeps this bridge from reaching the stack default net, so
+  # a CONNECT that gets past the ACL still cannot land on postgres.
+  agent-egress:
+    name: agent-egress
+    driver: bridge

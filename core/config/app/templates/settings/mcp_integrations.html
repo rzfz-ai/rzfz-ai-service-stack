@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block page_title %}MCP Integrations{% endblock %}
+{% block page_content %}
+<div class="page">
+    <h1>MCP Integrations</h1>
+    <p class="lede">Govern which per-user MCP integrations are available and the minimum tier required to provision each one</p>
+</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}
+<div class="flash-messages">{% for cat, msg in messages %}<div class="flash flash-{{ cat }}">{{ msg }}</div>{% endfor %}</div>
+{% endif %}{% endwith %}
+
+{# #3430: what each integration needs on this box. Values are never rendered:
+   a stored field shows "stored" and an empty input that replaces it. #}
+<h2 class="section" id="mcp-setup">Setup on this box</h2>
+<p class="hint" style="margin-bottom:0.75rem">
+    One row per integration: the modules it needs, how its sign-in is set up, and whether this box has
+    what it needs. Where an app is required, register it with the provider using the redirect URI shown,
+    then enter its values below. Stored values are never shown again; enter a new value to replace one.
+</p>
+<div class="table-wrap" style="margin-bottom:1rem">
+<table class="rz" id="mcp-setup-table">
+    <thead><tr><th>Integration</th><th>Modules</th><th>Sign-in</th><th>On this box</th><th>Redirect URI</th><th>Help</th></tr></thead>
+    <tbody>
+    {% for row in setup_rows %}
+    <tr data-mcp-id="{{ row.id }}">
+        <td><strong>{{ row.display_name }}</strong> <span class="hint">({{ row.id }})</span></td>
+        <td>{% for m in row.modules %}<span class="badge {{ 'ok' if m.on else 'warn' }}" data-module="{{ m.profile }}" data-on="{{ 'true' if m.on else 'false' }}">{{ m.profile }}: {{ 'on' if m.on else 'off' }}</span> {% endfor %}</td>
+        <td data-method="{{ row.method }}">{{ row.method_label }}</td>
+        <td data-configured="{{ 'true' if row.configured else 'false' }}" data-unavailable="{{ 'true' if row.unavailable else 'false' }}">
+            {% if row.unavailable %}<span class="badge warn">not available on this box</span><div class="hint">{{ row.unavailable }}</div>
+            {% elif row.method == 'pat' %}<span class="badge info">each person enters their own token</span>
+            {% elif row.method == 'none' %}<span class="badge info">nothing to set up</span>
+            {% elif row.configured %}<span class="badge ok">configured</span>
+            {% else %}<span class="badge err">not configured</span>
+                {% if row.missing %}<div class="hint">missing: {{ row.missing | join(', ') }}</div>{% endif %}
+            {% endif %}
+        </td>
+        <td>{% if row.redirect_uri %}<input type="text" readonly value="{{ row.redirect_uri }}" onclick="this.select()" aria-label="Redirect URI for {{ row.display_name }}" style="min-width:16rem">{% elif row.provider %}<span class="hint">MAIN_DOMAIN is not set</span>{% endif %}</td>
+        <td>{% if row.help_url %}<a href="{{ row.help_url }}" target="_blank" rel="noopener">Help</a>{% else %}<span class="hint">Help Center not configured</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+
+{% for row in setup_rows if row.form %}
+<div class="card" style="margin-bottom:0.75rem" id="mcp-app-{{ row.form.provider }}">
+    <strong>{{ row.display_name }}: provider app</strong>
+    {% if row.method == 'automatic' %}
+    <p class="hint">Registered automatically by <code>rzfz post-install</code>. If that reported that the administrator
+        credentials were refused, register the app by hand (see Help) and enter it here.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('settings.mcp_provider_app_save', provider=row.form.provider) }}" autocomplete="off"
+          style="display:flex;gap:0.75rem;flex-wrap:wrap;align-items:flex-end;margin-top:0.5rem">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        {% for f in row.form.fields %}
+        <label class="field" style="display:flex;flex-direction:column;gap:0.25rem;min-width:14rem">
+            <span>{{ f.label }} {% if f.set %}<span class="badge ok">stored</span>{% else %}<span class="badge err">not set</span>{% endif %}</span>
+            <input type="{{ 'password' if f.secret else 'text' }}" name="{{ f.field }}" value=""
+                   autocomplete="{{ 'new-password' if f.secret else 'off' }}" spellcheck="false"
+                   placeholder="{{ 'stored — enter a new value to replace' if f.set else 'not set' }}">
+            {% if f.hint %}<span class="hint">{{ f.hint }}</span>{% endif %}
+        </label>
+        {% endfor %}
+        <button type="submit" class="btn sm">Save</button>
+    </form>
+    <form method="post" action="{{ url_for('settings.mcp_provider_app_remove', provider=row.form.provider) }}" style="margin-top:0.5rem"
+          onsubmit="return confirm('Remove the stored app for {{ row.display_name }}? New connections are refused until an app is entered again.');">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn sm danger">Remove stored app</button>
+    </form>
+</div>
+{% endfor %}
+
+{% if m365_access %}
+<div class="card" style="margin-bottom:0.75rem" id="mcp-m365-access">
+    <strong>Microsoft 365: access</strong>
+    <span class="badge {{ 'warn' if m365_access.mode == 'read-write' else 'ok' }}" data-m365-mode="{{ m365_access.mode }}">{{ m365_access.mode }}</span>
+    <p class="hint">Read-write is the default: people can read, create drafts, calendar entries and files,
+        send mail and delete through Microsoft 365, as themselves; agents and workflows may send and delete
+        too, and nobody is asked to confirm. Each switch below restricts that. Write and send access need the
+        extra permissions on the Entra app (see Help); when a change asks for permissions people have not
+        granted yet, each person reconnects Microsoft 365 on their MCP Integrations card.</p>
+    {% if m365_access.invalid %}
+    <div class="flash flash-warning m365-invalid" style="margin:0.5rem 0">Not a valid value in .env, read as the strictest setting: {{ m365_access.invalid | join(', ') }}. Saving this form writes a valid mode, and in read-write valid switches.</div>
+    {% endif %}
+    {% for w in m365_access.runtime_warnings %}
+    <div class="flash flash-error m365-runtime-mismatch" style="margin:0.5rem 0">{{ w }}</div>
+    {% endfor %}
+    {% if m365_access.restart_services %}
+    <form method="post" action="{{ url_for('settings.mcp_m365_access_restart') }}" id="m365-restart-form" style="margin:0.25rem 0 0.5rem">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn sm">Restart now ({{ m365_access.restart_services | join(', ') }})</button>
+    </form>
+    {% endif %}
+    {% for o in m365_access.runtime_orphans %}
+    <div class="flash flash-error m365-runtime-orphan" style="margin:0.5rem 0">{{ o }}</div>
+    {% endfor %}
+    {% for p in m365_access.runtime_problems %}
+    <div class="flash flash-warning m365-runtime-unread" style="margin:0.5rem 0">Could not read the running server ({{ p }}); what it does now is unknown.</div>
+    {% endfor %}
+    <form method="post" action="{{ url_for('settings.mcp_m365_access_save') }}" id="m365-access-form"
+          style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.5rem">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div style="display:flex;gap:1rem;flex-wrap:wrap">
+            {% for mode in ['read-only', 'read-write'] %}
+            <label style="display:flex;align-items:center;gap:0.35rem">
+                <input type="radio" name="mode" value="{{ mode }}" style="width:auto" {% if m365_access.mode == mode %}checked{% endif %}
+                       onchange="document.querySelectorAll('#m365-access-form .m365-switch').forEach(function(e){e.disabled = (this.value !== 'read-write');}, this)">
+                {{ mode }}
+            </label>
+            {% endfor %}
+        </div>
+        {% for s in m365_access.switches %}
+        <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8125rem">
+            <input type="checkbox" class="m365-switch" name="{{ s.field }}" value="true" style="width:auto"
+                   data-key="{{ s.key }}" data-effective="{{ 'true' if s.on else 'false' }}"
+                   {% if s.value %}checked{% endif %} {% if m365_access.mode != 'read-write' %}disabled{% endif %}>
+            {{ s.label }}{% if s.value and not s.on %} <span class="hint">(no effect while read-only)</span>{% endif %}
+        </label>
+        {% endfor %}
+        <div><button type="submit" class="btn sm">Save</button></div>
+    </form>
+</div>
+{% endif %}
+
+{% if google_access %}
+<div class="card" style="margin-bottom:0.75rem" id="mcp-google-access">
+    <strong>Google Workspace: access</strong>
+    <span class="badge {{ 'warn' if google_access.mode == 'read-write' else 'ok' }}" data-google-mode="{{ google_access.mode }}">{{ google_access.mode }}</span>
+    <p class="hint">Read-write is the default: people's chats and agents read and change their Calendar, Drive
+        and Gmail, send mail, share files and invite people, and delete, as themselves. Each switch below
+        restricts that. Running Google Workspace connections pick up a change within about 15 minutes. A person
+        who connected before write access existed is asked to reconnect Google Workspace on their MCP
+        Integrations card when a write needs it.</p>
+    {% if google_access.invalid %}
+    <div class="flash flash-warning google-invalid" style="margin:0.5rem 0">Not a valid value in .env, read as the strictest setting: {{ google_access.invalid | join(', ') }}. Saving this form writes a valid mode, and in read-write valid switches.</div>
+    {% endif %}
+    {% for w in google_access.runtime_warnings %}
+    <div class="flash flash-error google-runtime-mismatch" style="margin:0.5rem 0">{{ w }}</div>
+    {% endfor %}
+    {% if google_access.restart_services %}
+    <form method="post" action="{{ url_for('settings.mcp_google_access_restart') }}" id="google-restart-form" style="margin:0.25rem 0 0.5rem">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn sm">Restart now ({{ google_access.restart_services | join(', ') }})</button>
+    </form>
+    {% endif %}
+    {% for p in google_access.runtime_problems %}
+    <div class="flash flash-warning google-runtime-unread" style="margin:0.5rem 0">Could not read the running MCP manager ({{ p }}); what it hands out now is unknown.</div>
+    {% endfor %}
+    <form method="post" action="{{ url_for('settings.mcp_google_access_save') }}" id="google-access-form"
+          style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.5rem">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div style="display:flex;gap:1rem;flex-wrap:wrap">
+            {% for mode in ['read-only', 'read-write'] %}
+            <label style="display:flex;align-items:center;gap:0.35rem">
+                <input type="radio" name="mode" value="{{ mode }}" style="width:auto" {% if google_access.mode == mode %}checked{% endif %}
+                       onchange="document.querySelectorAll('#google-access-form .google-switch').forEach(function(e){e.disabled = (this.value !== 'read-write');}, this)">
+                {{ mode }}
+            </label>
+            {% endfor %}
+        </div>
+        {% for s in google_access.switches %}
+        <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8125rem">
+            <input type="checkbox" class="google-switch" name="{{ s.field }}" value="true" style="width:auto"
+                   data-key="{{ s.key }}" data-value="{{ 'true' if s.value else 'false' }}" data-effective="{{ 'true' if s.on else 'false' }}"
+                   {% if s.value %}checked{% endif %} {% if google_access.mode != 'read-write' %}disabled{% endif %}>
+            {{ s.label }}{% if s.value and not s.on %} <span class="hint">(no effect while read-only)</span>{% endif %}
+        </label>
+        {% endfor %}
+        <div><button type="submit" class="btn sm">Save</button></div>
+    </form>
+</div>
+{% endif %}
+
+<h2 class="section">Availability and minimum tier</h2>
+{% if mcp_err %}
+<div class="flash flash-error" style="margin-bottom:1rem">{{ mcp_err }}</div>
+<p class="hint">
+    MCP integration governance requires the MCP Manager to be running.
+    Enable the <strong>mcp</strong> profile in Modules and ensure
+    <code>MCP_INTERNAL_TOKEN</code> is set.
+</p>
+{% else %}
+<p class="hint" style="margin-bottom:1rem">
+    Each row controls a personal MCP integration. Disable one to hide it from
+    every user, or raise its minimum tier so only Power/Admin users can provision
+    it. Enforcement is server-side in the MCP Manager — a lower-tier user cannot
+    see or provision an integration above their tier even via the API. Applied
+    live (no restart).
+</p>
+{% for integ in integrations %}
+<div class="card" style="margin-bottom:0.75rem">
+    <form method="post" action="{{ url_for('settings.mcp_integration_save', mcp_id=integ.mcp_id) }}">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+            <div>
+                <strong>{{ integ.display_name }}</strong>
+                <span class="hint">({{ integ.mcp_id }})</span>
+                <span class="badge muted" style="margin-left:0.5rem">
+                    tenancy: {{ integ.tenancy }}
+                </span>
+            </div>
+            <div style="display:flex;align-items:center;gap:1rem">
+                <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8125rem">
+                    <input type="checkbox" name="available" value="true" {% if integ.available %}checked{% endif %} style="width:auto">
+                    Available
+                </label>
+                <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8125rem">
+                    Min tier
+                    <select name="min_tier" style="width:auto">
+                        {% for t in tiers %}
+                        <option value="{{ t }}" {% if integ.min_tier == t %}selected{% endif %}>{{ t }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <button type="submit" class="btn sm">Save</button>
+            </div>
+        </div>
+    </form>
+</div>
+{% endfor %}
+
+{# Company Brain (shared Cognee memory) — #36 two-tier #}
+<h2 class="section">Company Brain (shared Cognee memory)</h2>
+<div class="card">
+    <p class="hint" style="margin-bottom:0.75rem">
+        Create a shared, curated knowledge base every entitled user can READ from
+        their agents. Writing is reserved for power/admin users (curated). This is
+        distinct from <strong>Personal Memory (private)</strong>, which is truly
+        isolated per user (each user sees only their own).
+    </p>
+    <form method="post" action="{{ url_for('settings.mcp_company_brain_create') }}" class="field"
+          style="display:flex;flex-direction:row;gap:0.5rem;align-items:center;flex-wrap:wrap">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="company_dataset" placeholder="company_brain"
+               style="min-width:220px;width:auto" required>
+        <button type="submit" class="btn sm">Create / curate company brain</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

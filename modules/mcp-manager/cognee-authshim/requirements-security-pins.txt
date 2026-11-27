@@ -1,0 +1,36 @@
+# Security floor for the cognee-mcp image's virtualenv (#2336). The base image
+# (cognee/cognee-mcp) ships the versions of its own lock file; each pin below is
+# the first release that closes every Critical/High advisory published for the
+# version the base carries (OSV/GHSA data, 2026-10-20), and it is installed over
+# the base by the Dockerfile. Exact pins only (tests/unit/consistency/test_2762_*).
+# Re-derive on every base bump: a pin that the new base already exceeds must be
+# dropped, or pip would downgrade it.
+#
+# nltk         3.10.0 -> 3.10.3  (4 Critical, 20 High)
+# pypdf        6.14.2 -> 6.19.0  (16 High)
+# PyJWT        2.13.0 -> 2.14.0  (2 Critical, 10 High)
+# anyio        4.14.1 -> 4.15.1  (2 Critical, 2 High are closed from 4.14.2; 4.15.1 is what
+#                                 the cognee image pins - one shared version, tests/unit/consistency/
+#                                 test_2762_supply_chain_pins.py - because the cognee 1.6.5 base carries it)
+# unstructured 0.18.x/0.22.x -> 0.24.0  (2 Critical)
+# aiohttp      3.14.1 -> 3.14.4  (4 High; 3.14.4 needs yarl>=1.25.1)
+# yarl         1.24.2 -> 1.25.1
+# urllib3      2.7.0  -> 2.8.0   (4 High)
+# #3343 (2026.11-ga.1), Criticals in the 2026.11-ga SBOM (grype, release DB 2026-11-18):
+# pillow       12.3.0 -> 13.0.0  (11 Critical; no 12.x backport)
+# certifi      2026.6.17 -> 2026.10.23 (1 Critical, closed from 2026.10.18)
+# authlib      1.7.2  -> 1.9.10  (1 Critical, closed from 1.9.0; fastmcp needs >=1.6.11)
+# uv           0.11.28 -> 0.13.9 (1 Critical, closed from 0.13.4; cognee-mcp needs uv<1.0)
+# Not pinned here: cryptography 49 -> 50 (2 High): cognee declares cryptography<50.
+nltk==3.10.3
+pypdf==6.19.0
+PyJWT==2.14.0
+anyio==4.15.1
+unstructured==0.24.0
+aiohttp==3.14.4
+yarl==1.25.1
+urllib3==2.8.0
+pillow==13.0.0
+certifi==2026.10.23
+authlib==1.9.10
+uv==0.13.9

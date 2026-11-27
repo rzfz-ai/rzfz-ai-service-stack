@@ -1,0 +1,25 @@
+version: 1
+metadata:
+  name: "Base - Outpost"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  - model: authentik_outposts.outpost
+    identifiers:
+      name: "authentik Embedded Outpost"
+    attrs:
+      type: proxy
+      # #2816: NO `providers:` here. A blueprint attr REPLACES a many-to-many
+      # set, so every re-apply of this file (Authentik re-applies on discovery,
+      # on a reconcile retry, on a hash change) reset the embedded outpost to
+      # the 9 core providers and detached all module ProxyProviders (Start
+      # Portal, LLM console, Cognee ... answered 404 until the next init). The
+      # membership is owned by init-authentik.sh -> apply-policy-bindings.py,
+      # which attaches ALL ProxyProviders to the outpost (idempotent, on every
+      # init path), so this file only carries the outpost's type and config and
+      # a re-apply leaves the providers alone.
+      config:
+        authentik_host: "https://auth.${MAIN_DOMAIN}"
+        authentik_host_insecure: false
+        log_level: info
+        object_naming_template: "ak-outpost-%(name)s"

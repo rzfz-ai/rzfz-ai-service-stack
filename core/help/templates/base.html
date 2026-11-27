@@ -1,0 +1,135 @@
+{# #982 Task 5: rzfz.ai Help Center shell rework.
+
+   Ports the operator-signed-off prototype (Gitea epic #982; two-level nav
+   "same concept as the Agent Manager"): a dark collapsible TOPICS rail on
+   the left, a light SUB-NAV column for the active topic's PAGES, the
+   rendered offline doc on the right, and ONE global topbar search with a
+   results overlay.
+
+   Overrides razz_base's `layout` block (like core/config/app/templates/
+   base.html does) instead of `content`, because this needs a fixed
+   rail + subnav + main shell spanning the full viewport, not the default
+   1100px-capped `.razz-container`.
+
+   Nested-block trick: `layout`'s <main> renders `{% block help_content %}`,
+   whose DEFAULT body is `{% block content %}{% endblock %}`. New child
+   templates (index.html, viewer.html) override `help_content` directly and
+   get the full rail/subnav/topbar chrome around their own markup. admin.html
+   (untouched by #982 — out of scope for this task) still only overrides the
+   older `content` block; because it never overrides `help_content`, Jinja
+   falls through to help_content's default body, which renders `content` —
+   so admin.html keeps working unmodified inside the same new shell.
+
+   `topics` / `active_topic` are rendered server-side for the initial paint
+   AND re-emitted as a JSON blob (`#help-nav-data`) so help-center.js can
+   swap the sub-nav client-side when a rail topic is clicked, without a
+   round trip. Both are looked up with safe defaults so a render path that
+   forgets to pass them (defensive; every #982 route now does) degrades to
+   an empty rail instead of a Jinja UndefinedError / 500.
+#}
+{% extends "razz_base.html" %}
+
+{% block title %}rzfz.ai Help Center{% endblock %}
+
+{% block extra_css %}
+    {# Cache-bust per release, same pattern as core/config/app/templates/base.html —
+       otherwise browsers keep serving a stale help-overrides.css across upgrades. #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='help-overrides.css') }}?v={{ stack_version|default('0') }}">
+{% endblock %}
+
+{# The rail IS the navigation chrome (like config) — no separate top header. #}
+{% block header %}{% endblock %}
+
+{% block layout %}
+{% set topics = topics|default([]) %}
+{% set active_topic_obj = (topics | selectattr('id', 'equalto', active_topic) | list | first)
+                           if active_topic else None %}
+{% if not active_topic_obj and topics %}{% set active_topic_obj = topics[0] %}{% endif %}
+<div class="app" id="help-app">
+    <aside class="rail" id="rail">
+        <div class="brand">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.6 1.4a.7.7 0 0 0-1.24-.5L3.3 12.3a.7.7 0 0 0 .55 1.14h5.02l-1.3 8.2a.7.7 0 0 0 1.25.52l9.06-11.4a.7.7 0 0 0-.55-1.14h-5.02l1.29-8.22Z"/></svg>
+            <span class="bn">rzfz.ai</span>
+            <button type="button" class="railtog" id="railtog" title="Collapse">&laquo;</button>
+        </div>
+        <div class="brand-sub">Help Center</div>
+        <nav id="topics">
+            {# HLP-10 INVARIANT: `t.icon` is raw SVG markup and is emitted
+               UNESCAPED here. It is only ever one of the module constants in
+               app.py's `_TOPIC_ICONS` / `_DEFAULT_TOPIC_ICON` (a dict lookup in
+               `_build_topics`) — never a doc/config/frontmatter value. If icons
+               ever become data-driven, this `| safe` (and the matching
+               `snIc.innerHTML` in help-center.js) becomes stored XSS in the
+               shell of EVERY Help Center page: sanitize at the source first.
+               Pinned by tests/unit/razzfazz-help/test_982_nav_structure.py. #}
+            {% for t in topics %}
+            <a class="topic{% if active_topic_obj and t.id == active_topic_obj.id %} on{% endif %}"
+               href="#" data-topic-id="{{ t.id }}"
+               {% if active_topic_obj and t.id == active_topic_obj.id %}aria-current="page"{% endif %}>
+                <span class="ic">{{ t.icon | safe }}</span><span class="lb">{{ t.label }}</span>
+            </a>
+            {% endfor %}
+        </nav>
+    </aside>
+
+    <aside class="subnav" id="subnav">
+        <div class="snhd">
+            <div class="t">
+                {# HLP-10: same invariant as the rail above — module-constant SVG only. #}
+                <span class="ic" id="sn-ic">{{ active_topic_obj.icon | safe if active_topic_obj else '' }}</span>
+                <span id="sn-title">{{ active_topic_obj.label if active_topic_obj else '' }}</span>
+            </div>
+            <div class="c" id="sn-count">
+                {{ active_topic_obj.pages|length if active_topic_obj else 0 }} pages
+            </div>
+        </div>
+        {# HLP-15: `data-active-page` is the server's "you are here" marker in a
+           form the client-side sub-nav re-render can read back. renderPages()
+           rebuilds this list from the JSON nav blob when the user clicks
+           another topic; without this it emitted every entry as a bare `.sn`
+           and clicking away and back left the OPEN page unhighlighted. #}
+        <div class="snlist" id="snlist"
+             data-active-page="{{ app_entry.id if app_entry is defined and app_entry else '' }}">
+            {% for p in (active_topic_obj.pages if active_topic_obj else []) %}
+            <a class="sn{% if app_entry is defined and app_entry and p.id == app_entry.id %} on{% endif %}"
+               data-page-id="{{ p.id }}"
+               href="{{ url_for('view_docs', app_id=p.id) }}">
+                <span>{{ p.title }}</span>
+                {% if not p.is_own %}
+                <span class="dot {{ 'ok' if p.cached else 'no' }}"></span>
+                {% endif %}
+            </a>
+            {% endfor %}
+        </div>
+    </aside>
+
+    <div class="main">
+        <div class="topbar">
+            <span class="crumb" id="crumb">{{ active_topic_obj.label if active_topic_obj else 'Help Center' }}</span>
+            <div class="tb-search">
+                <span class="mag" aria-hidden="true">&#128269;</span>
+                {# HLP-14: combobox semantics so the overlay is reachable and
+                   announced for keyboard/AT users, not mouse-and-Tab only.
+                   `aria-expanded` is maintained by help-center.js. #}
+                <input id="q" type="search" placeholder="Search the offline docs — titles &amp; full text…"
+                       autocomplete="off" role="combobox" aria-expanded="false"
+                       aria-controls="results-list" aria-autocomplete="list"
+                       aria-label="Search the offline documentation">
+                <div class="results" id="results">
+                    <div class="rhd" id="results-hd">Results</div>
+                    <div id="results-list" role="listbox" aria-labelledby="results-hd"
+                         aria-live="polite"></div>
+                </div>
+            </div>
+            {% if is_admin %}
+            <a class="cacheadmin" href="{{ url_for('admin_cache') }}">&#9881; Cache admin</a>
+            {% endif %}
+        </div>
+        <main class="doc">
+            {% block help_content %}{% block content %}{% endblock %}{% endblock %}
+        </main>
+    </div>
+</div>
+<script type="application/json" id="help-nav-data">{{ {"topics": topics, "active_topic": (active_topic_obj.id if active_topic_obj else None)} | tojson }}</script>
+<script src="{{ url_for('static', filename='help-center.js') }}?v={{ stack_version|default('0') }}"></script>
+{% endblock %}

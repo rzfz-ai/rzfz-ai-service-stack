@@ -1,0 +1,12 @@
+version: 1
+metadata:
+  name: "Base - Application Access Policies"
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+# Policies are applied by the python script in init-authentik.sh (apply-policy-
+# bindings) because the Blueprint PolicyBinding serializer has issues with direct
+# object targets. The list is EMPTY on purpose — and it must be `[]`, not a bare
+# `entries:`: YAML reads the latter as null, the importer rejects null with
+# "can not match type NoneType to entries", and this base blueprint sat in
+# status `error` on every box (#1310 rev-B).
+entries: []
